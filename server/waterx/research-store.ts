@@ -12,6 +12,7 @@ import { appendLockTiming } from "./lock-store";
 import { lockLatency } from "./lock-readiness";
 import { createWaterxBackgroundQueue } from "./background-queue";
 import { roundDecisions } from "./round-decision";
+import {refreshHealth} from "./refresh-health";
 import {
   pinResearchRoundPolicy, recordResearchHorizonSnapshot, recordResearchLifecycleEvent,
   recordResearchLiveObservation, recordVerifiedResearchResult, hasResearchHorizonSnapshot,
@@ -139,6 +140,8 @@ export async function captureResearchObservation(input:ResearchObservation,
     }
     if(canonicalLockPersisted){
       const committedAtMs=Date.now();
+      refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,
+        stage:"DATABASE_COMMIT",outcome:"ok",elapsedMs:committedAtMs-canonicalTransactionMs});
       if(committedChoice?.state==="FROZEN"&&committedChoice.side&&committedChoice.probabilityUp!==null)
         roundDecisions.committed(input,{side:committedChoice.side,probabilityUp:committedChoice.probabilityUp,
           decisionAtMs:committedChoice.decisionAtMs,committedAtMs});

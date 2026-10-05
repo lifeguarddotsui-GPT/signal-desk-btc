@@ -9,7 +9,8 @@ const css = readFileSync(new URL("./index.css", import.meta.url), "utf8");
 
 test("research report is interval-polled and never fetched during existing live fixtures", () => {
   assert.match(app, /`\/api\/waterx\/research\?interval=\$\{interval\}`/);
-  assert.match(app, /useApi<ResearchReport>\(researchUrl, 3000, !fixtureMode\)/);
+  assert.match(app, /useApi<ResearchReport>\(researchUrl, 60000, !fixtureMode\)/,
+    "Historical context must not add a high-frequency database poll to live readiness.");
   assert.match(app, /research\.loadedUrl === researchUrl && research\.data\?\.intervalMinutes === interval/);
   assert.match(app, /fixtureMode \? "DEVELOPMENT-ONLY FIXTURES" : "DEVELOPMENT PREVIEW"/);
   assert.match(app, /<details className="fixture-banner fixture-picker"/);
@@ -19,39 +20,24 @@ test("research report is interval-polled and never fetched during existing live 
   assert.match(app, /"synthetic test data · live polling disabled"/);
 });
 
-test("a locked choice is isolated to the exact report interval, round ID, start, and expiry", () => {
-  assert.match(choice, /report\.intervalMinutes !== interval/);
-  assert.match(choice, /report\.currentRound\?\.id !== round\.id/);
-  assert.match(choice, /choice\.roundId !== round\.id/);
-  assert.match(choice, /choice\.startMs !== round\.startMs \|\| choice\.expiryMs !== round\.expiryMs/);
-  assert.match(choice, /currentChoice/);
-  assert.match(choice, /NO_VALID_CHOICE/);
-  assert.match(choice, /"AWAITING_CHECKPOINT"/);
-  assert.match(choice, /reportMatches \? typedReport\?\.lifecycle/);
+test("current round choice and odds use one exact atomic decision projection", () => {
+  assert.match(app, /getAtomicDecisionView\(atomicEnvelope, interval, decisionRound, serverNow\)/);
+  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 2);
+  assert.match(choice, /const decision = view\.decision/);
+  assert.match(choice, /view\.fresh \? view\.lean : null/);
+  assert.match(choice, /view\.fresh \? decision\?\.market/);
+  assert.match(choice, /canonical = decision\?\.canonical/);
+  assert.doesNotMatch(choice, /currentChoice|liveModelEstimate|liveProbabilities|report\?\.lifecycle/);
 });
 
-test("choice, live market baseline, settlement, and entry disclaimer stay explicitly distinct", () => {
-  assert.match(choice, /WaterX Market Baseline/);
-  assert.match(choice, /BluewaterAI model/);
-  assert.match(choice, /"WaterX Market Baseline"/);
-  assert.match(choice, /CHECKPOINT MARKET SNAPSHOT/);
-  assert.match(choice, /Captured only when a choice is locked/);
-  assert.match(choice, /LIVE WATERX MARKET · NOT THE FROZEN CHOICE/);
-  assert.match(choice, /className="research-choice-audit"/);
-  assert.match(choice, /No model · WaterX Market Baseline/);
-  assert.match(choice, /No-choice reason/);
-  assert.match(choice, /estimate\.roundId === round\.id/);
-  assert.match(choice, /estimate\.intervalMinutes === interval/);
-  assert.match(choice, /estimateFresh/);
-  assert.match(choice, /Date\.now\(\) - estimateAt <= 10_000/);
-  assert.match(choice, /not the locked choice/);
-  assert.match(choice, /Research prediction · separate from the read-only \$5 entry assessment/);
-  assert.match(choice, /Settlement pending/);
-  assert.match(choice, /"CORRECT"/);
-  assert.match(choice, /"INCORRECT"/);
-  assert.match(choice, /Frozen before settlement · this prediction cannot change/);
-  assert.match(choice, /FINAL CHOICE: \$\{finalSide\}/);
-  assert.doesNotMatch(choice, /HIGH_LIKELIHOOD|FAVORABLE_RISK_REWARD|advisory/);
+test("current state cannot be sourced from database reports; historical results are isolated", () => {
+  assert.match(choice, /LIVE WATERX MARKET · SAME ATOMIC SNAPSHOT/);
+  assert.match(choice, /HISTORICAL VERIFIED ROUND · NOT CURRENT STATE/);
+  assert.match(choice, /recentChoices/);
+  assert.match(choice, /item\.roundId !== round\?\.id/);
+  assert.match(choice, /research-snapshot-version/);
+  assert.match(choice, /no wallet, transaction, order or execution status/i);
+  assert.doesNotMatch(choice, /report\.currentChoice|report\.liveProbabilities|report\.liveModelEstimate|report\?\.lifecycle/);
 });
 
 test("learning shows only returned scoring and truthful daily-job state", () => {
@@ -96,7 +82,7 @@ test("phone layout is single column and respects reduced motion", () => {
   assert.match(css, /\.research-choice-audit \{ display: none; \}/);
   assert.match(css, /\.research-choice-side \{ display: contents; \}/);
   assert.match(css, /\.research-checkpoint-snapshot \{ display: none; \}/);
-  assert.match(css, /\.research-live-estimate\.is-unavailable \{ display: none; \}/);
+  assert.match(css, /\.research-live-estimate\.is-unavailable, \.research-live-estimate\.is-available \{ display: flex/);
   assert.match(css, /\.research-live-market/);
   assert.match(css, /\.research-choice-card\.is-final/);
   assert.match(css, /\.live-page \.chart-distance-readout \{ display: none; \}/);

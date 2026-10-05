@@ -1,8 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+
 .round-execution-facts > div { min-width: 0; display: grid; align-content: start; gap: 5px; }
-.round-execution-facts > div > span { display: block; font: 9px/1.45 var(--font-mono, monospace); letter-spacing: .04em; color: #92a8a1; }
+.round-execution-facts > div > span { display: block; font: 9px/1.45 var(--mono, monospace); letter-spacing: .04em; color: #92a8a1; }
 .round-execution-facts > div > strong { display: block; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
 .round-execution-facts > div > small { display: block; font-size: 10px; line-height: 1.5; color: #8da19c; }
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
 
 :root {
   color-scheme: dark;
@@ -2001,11 +2002,10 @@ input:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
   .research-disclaimer { margin-top: 5px; font-size: 8px; }
   .research-choice-side { display: contents; }
   .research-checkpoint-snapshot { display: none; }
-  .research-live-estimate.is-unavailable { display: none; }
-  .research-live-estimate.is-available { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 8px; margin: 0 10px 7px; padding: 5px 0 0; border-top: 1px solid var(--edge-soft); }
-  .research-live-estimate.is-available .research-side-label { width: 100%; font-size: 7px; }
-  .research-live-estimate.is-available strong { font-size: 8px; }
-  .research-live-estimate.is-available small { margin: 0; font: 7px var(--mono); }
+  .research-live-estimate.is-unavailable, .research-live-estimate.is-available { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 8px; margin: 0 10px 7px; padding: 5px 0 0; border-top: 1px solid var(--edge-soft); }
+  .research-live-estimate .research-side-label { width: 100%; font-size: 7px; }
+  .research-live-estimate strong { font-size: 8px; }
+  .research-live-estimate small { display: block; max-width: 100%; margin: 0; font: 7px/1.4 var(--mono); overflow-wrap: anywhere; }
   .research-choice-audit { display: block; margin: 0 9px 8px; border: 1px solid var(--edge-soft); border-radius: 4px; background: rgba(4,14,19,.24); }
   .research-choice-audit summary { display: flex; align-items: center; min-height: 24px; padding: 4px 7px; cursor: pointer; list-style: none; color: var(--muted); font: 7px var(--mono); }
   .research-choice-audit summary::-webkit-details-marker { display: none; }

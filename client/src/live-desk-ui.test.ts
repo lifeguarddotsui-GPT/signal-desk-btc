@@ -28,10 +28,11 @@ test("reduced motion leaves the risk/reward assessment as a static bordered stat
 });
 
 test("development fixtures disable every live polling hook and the comparison stream", () => {
-  assert.match(appSource, /useApi<LivePayload>\(liveUrl, 3000, !fixtureMode\)/);
+  assert.match(appSource, /useLiveSnapshot<LivePayload>\(liveUrl, interval, !fixtureMode\)/);
   assert.match(appSource, /useApi<ChartPayload>\(chartUrl, 30000, !fixtureMode\)/);
   assert.match(appSource, /useApi<Record<string, unknown>>\(learningUrl, 60000, !fixtureMode\)/);
   assert.match(appSource, /useApi<WaterxHealth>\(healthUrl, 10000, !fixtureMode\)/);
+  assert.match(appSource, /useApi<RefreshHealthReport>\(refreshHealthUrl, 5000\)/);
   assert.match(appSource, /if \(fixtureMode\) \{ setStreamStatus\("FIXTURE"\); return; \}/);
 });
 

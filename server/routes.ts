@@ -14,6 +14,7 @@ import type { WaterxInterval } from "./waterx/types";
 import { waterxLatencyReport } from "./waterx/latency";
 import { latestCandidateStatus } from "./waterx/candidate-status";
 import { buildWaterxAdvisory } from "./waterx/advisory";
+import {refreshHealth} from "./waterx/refresh-health";
 import { getResearchReport } from "./waterx/research-report";
 import { getBluewaterReport } from "./waterx/bluewater-report";
 import { getLockReport } from "./waterx/lock-report";
@@ -158,10 +159,34 @@ export function registerRoutes(app: Express) {
       intervalMinutes: interval, status: snapshot.status,
       collectorHealth: collector.collectorStatus, healthState: collector.healthState,
       collector,
+      refreshHealth:refreshHealth.read(interval),
       backlogByInterval,
       note: "Collector freshness is per interval and process-memory only. It does not establish durable round coverage or continuity across restarts; settlement backlog is reported separately.",
     });
   }));
+  app.get("/api/waterx/refresh-health", (req,res)=>{
+    const interval=waterxInterval(req,res);
+    if(!interval)return;
+    const snapshot=waterxLive(interval);
+    res.set("Cache-Control","no-store").json({intervalMinutes:interval,
+      collector:getWaterxDiagnostics(interval),captureQueues:snapshot.captureQueues,
+      refreshHealth:refreshHealth.read(interval)});
+  });
+  const decisionClientEvent=z.object({interval:z.union([z.literal(5),z.literal(15)]),
+    stage:z.enum(["REQUEST_START","BROWSER_RECEIPT","BROWSER_RENDER"]),
+    attempt:z.number().int().min(0).max(2),elapsedMs:z.number().finite().min(0).max(60000),
+    roundId:z.string().min(1).max(128),streamId:z.string().uuid(),stateVersion:z.number().int().positive()}).strict();
+  app.post("/api/waterx/decision-client-event",(req,res)=>{
+    const parsed=decisionClientEvent.safeParse(req.body);
+    if(!parsed.success){res.status(400).json({error:"Invalid decision timing event."});return;}
+    const event=parsed.data,current=waterxLive(event.interval).decision;
+    // Browser events are advisory only; never persist bodies or influence server health/authorization.
+    if(current&&current.roundId===event.roundId&&current.streamId===event.streamId&&
+      event.stateVersion<=current.stateVersion&&current.stateVersion-event.stateVersion<1000)
+      refreshHealth.record({interval:event.interval,roundId:current.roundId,stage:event.stage,outcome:"ok",
+        elapsedMs:event.elapsedMs,retryCount:event.attempt,clock:"browser-untrusted"});
+    res.status(202).json({status:"diagnostic-only"});
+  });
   // Coverage is intentionally separate from the high-frequency health route:
   // its bounded historical scan must not delay live market reads.
   app.get("/api/waterx/coverage", safe(async (_req, res) => {

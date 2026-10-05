@@ -7,13 +7,15 @@ const panel = readFileSync(new URL("./BluewaterResearchPanel.tsx", import.meta.u
 const choice = readFileSync(new URL("./ResearchChoiceCard.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("./index.css", import.meta.url), "utf8");
 
-test("Bluewater is fetched separately from the unchanged WaterX research baseline", () => {
+test("Bluewater and database research reports remain separate from the atomic live choice", () => {
   assert.match(app, /`\/api\/waterx\/bluewater\?interval=\$\{interval\}`/);
   assert.match(app, /`\/api\/waterx\/research\?interval=\$\{interval\}`/);
   assert.match(app, /useApi<BluewaterReport>\(bluewaterUrl,/);
   assert.match(app, /bluewater\.loadedUrl === bluewaterUrl && bluewater\.data\?\.intervalMinutes === interval/);
   assert.match(panel, /WaterX Market Baseline is a separate market observation, not an independent AI model/);
-  assert.match(choice, /WaterX Market Baseline/);
+  assert.match(choice, /LIVE WATERX MARKET · SAME ATOMIC SNAPSHOT/);
+  assert.match(choice, /recentChoices/);
+  assert.doesNotMatch(choice, /WaterX Market Baseline|currentChoice|liveProbabilities/);
 });
 
 test("absent champion and shadow-only forecasts never produce a qualified Bluewater probability", () => {

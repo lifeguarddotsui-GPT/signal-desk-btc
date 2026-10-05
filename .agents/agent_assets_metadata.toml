@@ -616,3 +616,17 @@ mtime_ms = 1791168736112
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/e3713105-0ab2-4816-9570-f04a0a6ec68e/a77147ca-f5ce-4465-b456-51d641fcb4ae"
 storage_version_token = "1791168736936033"
 content_type = "text/html"
+
+[[outputs]]
+id = "BaWozM40Tbf83o6BM404s"
+uri = "file://reports/atomic-snapshot-repair.html"
+type = "html"
+title = "Atomic snapshot repair — verification and remaining release gates"
+description = "Preview repair evidence, actual desktop and 320–430px captures, test results, confirmed capture constraint, and unresolved production/mainnet gates. Not a beta release approval."
+logical_id = "5f2eedd3-a483-4f3d-9743-2da207332589"
+content_hash = "sha256:84e26143b3b078f4f322f96b67439c0f008468281e633cf3267fc41201ae3708"
+size = 639234
+mtime_ms = 1791216512285
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/5f2eedd3-a483-4f3d-9743-2da207332589/401c0d49-1087-40bb-b0f8-a2741602b8b4"
+storage_version_token = "1791216515841563"
+content_type = "text/html"

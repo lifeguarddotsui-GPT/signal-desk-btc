@@ -10,8 +10,11 @@ test("live readiness is exact-round, immutable on commit, bounded and never exec
   const live=tracker.read(first,1209000)!;
   tracker.observe(first,{atMs:1209500,receivedAtMs:1209000,providerSourceAtMs:null,
     probabilityUp:.8,probabilityDown:.2,sourceHealthy:true});
-  assert.equal(tracker.read(first,1209500)!.stateVersion,live.stateVersion,
+  const reread=tracker.read(first,1209500)!;
+  assert.ok(reread.stateVersion>live.stateVersion,"Each publication is versioned.");
+  assert.equal(tracker.read(first,1209000)!.readiness.components.observationCount,live.readiness.components.observationCount,
     "Reusing a cached HTTP response cannot manufacture another readiness observation");
+  assert.equal(reread.market!.receivedAtMs,live.market!.receivedAtMs);
   assert.equal(live.network,"sui:mainnet");assert.equal(live.tradeAllowed,false);
   assert.equal(live.latestSafeOrderAtMs,null);assert.equal(live.executionWindowRemainingMs,null);
   assert.ok(live.readiness.score>=0&&live.readiness.score<=100);

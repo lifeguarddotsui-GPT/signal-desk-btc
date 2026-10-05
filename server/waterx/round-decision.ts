@@ -1,50 +1,91 @@
+import {randomUUID} from "node:crypto";
 import {lockPolicy,type LockObservation} from "../../shared/lock-readiness";
 import type {RoundDecision} from "../../shared/round-decision";
+import {validWaterxProbabilityPair} from "../../shared/round-decision";
+import {WATERX_RESEARCH_CONFIG} from "../../shared/waterx-research";
 import {evaluateLockReadiness} from "./lock-readiness";
 
 type Identity={intervalMinutes:5|15;roundId:string;startMs:number;expiryMs:number};
-type Entry={identity:Identity;observations:LockObservation[];version:number;updatedAtMs:number;
-  canonical:RoundDecision["canonical"]};
+type Entry={identity:Identity;observations:LockObservation[];updatedAtMs:number;
+  canonical:RoundDecision["canonical"];persistence:RoundDecision["persistence"]};
 const key=(r:Identity)=>`${r.intervalMinutes}:${r.roundId}:${r.startMs}:${r.expiryMs}`;
+const validIdentity=(r:Identity)=>!!r.roundId&&(r.intervalMinutes===5||r.intervalMinutes===15)&&
+  Number.isSafeInteger(r.startMs)&&Number.isSafeInteger(r.expiryMs)&&
+  r.expiryMs-r.startMs===r.intervalMinutes*60000;
 
-/** Source-driven progress must not wait for pooled database reporting queries.
- * This is disposable display evidence, NEVER execution authority or durable choice storage. */
-export function createRoundDecisionTracker(){
+/** One disposable atomic publication. Never execution authority or durable choice storage. */
+export function createRoundDecisionTracker(streamId=randomUUID()){
   const entries=new Map<number,Entry>();
   let version=0;
+  function discover(identity:Identity,now:number):Entry|null {
+    if(!validIdentity(identity)||!Number.isSafeInteger(now)||now<identity.startMs||now>=identity.expiryMs)return null;
+    let entry=entries.get(identity.intervalMinutes);
+    if(entry&&identity.startMs<entry.identity.startMs)return null;
+    if(entry&&identity.startMs===entry.identity.startMs&&key(entry.identity)!==key(identity))return null;
+    if(!entry||key(entry.identity)!==key(identity)){
+      entry={identity:{...identity},observations:[],updatedAtMs:now,canonical:null,
+        persistence:{status:"WAITING_CHECKPOINT",updatedAtMs:now,errorClass:null}};
+      entries.set(identity.intervalMinutes,entry);
+    }
+    return entry;
+  }
+  function persistence(identity:Identity,status:"QUEUED"|"WRITING"|"FAILED",now:number,errorClass:string|null=null){
+    const entry=entries.get(identity.intervalMinutes);
+    const target=identity.expiryMs-WATERX_RESEARCH_CONFIG.primaryLockSeconds[identity.intervalMinutes]*1000;
+    if(!entry||key(entry.identity)!==key(identity)||entry.canonical||now<target||now>=identity.expiryMs)return;
+    if(status==="QUEUED"&&entry.persistence.status==="WRITING")return;
+    entry.persistence={status,updatedAtMs:now,errorClass};
+  }
   return {
+    discovered(identity:Identity,now:number){discover(identity,now);},
     observe(identity:Identity,observation:LockObservation){
-      if(!identity.roundId||identity.expiryMs-identity.startMs!==identity.intervalMinutes*60000||
-        !Number.isSafeInteger(observation.atMs)||observation.atMs<identity.startMs||
-        observation.atMs>=identity.expiryMs)return;
-      let entry=entries.get(identity.intervalMinutes);
-      if(entry&&identity.startMs<entry.identity.startMs)return; // delayed old-round response
-      if(!entry||key(entry.identity)!==key(identity)){
-        entry={identity:{...identity},observations:[],version:++version,updatedAtMs:observation.atMs,canonical:null};
-        entries.set(identity.intervalMinutes,entry);
-      }
+      if(!Number.isSafeInteger(observation.atMs)||!Number.isSafeInteger(observation.receivedAtMs)||
+        observation.receivedAtMs<identity.startMs||observation.receivedAtMs>observation.atMs||
+        !observation.sourceHealthy||!validWaterxProbabilityPair(observation.probabilityUp,observation.probabilityDown))return;
+      const entry=discover(identity,observation.atMs);
+      if(!entry)return;
       const last=entry.observations.at(-1);
       if(last&&(last.atMs>=observation.atMs||last.receivedAtMs>=observation.receivedAtMs))return;
       entry.observations.push({...observation});
       entry.observations=entry.observations.filter(o=>o.atMs>=observation.atMs-120000).slice(-180);
-      entry.updatedAtMs=observation.atMs;entry.version=++version;
+      entry.updatedAtMs=observation.atMs;
+    },
+    queued(identity:Identity,now:number){persistence(identity,"QUEUED",now);},
+    writing(identity:Identity,now:number){persistence(identity,"WRITING",now);},
+    failed(identity:Identity,errorClass:string,now:number){persistence(identity,"FAILED",now,errorClass);},
+    writeFinished(identity:Identity,now:number):boolean|null{
+      const entry=entries.get(identity.intervalMinutes);
+      const target=identity.expiryMs-WATERX_RESEARCH_CONFIG.primaryLockSeconds[identity.intervalMinutes]*1000;
+      if(!entry||key(entry.identity)!==key(identity)||now<target||now>=identity.expiryMs)return null;
+      if(entry.canonical)return true;
+      entry.persistence={status:"AWAITING_CHOICE",updatedAtMs:now,errorClass:"NO_CANONICAL_CHOICE"};
+      return false;
     },
     committed(identity:Identity,canonical:NonNullable<RoundDecision["canonical"]>){
       const entry=entries.get(identity.intervalMinutes);
       if(!entry||key(entry.identity)!==key(identity)||entry.canonical||
+        (canonical.side!=="UP"&&canonical.side!=="DOWN")||
+        !Number.isSafeInteger(canonical.decisionAtMs)||
         canonical.decisionAtMs<identity.startMs||canonical.decisionAtMs>=identity.expiryMs||
-        (canonical.committedAtMs!==null&&canonical.committedAtMs<canonical.decisionAtMs)||
+        (canonical.committedAtMs!==null&&(!Number.isSafeInteger(canonical.committedAtMs)||
+          canonical.committedAtMs<canonical.decisionAtMs))||
         !Number.isFinite(canonical.probabilityUp)||canonical.probabilityUp<0||canonical.probabilityUp>1)return;
-      entry.canonical={...canonical};entry.version=++version;
+      entry.canonical={...canonical};
+      entry.persistence={status:"COMMITTED",updatedAtMs:canonical.committedAtMs??canonical.decisionAtMs,errorClass:null};
     },
     read(identity:Identity,now:number):RoundDecision|null{
       const entry=entries.get(identity.intervalMinutes);
       if(!entry||key(entry.identity)!==key(identity)||now<identity.startMs||now>=identity.expiryMs)return null;
       const policy=lockPolicy(identity.intervalMinutes);
-      return {...identity,network:"sui:mainnet",policyVersion:policy.version,stateVersion:entry.version,
-        updatedAtMs:entry.updatedAtMs,publishedAtMs:now,
-        readiness:evaluateLockReadiness(policy,identity.startMs,identity.expiryMs,entry.observations,now),
-        canonical:entry.canonical?{...entry.canonical}:null,
+      // Age is based on actual HTTP receipt, not replay of a cached response.
+      const observations=entry.observations.map(o=>({...o,atMs:o.receivedAtMs}));
+      const last=entry.observations.at(-1);
+      const readiness=evaluateLockReadiness(policy,identity.startMs,identity.expiryMs,observations,now);
+      return {...identity,format:"waterx-live-decision-v2",streamId,network:"sui:mainnet",
+        policyVersion:policy.version,stateVersion:++version,updatedAtMs:entry.updatedAtMs,publishedAtMs:now,
+        readiness,market:last?{probabilityUp:last.probabilityUp,probabilityDown:last.probabilityDown,
+          observedAtMs:last.atMs,receivedAtMs:last.receivedAtMs,providerOddsAtMs:null}:null,
+        persistence:{...entry.persistence},canonical:entry.canonical?{...entry.canonical}:null,
         latestSafeOrderAtMs:null,executionWindowRemainingMs:null,tradeAllowed:false,
         executionBlocker:"HOLD: no verified executable quote, qualified signal or measured lock-to-accepted latency. Research readiness is not trade authority.",
         timestampSemantics:"Application receipt/evaluation/publication clocks; provider odds time unknown; commit is application acknowledgement"};

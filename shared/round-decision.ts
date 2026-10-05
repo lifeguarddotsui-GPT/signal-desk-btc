@@ -1,9 +1,20 @@
 import type {LockReadiness} from "./lock-readiness";
 
+/** Match the stored adaptive observation CHECK; never normalize an invalid pair into evidence. */
+export function validWaterxProbabilityPair(up:unknown,down:unknown):boolean{
+  return typeof up==="number"&&typeof down==="number"&&Number.isFinite(up)&&Number.isFinite(down)&&
+    up>=0&&up<=1&&down>=0&&down<=1&&Math.abs(up+down-1)<0.000001;
+}
+
 export type RoundDecision = {
+  format:"waterx-live-decision-v2"; streamId:string;
   network:"sui:mainnet"; intervalMinutes:5|15; roundId:string; startMs:number; expiryMs:number;
   policyVersion:string; stateVersion:number; updatedAtMs:number; publishedAtMs:number;
   readiness:LockReadiness;
+  market:null|{probabilityUp:number;probabilityDown:number;observedAtMs:number;
+    receivedAtMs:number;providerOddsAtMs:null};
+  persistence:{status:"WAITING_CHECKPOINT"|"QUEUED"|"WRITING"|"FAILED"|"AWAITING_CHOICE"|"COMMITTED";
+    updatedAtMs:number;errorClass:string|null};
   canonical:null|{side:"UP"|"DOWN";probabilityUp:number;decisionAtMs:number;committedAtMs:number|null};
   latestSafeOrderAtMs:null; executionWindowRemainingMs:null;
   executionBlocker:string; tradeAllowed:false;

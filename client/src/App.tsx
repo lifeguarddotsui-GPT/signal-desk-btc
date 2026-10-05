@@ -9,13 +9,16 @@ import { AdvisoryCards } from "./AdvisoryCards";
 import { type AdvisoryPayload } from "./advisory-contract";
 import type { ResearchDailyJob, ResearchInterval, ResearchReport } from "../../shared/waterx-research";
 import type { HistorySource } from "../../shared/canonical-history";
+import type { RoundDecision } from "../../shared/round-decision";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
 import CanonicalHistory from "./CanonicalHistory";
 import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
 import type { BluewaterReport } from "../../shared/bluewater-research";
-import { RoundDecisionPanel, type RoundDecisionEvidence } from "./LockReadinessPanel";
+import { RoundDecisionPanel } from "./LockReadinessPanel";
+import { getAtomicDecisionView, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
+import { useLiveSnapshot } from "./useLiveSnapshot";
 import AgentPage from "./AgentPage";
 
 type Interval = 5 | 15;
@@ -23,7 +26,7 @@ type Point = { at: number | string; price: number | null; source?: string; sourc
 type SideAvailability = { probability?: string; price?: string; pricePositive?: boolean; executable?: false; side?: string; reason?: string | null };
 type OddsAvailability = { status?: "available" | "partial" | "locked" | "unavailable" | string; reason?: string | null; up?: SideAvailability; down?: SideAvailability };
 type Availability = { roundMetadata?: { status?: string; reason?: string | null }; referencePrice?: { status?: string; reason?: string | null }; odds?: OddsAvailability; comparisonPrice?: { status?: string; reason?: string | null } };
-type LivePayload = {
+type LivePayload = LiveSnapshotEnvelope & {
   serverTime?: string; status?: string; intervalMinutes?: number; reason?: string;
   round?: { id: string; marketId?: string; startMs: number; expiryMs: number; referencePrice: number | null; anchorConfirmed: boolean; phase?: string; url?: string } | null;
   odds?: { up: number | null; down: number | null; upPriceCents: number | null; downPriceCents: number | null; asOf: string; source: string } | null;
@@ -31,11 +34,21 @@ type LivePayload = {
   availability?: Availability;
   learning?: Record<string, unknown>;
   advisory?: AdvisoryPayload & { amountEnteredUsd?: number };
-  decision?: RoundDecisionEvidence | null;
+  decision?: RoundDecision | null;
 };
 type ChartCoverage = { startMs?: number; endMs?: number; expectedSamples?: number; observedSamples?: number; percent?: number; partial?: boolean; status?: string; reason?: string; observationSpanMs?: number; requestedDurationMs?: number; missingStartMs?: number | null; missingEndMs?: number | null; gapCount?: number; observedPointCount?: number; measurement?: string };
 type ChartPayload = { windowMinutes: number; source: string; points: Point[]; coverage?: ChartCoverage };
 type WaterxHealth = { collector?: { lastValidObservationAt?: string | null; lastError?: string | null } };
+type RefreshHealthReport = {
+  collector?: unknown;
+  captureQueues?: unknown;
+  refreshHealth?: {
+    scope?: string;
+    errors?: Array<{ stage: string; failures: number; lastErrorClass: string | null; atMs: number | null }>;
+    alerts?: string[];
+    events?: unknown[];
+  };
+};
 type ResearchOperations = {
   status: "ok";
   intervalMinutes: number;
@@ -171,11 +184,12 @@ function LivePage() {
   const researchUrl = `/api/waterx/research?interval=${interval}`;
   const lockReadinessUrl = `/api/waterx/lock-readiness?interval=${interval}`;
   const bluewaterUrl = `/api/waterx/bluewater?interval=${interval}`;
-  const live = useApi<LivePayload>(liveUrl, 3000, !fixtureMode);
+  const live = useLiveSnapshot<LivePayload>(liveUrl, interval, !fixtureMode);
+  const validatedAtomicSnapshot = useRef<{ url: string; data: LivePayload } | null>(null);
   const chart = useApi<ChartPayload>(chartUrl, 30000, !fixtureMode);
   const learning = useApi<Record<string, unknown>>(learningUrl, 60000, !fixtureMode);
   const health = useApi<WaterxHealth>(healthUrl, 10000, !fixtureMode);
-  const research = useApi<ResearchReport>(researchUrl, 3000, !fixtureMode);
+  const research = useApi<ResearchReport>(researchUrl, 60000, !fixtureMode);
   const lockReadiness = useApi<LockReadinessReport>(lockReadinessUrl, 60000, !fixtureMode);
   const bluewater = useApi<BluewaterReport>(bluewaterUrl, 5000, !fixtureMode);
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
@@ -208,17 +222,41 @@ function LivePage() {
   const payload = fixtureMode ? fixturePayload
     : live.data?.intervalMinutes === interval ? live.data : null;
   const round = payload?.round ?? null;
-  const expectedAdvisoryIdentity = round?.marketId ? {
-    marketId: round.marketId, roundId: round.id, intervalMinutes: interval,
-    startMs: round.startMs, expiryMs: round.expiryMs,
-  } : null;
   const serverMs = payload?.serverTime ? Date.parse(payload.serverTime) : NaN;
-  const serverNow = fixtureMode ? now : Number.isFinite(serverMs) ? now + (serverMs - live.updated) : now;
+  const serverNow = fixtureMode ? now : Number.isFinite(serverMs) ? projectServerClock(serverMs, live.updated, now) : now;
   const snapshotToleranceMs = interval === 5 ? 16_000 : 31_000;
-  const snapshotCurrent = !!fixtureMode || (!live.error && live.loadedUrl === liveUrl &&
+  const snapshotCurrent = !!fixtureMode || (live.loadedUrl === liveUrl &&
     isFreshWaterxSnapshot(live.updated, payload?.serverTime, now, snapshotToleranceMs) &&
     payload?.intervalMinutes === interval);
   const roundCurrent = snapshotCurrent && !!round && isActiveWaterxRound(payload?.intervalMinutes, interval, round.startMs, round.expiryMs, serverNow);
+  const activeMetadataRound = !fixtureMode && snapshotCurrent && roundCurrent && round
+    ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null;
+  const receivedAtomicSnapshot = !fixtureMode && live.atomicLoadedUrl === liveUrl &&
+    live.atomicData?.decision && live.atomicData.round ? live.atomicData : null;
+  if (receivedAtomicSnapshot) validatedAtomicSnapshot.current = { url: liveUrl, data: receivedAtomicSnapshot };
+  const cachedAtomicSnapshot = !fixtureMode && validatedAtomicSnapshot.current?.url === liveUrl
+    ? validatedAtomicSnapshot.current.data : null;
+  const atomicEnvelope = receivedAtomicSnapshot ?? cachedAtomicSnapshot;
+  const verifiedRootRound = live.loadedUrl === liveUrl && payload?.intervalMinutes === interval
+    ? payload.round ?? null : null;
+  const cachedRound = cachedAtomicSnapshot?.round;
+  const verifiedDifferentRound = !!verifiedRootRound && !!cachedRound &&
+    (verifiedRootRound.id !== cachedRound.id || verifiedRootRound.startMs !== cachedRound.startMs ||
+      verifiedRootRound.expiryMs !== cachedRound.expiryMs);
+  const retainedDecisionRound = cachedRound && !verifiedDifferentRound && serverNow < cachedRound.expiryMs
+    ? { id: cachedRound.id, startMs: cachedRound.startMs, expiryMs: cachedRound.expiryMs } : null;
+  const decisionRound = fixtureMode && roundCurrent && round
+    ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs }
+    : activeMetadataRound ?? retainedDecisionRound;
+  const atomicDecisionView = fixtureMode
+    ? getAtomicDecisionView(null, interval, null, serverNow)
+    : getAtomicDecisionView(atomicEnvelope, interval, decisionRound, serverNow);
+  const snapshotRefreshState = {
+    pending: !fixtureMode && live.loading,
+    error: !fixtureMode && live.errorUrl === liveUrl ? live.error : "",
+    retryCount: fixtureMode ? 0 : live.retryCount,
+    failureCount: fixtureMode ? 0 : live.failureCount,
+  };
   useEffect(() => {
     const waitingOnRound = !roundCurrent && ["STALE", "ROLLOVER", "COLLECTION_DELAYED"].includes(payload?.status || "");
     if (waitingOnRound && rolloverSince.current == null) rolloverSince.current = now;
@@ -241,15 +279,23 @@ function LivePage() {
     comparisonMs <= (Number.isFinite(serverNow) ? serverNow : now) + 1000 &&
     now - comparisonMs <= 14000 && now - comparisonMs >= -1000 &&
     isCoinbaseSource(comparison.source);
-  const odds = payload?.odds;
-  const oddsAvailability = payload?.availability?.odds;
+  const decisionMarket = !fixtureMode && atomicDecisionView.fresh
+    ? atomicDecisionView.decision?.market ?? null : null;
+  const atomicOdds = !fixtureMode ? atomicEnvelope?.odds ?? null : null;
+  const atomicOddsAsOfMs = atomicOdds?.asOf ? Date.parse(atomicOdds.asOf) : NaN;
+  const atomicQuoteMatchesDecision = !!decisionMarket && !!atomicOdds &&
+    Number.isFinite(atomicOddsAsOfMs) && atomicOddsAsOfMs === decisionMarket.observedAtMs &&
+    atomicOdds.up === decisionMarket.probabilityUp && atomicOdds.down === decisionMarket.probabilityDown;
+  const odds = fixtureMode ? payload?.odds : atomicQuoteMatchesDecision ? atomicOdds : null;
+  const oddsAvailability = fixtureMode ? payload?.availability?.odds
+    : atomicQuoteMatchesDecision ? atomicEnvelope?.availability?.odds : undefined;
   const oddsDisplay = selectWaterxOddsDisplay({
-    snapshotCurrent,
-    roundCurrent,
+    snapshotCurrent: fixtureMode ? snapshotCurrent : atomicQuoteMatchesDecision,
+    roundCurrent: fixtureMode ? roundCurrent : atomicQuoteMatchesDecision,
     requestedInterval: interval,
-    responseInterval: payload?.intervalMinutes,
-    roundId: round?.id,
-    roundStartMs: round?.startMs,
+    responseInterval: fixtureMode ? payload?.intervalMinutes : atomicEnvelope?.intervalMinutes,
+    roundId: fixtureMode ? round?.id : atomicEnvelope?.round?.id,
+    roundStartMs: fixtureMode ? round?.startMs : atomicEnvelope?.round?.startMs,
     serverNowMs: serverNow,
     odds,
     availability: oddsAvailability,
@@ -260,14 +306,23 @@ function LivePage() {
   const lockedPair = oddsDisplay.lockedPair;
   const upProbabilityCurrent = oddsDisplay.up.probability !== null;
   const downProbabilityCurrent = oddsDisplay.down.probability !== null;
-  const advisory = !fixtureMode && live.loadedUrl === liveUrl ? payload?.advisory : null;
-  const matchedAdvisory = roundCurrent && !!expectedAdvisoryIdentity &&
-    advisory?.identity?.marketId === expectedAdvisoryIdentity.marketId &&
-    advisory?.identity?.roundId === round?.id &&
-    advisory?.identity?.intervalMinutes === expectedAdvisoryIdentity.intervalMinutes &&
-    advisory?.identity?.startMs === expectedAdvisoryIdentity.startMs &&
-    advisory?.identity?.expiryMs === expectedAdvisoryIdentity.expiryMs &&
-    advisory?.amountEnteredUsd === 5 ? advisory : null;
+  const atomicAdvisory = !fixtureMode && atomicDecisionView.fresh && atomicQuoteMatchesDecision
+    ? atomicEnvelope?.advisory : null;
+  const expectedAdvisoryIdentity = fixtureMode && round?.marketId ? {
+    marketId: round.marketId, roundId: round.id, intervalMinutes: interval,
+    startMs: round.startMs, expiryMs: round.expiryMs,
+  } : !fixtureMode && decisionRound && atomicEnvelope?.round?.marketId ? {
+    marketId: atomicEnvelope.round.marketId, roundId: decisionRound.id, intervalMinutes: interval,
+    startMs: decisionRound.startMs, expiryMs: decisionRound.expiryMs,
+  } : null;
+  const matchedAdvisory = !fixtureMode && atomicDecisionView.fresh && atomicQuoteMatchesDecision &&
+    !!expectedAdvisoryIdentity &&
+    atomicAdvisory?.identity?.marketId === expectedAdvisoryIdentity.marketId &&
+    atomicAdvisory?.identity?.roundId === expectedAdvisoryIdentity.roundId &&
+    atomicAdvisory?.identity?.intervalMinutes === expectedAdvisoryIdentity.intervalMinutes &&
+    atomicAdvisory?.identity?.startMs === expectedAdvisoryIdentity.startMs &&
+    atomicAdvisory?.identity?.expiryMs === expectedAdvisoryIdentity.expiryMs &&
+    atomicAdvisory?.amountEnteredUsd === 5 ? atomicAdvisory : null;
   const fixtureClassification = fixtureMode?.startsWith("high-likelihood") ? "HIGH_LIKELIHOOD"
     : fixtureMode?.startsWith("favorable-risk-reward") ? "FAVORABLE_RISK_REWARD" : "OBSERVE";
   const selectedFixtureSide = fixtureMode?.endsWith("-down") ? "down" : "up";
@@ -437,6 +492,19 @@ function LivePage() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { disposed = true; if (retry) clearTimeout(retry); streamRef.current?.close(); document.removeEventListener("visibilitychange", onVisible); };
   }, [fixtureMode]);
+  const latestStreamPoint = stream.at(-1);
+  const latestStreamAt = latestStreamPoint
+    ? typeof latestStreamPoint.at === "number" ? latestStreamPoint.at : Date.parse(latestStreamPoint.at)
+    : NaN;
+  const streamCoinbaseFresh = !fixtureMode && !!latestStreamPoint && !latestStreamPoint.gap &&
+    isCoinbaseSource(latestStreamPoint.source) && typeof latestStreamPoint.price === "number" &&
+    Number.isFinite(latestStreamPoint.price) && latestStreamPoint.price > 0 &&
+    Number.isFinite(latestStreamAt) && now - latestStreamAt >= -1000 && now - latestStreamAt <= 14_000;
+  const coinbasePriceFresh = comparisonFresh || streamCoinbaseFresh;
+  const coinbaseDisplayPrice = comparisonFresh ? comparison?.price ?? null
+    : streamCoinbaseFresh ? latestStreamPoint?.price ?? null : null;
+  const coinbaseDisplayAt = comparisonFresh ? comparison?.asOf : streamCoinbaseFresh ? latestStreamPoint?.at : undefined;
+  const coinbaseDisplaySource = comparisonFresh ? "HTTP comparison" : streamCoinbaseFresh ? "Coinbase SSE" : "";
   useEffect(() => {
     const pending = pendingPaint.current;
     if (!pending || String(stream.at(-1)?.eventId ?? "") !== pending.id) return;
@@ -474,23 +542,21 @@ function LivePage() {
         {fixtureNames.map(name => <option key={name} value={name}>{name.toUpperCase().replaceAll("-", " ")}</option>)}
       </select>
     </details>}
-    {!fixtureMode && live.error && live.errorUrl === liveUrl && payload == null ? <ErrorBox message={live.error} retry={live.reload} /> : !fixtureMode && live.loading && !payload ? <Skeleton height={280} /> : <>
       <div className="metric-ribbon">
         <div className={`anchor-metric${waterxReferenceValid ? "" : " reference-unavailable"}`}><span className="metric-label">WATERX PRICE TO BEAT{roundProvisional && <i className="provisional-badge">PROVISIONAL</i>}</span><strong>{waterxReferenceValid ? fmtUsd(round?.referencePrice) : "WaterX reference unavailable"}</strong><small>{waterxReferenceValid ? `${roundProvisional ? "Confirmation pending" : "WaterX reported reference"} · age not reported by source` : `${referenceAvailability?.reason || "No positive reference for the active round"} · last verified age not reported`}</small></div>
-        <div className="comparison-metric"><span className="metric-label">CURRENT PRICE <b>· COINBASE</b></span><strong className={comparisonFresh && priceDelta != null ? priceDelta >= 0 ? "gain" : "loss" : comparisonFresh ? "comparison-live" : "dim"}>{comparisonFresh ? fmtUsd(comparison?.price) : "—"}</strong><small>{comparisonFresh ? `Coinbase comparison · ${ago(comparison?.asOf)}` : "No fresh Coinbase comparison quote"}</small></div>
+        <div className="comparison-metric"><span className="metric-label">CURRENT PRICE <b>· COINBASE</b></span><strong className={coinbasePriceFresh && priceDelta != null ? priceDelta >= 0 ? "gain" : "loss" : coinbasePriceFresh ? "comparison-live" : "dim"}>{coinbasePriceFresh ? fmtUsd(coinbaseDisplayPrice) : "—"}</strong><small>{coinbasePriceFresh ? `${coinbaseDisplaySource} · ${ago(coinbaseDisplayAt)}` : "No fresh Coinbase comparison quote"}</small></div>
       </div>
       <div className="distance-line">
         <div className="distance-readout"><span>DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Percent unavailable" : `${Math.abs(priceDeltaPct).toFixed(3)}% ${priceDelta! >= 0 ? "above" : "below"}`}</small></div>
         <span className="round-count"><span>BTC · {interval}m CLOSES</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong></span>
       </div>
       <RoundDecisionPanel
-        decision={!fixtureMode && live.loadedUrl === liveUrl ? payload?.decision ?? null : null}
+        view={atomicDecisionView}
         interval={interval as ResearchInterval}
-        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
+        round={decisionRound}
         now={serverNow}
-        browserReceivedAtMs={live.updated}
-        loading={!fixtureMode && live.loading && !payload}
-        error={!fixtureMode && live.error && live.errorUrl === liveUrl ? live.error : undefined}
+        browserReceivedAtMs={live.atomicUpdated}
+        refresh={snapshotRefreshState}
         retry={live.reload}
         simulated={!!fixtureMode}
         historicalReport={!fixtureMode && lockReadiness.loadedUrl === lockReadinessUrl &&
@@ -498,29 +564,6 @@ function LivePage() {
         historicalLoading={!fixtureMode && lockReadiness.loading}
         historicalError={!fixtureMode && lockReadiness.error && lockReadiness.errorUrl === lockReadinessUrl ? lockReadiness.error : undefined}
         retryHistorical={lockReadiness.reload}
-      />
-      <ResearchChoiceCard
-        report={research.loadedUrl === researchUrl && research.data?.intervalMinutes === interval ? research.data : null}
-        interval={interval as ResearchInterval}
-        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
-        loading={!fixtureMode && research.loading}
-        error={!fixtureMode && research.error && research.errorUrl === researchUrl ? research.error : undefined}
-        marketOdds={{
-          up: upProbabilityCurrent ? fmtProbability(odds?.up) : "Unavailable",
-          down: downProbabilityCurrent ? fmtProbability(odds?.down) : "Unavailable",
-          current: oddsFresh && roundCurrent,
-          source: odds?.source ?? "WaterX",
-          asOf: odds?.asOf,
-        }}
-      />
-      <BluewaterResearchPanel
-        report={bluewater.loadedUrl === bluewaterUrl && bluewater.data?.intervalMinutes === interval ? bluewater.data : null}
-        interval={interval}
-        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
-        loading={!fixtureMode && bluewater.loading}
-        error={!fixtureMode && bluewater.error && bluewater.errorUrl === bluewaterUrl ? bluewater.error : ""}
-        retry={bluewater.reload}
-        compact
       />
        <div className="chart-market-layout">
         <section className="chart-panel">
@@ -535,7 +578,8 @@ function LivePage() {
       </section>
         <AdvisoryCards advisory={fixtureMode ? fixtureAdvisory : matchedAdvisory}
           expectedIdentity={expectedAdvisoryIdentity}
-          roundCurrent={roundCurrent} quoteCurrent={oddsFresh && (fixtureMode !== null || matchedAdvisory !== null)}
+          roundCurrent={fixtureMode ? roundCurrent : atomicDecisionView.fresh}
+          quoteCurrent={fixtureMode ? oddsFresh : atomicDecisionView.fresh && atomicQuoteMatchesDecision && oddsFresh}
           locked={{ up: upLocked || lockedPair, down: downLocked || lockedPair }}
           nowMs={now} fixtureName={fixtureMode}
           marketOdds={{
@@ -548,10 +592,29 @@ function LivePage() {
             downPrice: oddsFresh && oddsDisplay.down.priceCents != null ? fmtOdds(oddsDisplay.down.priceCents) : "Withheld",
           }} />
         </div>
+      <ResearchChoiceCard
+        report={research.loadedUrl === researchUrl && research.data?.intervalMinutes === interval ? research.data : null}
+        interval={interval as ResearchInterval}
+        round={decisionRound}
+        view={atomicDecisionView}
+        refresh={snapshotRefreshState}
+        retrySnapshot={live.reload}
+        fixture={!!fixtureMode}
+        loading={!fixtureMode && research.loading}
+        error={!fixtureMode && research.error && research.errorUrl === researchUrl ? research.error : undefined}
+      />
+      <BluewaterResearchPanel
+        report={bluewater.loadedUrl === bluewaterUrl && bluewater.data?.intervalMinutes === interval ? bluewater.data : null}
+        interval={interval}
+        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
+        loading={!fixtureMode && bluewater.loading}
+        error={!fixtureMode && bluewater.error && bluewater.errorUrl === bluewaterUrl ? bluewater.error : ""}
+        retry={bluewater.reload}
+        compact
+      />
           <details className="round-details"><summary><span>Data health &amp; source details</span><ChevronDown size={14} /></summary><div><span>Round ID</span><b>{roundCurrent ? round?.id : "Unavailable"}</b><span>Window</span><b>{roundCurrent && round ? `${utc(round.startMs)} — ${utc(round.expiryMs)}` : "No active verified window"}</b><span>Reference</span><b>{waterxReferenceValid ? roundProvisional ? "Provisional" : "Reported" : "Unavailable"}</b><span>WaterX odds</span><b>{oddsFresh ? odds?.source : "Not current"} · market observations, not a model forecast</b><span>Market lean</span><b>{waterxLean} · no reliability or economic edge implied</b><span>Model reliability</span><b>Unrated · training {learningTrainCount ?? "not reported"} · forward predictions {forwardCount ?? "not reported"}</b><span>Coinbase chart</span><b>Comparison only; not used for official settlement</b><span>Settlement</span><b>Chainlink BTC/USD TWAP compared with WaterX beginning reference</b><span>Samples</span><b>{merged.length.toLocaleString()} retained archive and live records</b><span>Collection</span><b>{payload?.reason || "No additional collection issue reported"}</b></div></details>
       <details className="method-card"><summary><span><CircleHelp size={15} /> How this market resolves</span><ChevronDown size={15} /></summary><p>The price to beat is the beginning reference reported by WaterX. Settlement uses the official Chainlink BTC/USD time-weighted average price (TWAP), compared with that beginning reference; Up wins at equality. Coinbase is shown only as a live comparison and is never used for settlement.</p></details>
       <div className="live-bottom"><span>{snapshotCurrent ? `Snapshot as of ${utc(payload?.serverTime)}` : payload ? `Last response · stale · ${utc(payload.serverTime)}` : "No current live snapshot"}</span><button className="quiet-button" onClick={refreshAll}><RefreshCw size={14} /> Refresh desk</button><Link href="/health" className="inline-link">Inspect data health <ExternalLink size={13} /></Link></div>
-    </>}
   </div>;
 }
 
@@ -905,11 +968,13 @@ function HealthPage() {
   const versionUrl = "/api/waterx/version";
   const collectorUrl = `/api/waterx/health?interval=${interval}`;
   const latencyUrl = `/api/waterx/latency?interval=${interval}`;
+  const refreshHealthUrl = `/api/waterx/refresh-health?interval=${interval}`;
   const live = useApi<LivePayload>(liveUrl, 5000);
   const chart = useApi<ChartPayload>(chartUrl, 30000);
   const version = useApi<Record<string, unknown>>(versionUrl, 60000);
   const collector = useApi<Record<string, unknown>>(collectorUrl, 15000);
   const latency = useApi<Record<string, unknown>>(latencyUrl, 30000);
+  const refreshHealth = useApi<RefreshHealthReport>(refreshHealthUrl, 5000);
   const versionInfo = !version.error && version.loadedUrl === versionUrl ? version.data : null;
   const collectorInfo = !collector.error && collector.loadedUrl === collectorUrl ? collector.data : null;
   const versionBuild = versionInfo?.build && typeof versionInfo.build === "object" ? versionInfo.build as Record<string, unknown> : {};
@@ -942,6 +1007,11 @@ function HealthPage() {
     { label: "Round start → observation", aliases: ["roundStartToObservation", "round_start_observation", "round-start-observation", "round_start_to_observation"] },
     { label: "WaterX settlement → label", aliases: ["providerSettlementToAcceptedLabel"] },
   ];
+  const refreshHealthInfo = !refreshHealth.error && refreshHealth.loadedUrl === refreshHealthUrl
+    ? refreshHealth.data : null;
+  const refreshOperations = refreshHealthInfo?.refreshHealth ?? null;
+  const stageErrors = refreshOperations?.errors ?? [];
+  const refreshAlerts = refreshOperations?.alerts ?? [];
   const liveMatchesInterval = live.loadedUrl === liveUrl;
   const snapshot = liveMatchesInterval ? live.data : null;
   const snapshotToleranceMs = interval === 5 ? 16_000 : 31_000;
@@ -978,6 +1048,32 @@ function HealthPage() {
   return <div className="page inner-page">
     <PageTitle index="04" title="Data health"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
     <p className="health-intro">Provenance first. BluewaterAI keeps WaterX's beginning reference, WaterX market odds, and Coinbase comparison feed distinct from Chainlink settlement.</p>
+    <section className="panel latency-panel refresh-health-panel" aria-label="Process-local refresh health">
+      <div className="section-head">
+        <div><div className="eyebrow">PROCESS-LOCAL · NO DATABASE READ</div><h2>Refresh stage health</h2></div>
+        <button className="quiet-button" onClick={refreshHealth.reload}><RefreshCw size={14} /> Refresh</button>
+      </div>
+      {refreshHealth.error && refreshHealth.errorUrl === refreshHealthUrl
+        ? <div className="latency-unavailable"><span>Refresh-stage telemetry unavailable.</span><button className="text-button" onClick={refreshHealth.reload}>Retry</button></div>
+        : !refreshHealthInfo ? <Skeleton height={82} />
+          : <>
+            <div className="health-details">
+              <div><span>Scope</span><b>{refreshOperations?.scope ?? "Not reported"}</b></div>
+              <div><span>Recent events</span><b>{refreshOperations?.events?.length ?? 0}</b></div>
+              <div><span>Capture queues</span><b>{Array.isArray(refreshHealthInfo.captureQueues)
+                ? `${refreshHealthInfo.captureQueues.length} queue records`
+                : refreshHealthInfo.captureQueues && typeof refreshHealthInfo.captureQueues === "object"
+                  ? `${Object.keys(refreshHealthInfo.captureQueues as Record<string, unknown>).length} queue groups`
+                  : "Not reported"}</b></div>
+            </div>
+            {refreshAlerts.map((alert, index) => <p className="health-warning" role="status" key={`alert-${index}`}>{alert}</p>)}
+            {stageErrors.length > 0
+              ? <div className="health-details refresh-stage-errors">{stageErrors.map((entry, index) =>
+                <div key={`${entry.stage}-${index}`}><span>{entry.stage} · {entry.failures} failures</span><b>{entry.lastErrorClass ?? "Error class unknown"}</b><small>{entry.atMs == null ? "Time not reported" : utc(entry.atMs)}</small></div>)}</div>
+              : <p className="latency-context" role="status">No recent refresh-stage errors reported.</p>}
+          </>}
+      <p className="latency-context">Operational telemetry is process-memory only. It is not durable coverage, proof of a persisted round, or trade evidence.</p>
+    </section>
     {live.error && live.errorUrl === liveUrl && !liveMatchesInterval ? <ErrorBox message={live.error} retry={live.reload} /> : !liveMatchesInterval && live.loading ? <Skeleton height={220} /> : <>
        <div className="health-status"><span className={`health-signal ${roundCurrent && snapshot?.status === "LIVE" ? "ok" : "warn"}`}><i /> {status}</span><small>API snapshot {snapshotCurrent ? utc(snapshot?.serverTime) : "not current"}</small></div>
        {snapshotCurrent && !roundCurrent && typeof snapshot?.reason === "string" && <p className="health-warning">WaterX round withheld: {snapshot.reason}</p>}

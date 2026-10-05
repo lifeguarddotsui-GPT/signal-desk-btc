@@ -2,9 +2,12 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { RoundDecision } from "../../shared/round-decision";
+import { lockPolicy } from "../../shared/lock-readiness";
 import type { ResearchChoice, ResearchReport, ResearchSide } from "../../shared/waterx-research";
 import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
+import { getAtomicDecisionView, type LiveSnapshotEnvelope } from "./live-decision-contract";
 
 const identity = { id: "round-current-01", startMs: 1_700_000_000_000, expiryMs: 1_700_000_300_000 };
 function makeChoice(side: ResearchSide = "UP", settlement: ResearchChoice["settlement"]["state"] = "pending"): ResearchChoice {
@@ -45,49 +48,81 @@ function makeReport(state: "WATCHING" | "LEANING" | "FINAL_CHOICE" | "RESULT" | 
     liveProbabilities: { probabilityUp: .57, probabilityDown: .43, observedAt: new Date().toISOString(), source: "WaterX live feed", fresh: true },
   } as ResearchReport;
 }
-function renderChoice(report: ResearchReport, round: typeof identity | null = identity) {
+function makeSnapshot(canonical: boolean): LiveSnapshotEnvelope {
+  const decision: RoundDecision = {
+    format: "waterx-live-decision-v2", streamId: "test-stream-01", network: "sui:mainnet",
+    intervalMinutes: 5, roundId: identity.id, startMs: identity.startMs, expiryMs: identity.expiryMs,
+    policyVersion: lockPolicy(5).version, stateVersion: 3, updatedAtMs: identity.startMs + 10_000,
+    publishedAtMs: identity.startMs + 10_000,
+    readiness: {
+      state: "LEANING", score: 73, side: "UP", probability: .64,
+      evaluatedAtMs: identity.startMs + 10_000, secondsRemaining: 290, sameSideMs: 20_000,
+      earliestPossibleAtMs: identity.startMs + 10_000, reason: "Fresh atomic round evidence.",
+      health: "WAITING FOR EVIDENCE",
+      components: { strength: .67, requiredStrength: .65, persistenceMs: 20_000, requiredPersistenceMs: 12_000,
+        range: .02, reversals: 0, observationCount: 8, ageMs: 100, gapReset: false,
+        velocity: .001, acceleration: .001, sourceHealthy: true, withinWindow: true, fresh: true, stable: true },
+    },
+    market: { probabilityUp: .64, probabilityDown: .36, observedAtMs: identity.startMs + 10_000,
+      receivedAtMs: identity.startMs + 9_900, providerOddsAtMs: null },
+    persistence: { status: canonical ? "COMMITTED" : "WAITING_CHECKPOINT", updatedAtMs: identity.startMs + 10_000, errorClass: null },
+    canonical: canonical ? { side: "UP", probabilityUp: .64, decisionAtMs: identity.startMs + 8_000, committedAtMs: null } : null,
+    latestSafeOrderAtMs: null, executionWindowRemainingMs: null,
+    executionBlocker: "No verified transaction route.", tradeAllowed: false,
+    timestampSemantics: "Application receipt/evaluation/publication clocks; provider odds time unknown; commit is application acknowledgement",
+  };
+  return { serverTime: new Date(identity.startMs + 10_000).toISOString(), intervalMinutes: 5, round: identity, decision };
+}
+function makeView(canonical = true, now = identity.startMs + 10_000, round: typeof identity | null = identity) {
+  return getAtomicDecisionView(makeSnapshot(canonical), 5, round, now);
+}
+function renderChoice(report: ResearchReport, round: typeof identity | null = identity, view = makeView(true, identity.startMs + 10_000, round)) {
   return renderToStaticMarkup(createElement(ResearchChoiceCard, {
-    report, interval: 5, round, marketOdds: { up: "56.0%", down: "44.0%", current: true, source: "WaterX", asOf: new Date().toISOString() },
+    report, interval: 5, round, view, refresh: { pending: false, error: "", retryCount: 0, failureCount: 0 },
+    retrySnapshot: () => undefined,
   }));
 }
 
-test("current-round lifecycle renders watching, a changeable lean, and an immutable final choice", () => {
-  const watching = renderChoice(makeReport("WATCHING"));
-  assert.match(watching, /WATCHING/);
-  assert.match(watching, /Live probabilities move throughout this round/);
-  assert.match(watching, /LIVE WATERX MARKET · NOT THE FROZEN CHOICE/);
-  assert.match(watching, /WaterX live feed/);
+test("only the atomic exact-round view supplies current lean, odds, and canonical choice", () => {
+  const report = makeReport("LEANING", { side: "DOWN" });
+  const locked = renderChoice(report, identity, makeView(true));
+  assert.match(locked, /CANONICAL CHOICE: UP/);
+  assert.match(locked, /LEANING UP/);
+  assert.match(locked, /UP 64\.0%/);
+  assert.match(locked, /DOWN 36\.0%/);
+  assert.doesNotMatch(locked, /LEANING DOWN|CANONICAL CHOICE: DOWN/);
+  assert.doesNotMatch(locked, /WaterX live feed/);
 
-  const leaning = renderChoice(makeReport("LEANING"));
-  assert.match(leaning, /LEANING DOWN/);
-  assert.match(leaning, /Current lean only · may change before the lock point/);
-
-  const final = renderChoice(makeReport("FINAL_CHOICE", { side: "UP" }));
-  assert.match(final, /FINAL CHOICE: UP/);
-  assert.match(final, /68\.0% · frozen prediction; cannot change/);
-  assert.match(final, /Frozen before settlement · this prediction cannot change/);
-  assert.match(final, /LOCKED/);
-  assert.match(final, /CHECKPOINT MARKET SNAPSHOT/);
+  const uncommitted = renderChoice(makeReport("FINAL_CHOICE", { side: "DOWN" }), identity, makeView(false));
+  assert.match(uncommitted, /LEANING UP/);
+  assert.match(uncommitted, /NOT LOCKED/);
+  assert.doesNotMatch(uncommitted, /CANONICAL CHOICE: DOWN/);
 });
 
-test("verified results expose correctness and settled outcome; absent data never fabricates a side", () => {
-  const result = renderChoice(makeReport("RESULT", { side: "DOWN", result: "INCORRECT" }));
-  assert.match(result, /INCORRECT · VERIFIED OUTCOME: UP/);
-  assert.match(result, /Verified outcome: UP/);
-  const unavailable = renderChoice(makeReport("NO_VALID_DATA"));
-  assert.match(unavailable, /NO VALID DATA/);
-  assert.match(unavailable, /No timely evidence qualified/);
-  assert.doesNotMatch(unavailable, /FINAL CHOICE: (UP|DOWN)/);
+test("stale exact-round state preserves canonical evidence but withholds lean and market odds", () => {
+  const now = identity.startMs + 25_000;
+  const stale = renderChoice(makeReport("RESULT", { side: "DOWN", result: "INCORRECT" }), identity, makeView(true, now));
+  assert.match(stale, /CANONICAL CHOICE: UP/);
+  assert.match(stale, /LIVE LEAN · ATOMIC ROUND VIEW[\s\S]*?<strong>WITHHELD<\/strong>/);
+  assert.match(stale, /Source stale/);
+  assert.match(stale, /Withheld · current exact-round source is stale/);
+  assert.doesNotMatch(stale, /LEANING UP/);
+  assert.doesNotMatch(stale, /INCORRECT · VERIFIED OUTCOME/);
 });
 
-test("old-round locked choices are withheld after an identity mismatch or rollover", () => {
-  assert.match(renderChoice(makeReport("FINAL_CHOICE", { mismatch: true, side: "DOWN" })), /WATCHING/);
-  const rollover = renderChoice(makeReport("FINAL_CHOICE", { side: "DOWN" }), null);
-  assert.match(rollover, /WATCHING/);
-  assert.doesNotMatch(rollover, /FINAL CHOICE: DOWN/);
+test("a mismatched round or rollover withholds old atomic canonical evidence", () => {
+  const nextRound = { ...identity, id: "round-next-02", startMs: identity.startMs + 300_000, expiryMs: identity.expiryMs + 300_000 };
+  const mismatchView = getAtomicDecisionView(makeSnapshot(true), 5, nextRound, identity.startMs + 10_000);
+  const mismatch = renderChoice(makeReport("FINAL_CHOICE", { side: "DOWN" }), nextRound, mismatchView);
+  assert.match(mismatch, /Round identity mismatch/i);
+  assert.doesNotMatch(mismatch, /CANONICAL CHOICE: UP|LEANING UP/);
+  const rolloverView = getAtomicDecisionView(makeSnapshot(true), 5, null, identity.expiryMs + 1000);
+  const rollover = renderChoice(makeReport("FINAL_CHOICE", { side: "DOWN" }), null, rolloverView);
+  assert.match(rollover, /Waiting for a valid active-round snapshot/);
+  assert.doesNotMatch(rollover, /CANONICAL CHOICE: UP|CANONICAL CHOICE: DOWN/);
 });
 
-test("most recent verified historical result is labelled separately and cannot surface as the current choice", () => {
+test("most recent verified historical result is labelled separately and cannot surface as current state", () => {
   const previous = {
     ...makeChoice("DOWN", "incorrect"),
     roundId: "round-previous-77",
@@ -101,17 +136,16 @@ test("most recent verified historical result is labelled separately and cannot s
     recentChoices: [previous],
   } as ResearchReport;
   const html = renderChoice(report);
-  assert.match(html, /MOST RECENT VERIFIED ROUND RESULT · HISTORICAL/);
+  assert.match(html, /HISTORICAL VERIFIED ROUND · NOT CURRENT STATE/);
   assert.match(html, /INCORRECT · UP settled/);
   assert.match(html, /round-previous-77/);
   assert.match(html, /Frozen choice/);
   assert.match(html, /Verified outcome/);
-  assert.match(html, /Prior round record only · not the current round choice/);
-  assert.match(html, /<strong>WATCHING<\/strong>/);
-  assert.doesNotMatch(html, /FINAL CHOICE: DOWN/);
+  assert.match(html, /<strong>CANONICAL CHOICE: UP<\/strong>/);
+  assert.doesNotMatch(html, /CANONICAL CHOICE: DOWN/);
 
   const sameRoundOnly = { ...report, recentChoices: [makeChoice("UP", "correct")] } as ResearchReport;
-  assert.doesNotMatch(renderChoice(sameRoundOnly), /MOST RECENT VERIFIED ROUND RESULT/);
+  assert.doesNotMatch(renderChoice(sameRoundOnly), /HISTORICAL VERIFIED ROUND/);
 });
 
 test("learning audit separates research-only horizons and reports unavailable entry results honestly", () => {

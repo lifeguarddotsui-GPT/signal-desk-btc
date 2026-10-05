@@ -111,7 +111,7 @@ test("live desk uses the atomic snapshot hook and passes one view to both curren
   assert.match(app, /atomicOddsAsOfMs === decisionMarket\.observedAtMs/);
   assert.match(app, /atomicOdds\.up === decisionMarket\.probabilityUp && atomicOdds\.down === decisionMarket\.probabilityDown/);
   assert.match(app, /atomicDecisionView\.fresh && atomicQuoteMatchesDecision/);
-  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 2);
+  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 3);
   assert.equal((app.match(/round=\{decisionRound\}/g) ?? []).length, 2);
   assert.match(app, /browserReceivedAtMs=\{live\.atomicUpdated\}/);
   assert.doesNotMatch(app, /live\.error && live\.errorUrl === liveUrl && payload == null \? <ErrorBox/);

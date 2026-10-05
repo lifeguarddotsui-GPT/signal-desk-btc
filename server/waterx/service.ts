@@ -1,13 +1,14 @@
 import { latestComparison } from "../btc/chart";
 import { captureCandidateFromPersistedEvidence } from "./candidate-capture";
 import { createWaterxBackgroundQueue } from "./background-queue";
-import { captureLockObservation } from "./lock-store";
+import { captureLockObservation,loadEarlyDecision } from "./lock-store";
 import { createLockTimers } from "./lock-timers";
 import { captureResearchObservation } from "./research-store";
 import { roundDecisions } from "./round-decision";
 import {refreshHealth,refreshErrorClass} from "./refresh-health";
 import {boundedDatabaseRetry} from "./bounded-retry";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
+import {observationId} from "./observation-provenance";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement, type WaterxRoundInput } from "./learning";
@@ -21,6 +22,7 @@ import {
 
 type WaterxSnapshot = {
   observedAt: string | null;
+  receivedAtMs?:number;
   status: "LIVE" | "STALE" | "UNAVAILABLE" | "HOLD";
   round: WaterxRound | null;
   reason: string;
@@ -99,6 +101,13 @@ type WaterxObservationInput = WaterxRoundInput & {
   probabilityDown: number | null; receivedAtMs?:number; providerSourceAtMs?:number|null;
 };
 const earlyLockQueue=createWaterxBackgroundQueue<WaterxObservationInput>(async input=>{
+  if(input.probabilityUp===null||input.probabilityDown===null||
+    !validWaterxProbabilityPair(input.probabilityUp,input.probabilityDown)){
+    try{
+      const restored=await loadEarlyDecision(input);
+      if(restored)roundDecisions.earlySaved(input,restored);
+    }catch(error){roundDecisions.earlyFailed(input,refreshErrorClass(error));throw error;}
+  }
   if(input.probabilityUp===null||input.probabilityDown===null)return;
   if(!validWaterxProbabilityPair(input.probabilityUp,input.probabilityDown)){
     refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,stage:"EARLY_INPUT_VALIDATION",
@@ -109,13 +118,16 @@ const earlyLockQueue=createWaterxBackgroundQueue<WaterxObservationInput>(async i
   const started=Date.now();
   refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,stage:"EARLY_DATABASE_WRITE",outcome:"started"});
   try{
-    await captureLockObservation(input,{atMs:Date.parse(input.observedAt),
+    const saved=await boundedDatabaseRetry(()=>captureLockObservation(input,{atMs:Date.parse(input.observedAt),
       receivedAtMs:input.receivedAtMs??Date.parse(input.observedAt),
-      providerSourceAtMs:input.providerSourceAtMs??null,probabilityUp:input.probabilityUp,
-      probabilityDown:input.probabilityDown,sourceHealthy:true});
+      providerSourceAtMs:input.providerSourceAtMs??null,probabilityUp:input.probabilityUp!,
+      probabilityDown:input.probabilityDown!,sourceHealthy:true}),{
+        canRetry:()=>Date.now()<input.expiryMs&&Date.now()-(input.receivedAtMs??0)<=10_000});
+    if(saved)roundDecisions.earlySaved(input,saved);
     refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,stage:"EARLY_DATABASE_WRITE",
       outcome:"ok",elapsedMs:Date.now()-started});
   }catch(error){
+    roundDecisions.earlyFailed(input,refreshErrorClass(error));
     refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,stage:"EARLY_DATABASE_WRITE",
       outcome:"error",elapsedMs:Date.now()-started,errorClass:refreshErrorClass(error)});
     throw error;
@@ -131,7 +143,7 @@ const canonicalLockQueue=createWaterxBackgroundQueue<WaterxObservationInput>(
     roundDecisions.writing(input,started);
     refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,stage:"DATABASE_WRITE",outcome:"started"});
     try{
-      await boundedDatabaseRetry(async attempt=>{
+      const captureResult=await boundedDatabaseRetry(async attempt=>{
         refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,stage:"DATABASE_WRITE",
           outcome:"started",retryCount:attempt});
         return captureResearchObservation(input,{deferEnrichment:true});
@@ -141,9 +153,10 @@ const canonicalLockQueue=createWaterxBackgroundQueue<WaterxObservationInput>(
       },onFailure:(error,attempt)=>refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,
         stage:"DATABASE_WRITE",outcome:"error",errorClass:refreshErrorClass(error),retryCount:attempt,
         elapsedMs:Date.now()-started})});
-      const frozen=roundDecisions.writeFinished(input,Date.now());
+      const frozen=roundDecisions.writeFinished(input,Date.now(),captureResult);
       if(frozen!==null)refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,
-        stage:"CAPTURE_RESULT",outcome:frozen?"ok":"error",errorClass:frozen?null:"NO_CANONICAL_CHOICE"});
+        stage:"CAPTURE_RESULT",outcome:frozen?"ok":"error",errorClass:frozen?null:
+          captureResult?.startsWith("Research evidence rejected:")?"CANONICAL_INPUT_REJECTED":"NO_CANONICAL_CHOICE"});
       refreshHealth.record({interval:input.intervalMinutes,roundId:input.roundId,stage:"DATABASE_WRITE",
         outcome:"ok",elapsedMs:Date.now()-started});
     }catch(error){
@@ -291,6 +304,7 @@ export function buildWaterxLivePayload(
     outcome:decision.market&&!decision.readiness.components.fresh?"error":"ok",
     errorClass:decision.market&&!decision.readiness.components.fresh?"SOURCE_STALE":null,
     elapsedMs:performance.now()-evaluationStarted,sourceAgeMs:decision.market?now-decision.market.receivedAtMs:null});
+  if(decision?.componentHealth)decision.componentHealth.priceFeed=comparison?"AVAILABLE":"UNAVAILABLE";
   const referenceAvailability = round?.anchorPrice !== null && round?.anchorPrice !== undefined
     ? { status: round.anchorPriceConfirmed ? "available" as const : "provisional" as const,
       reason: round.anchorPriceConfirmed ? null : "WaterX has not confirmed the reported reference." }
@@ -328,6 +342,11 @@ export function buildWaterxLivePayload(
       downPriceCents: downSide?.oddsCents ?? null,
       asOf: snapshot.observedAt,
       source: "WaterX public market probabilities and odds",
+      sourceId:"waterx.public.crypto.v1",
+      observationId:snapshot.receivedAtMs?observationId(interval,round!.id,snapshot.receivedAtMs):null,
+      receivedAtMs:snapshot.receivedAtMs??null,
+      interpretation:{probabilityCents:"provider-reported probability; validate explicit pair",
+        oddsCents:"indicative purchase ask; not complementary probability or full-size fill"},
     } : null,
     comparison,
     availability: {
@@ -439,7 +458,7 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
     const round = result.detail.round;
     const probabilityUp = round.sides.up.probabilityCents;
     snapshot = {
-      observedAt, status: "LIVE", round,
+      observedAt,receivedAtMs:Date.parse(result.requestReceivedAt), status: "LIVE", round,
       reason: round.anchorPrice === null
         ? round.referenceUnavailableReason ?? "Active WaterX round; reference price unavailable."
         : round.anchorPriceConfirmed
@@ -460,6 +479,19 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
     };
     refreshHealth.record({interval,roundId:round.id,stage:"IDENTITY_VALIDATION",outcome:"ok"});
     roundDecisions.discovered(input,Date.parse(observedAt));
+    const receivedAtMs=input.receivedAtMs!;
+    const purchase=(side:WaterxRound["sides"]["up"])=>({
+      status:side.availability,askCents:side.oddsCents,
+      marketObjectId:side.trade?.marketId??null,selection:side.trade?.selection??null});
+    roundDecisions.context(input,{sourceId:"waterx.public.crypto.v1",
+      observationId:observationId(interval,round.id,receivedAtMs),receivedAtMs,
+      providerEventAtMs:null,priceLastChangedAtMs:null,
+      reference:{price:round.anchorPrice,status:round.anchorPrice===null?"unavailable":
+        round.anchorPriceConfirmed?"confirmed":"provisional"},
+      marketId:round.marketId,url:`https://waterx.app/en/predict/market/crypto/${round.slug}/${round.endsAt}`,
+      orderCutoffAtMs:null,probabilityEvidence:input.probabilityUp===null||input.probabilityDown===null?
+        "unavailable":validWaterxProbabilityPair(input.probabilityUp,input.probabilityDown)?"available":"invalid",
+      purchase:{up:purchase(round.sides.up),down:purchase(round.sides.down)}});
     // Publish live progress independently of slow storage and historical reports.
     const evaluatedAt=performance.now();
     if(input.probabilityUp!==null&&input.probabilityDown!==null)roundDecisions.observe(input,{

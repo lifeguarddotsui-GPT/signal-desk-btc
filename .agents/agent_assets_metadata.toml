@@ -630,3 +630,17 @@ mtime_ms = 1791216512285
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/5f2eedd3-a483-4f3d-9743-2da207332589/401c0d49-1087-40bb-b0f8-a2741602b8b4"
 storage_version_token = "1791216515841563"
 content_type = "text/html"
+
+[[outputs]]
+id = "gMaBoYjngIdnkw8Jc1h-p"
+uri = "file://reports/release-a-development-status.html"
+type = "html"
+title = "Release A — development evidence and remaining blockers"
+description = "Verified source/build, changes, real captured evidence, regression results and explicit incomplete acceptance items. No mainnet trading enabled."
+logical_id = "7fcdba7b-d026-4d6f-adfc-226d17a376eb"
+content_hash = "sha256:5a5d4cce69b5c479654890fd75ecf4a15f897f8b50c7731d55a165806edb2915"
+size = 8461
+mtime_ms = 1791219367305
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/7fcdba7b-d026-4d6f-adfc-226d17a376eb/8d6804a0-02bd-406c-89e3-0b61e509b7dc"
+storage_version_token = "1791219382042613"
+content_type = "text/html"

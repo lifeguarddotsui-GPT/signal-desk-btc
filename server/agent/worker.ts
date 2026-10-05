@@ -1,3 +1,4 @@
+import {acknowledgeEarlyDecisionEvents,lockPool} from "../waterx/lock-store";
 import { pathToFileURL } from "node:url";
 import { agentPool, agentTransaction, ledger } from "./store";
 import { agentPolicySchema } from "../../shared/agent-policy";
@@ -9,6 +10,7 @@ import { agentPolicySchema } from "../../shared/agent-policy";
  */
 export async function shadowWorkerTick() {
   if (process.env.NODE_ENV !== "development") throw new Error("Agent worker is development-only");
+  await acknowledgeEarlyDecisionEvents(agentPool);
   const agents=(await agentPool.query("SELECT owner FROM bluewater_agents WHERE status='SHADOW' LIMIT 101")).rows;
   if(agents.length>100)throw new Error("Agent worker bound exceeded; no partial processing accepted");
   for(const {owner}of agents)await agentTransaction(owner,async(c,row)=>{
@@ -46,10 +48,19 @@ export async function runAgentWorker(){
   let stopped=false;const stop=()=>{stopped=true;};
   process.once("SIGTERM",stop);process.once("SIGINT",stop);
   console.log("Bluewater Agent development shadow observer: NO signer, NO submission.");
+  let wake:(()=>void)|null=null;
+  const listener=await lockPool.connect();
+  listener.on("notification",()=>wake?.());
+  await listener.query("LISTEN bluewater_early_decision");
   while(!stopped){
     try{await shadowWorkerTick();}catch{console.error("Agent shadow observer unavailable; no trades submitted.");}
-    await new Promise(r=>setTimeout(r,3000));
+    await new Promise<void>(resolve=>{
+      const done=()=>{clearTimeout(timer);wake=null;resolve();};
+      const timer=setTimeout(done,3000);wake=done;
+    });
   }
+  await listener.query("UNLISTEN bluewater_early_decision");listener.release();
+  await lockPool.end();
   await agentPool.end();
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)void runAgentWorker();

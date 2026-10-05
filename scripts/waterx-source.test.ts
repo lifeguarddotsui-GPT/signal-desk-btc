@@ -151,6 +151,9 @@ test("missing or malformed side collections affect only odds availability", () =
     up: null, down: null, upPriceCents: null, downPriceCents: null,
     asOf: new Date(now).toISOString(),
     source: "WaterX public market probabilities and odds",
+    sourceId:"waterx.public.crypto.v1",observationId:null,receivedAtMs:null,
+    interpretation:{probabilityCents:"provider-reported probability; validate explicit pair",
+      oddsCents:"indicative purchase ask; not complementary probability or full-size fill"},
   });
   assert.equal(live.availability.odds.status, "unavailable");
   assert.equal(live.availability.odds.reason, "Odds temporarily unavailable.");

@@ -17,6 +17,8 @@ import { ResearchLearningPanel } from "./ResearchLearningPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
 import type { BluewaterReport } from "../../shared/bluewater-research";
 import { RoundDecisionPanel } from "./LockReadinessPanel";
+import { ManualOpportunity } from "./ManualOpportunity";
+import "./ManualOpportunity.css";
 import { getAtomicDecisionView, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
 import { useLiveSnapshot } from "./useLiveSnapshot";
 import AgentPage from "./AgentPage";
@@ -550,21 +552,31 @@ function LivePage() {
         <div className="distance-readout"><span>DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Percent unavailable" : `${Math.abs(priceDeltaPct).toFixed(3)}% ${priceDelta! >= 0 ? "above" : "below"}`}</small></div>
         <span className="round-count"><span>BTC · {interval}m CLOSES</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong></span>
       </div>
-      <RoundDecisionPanel
+      <ManualOpportunity
         view={atomicDecisionView}
-        interval={interval as ResearchInterval}
-        round={decisionRound}
         now={serverNow}
         browserReceivedAtMs={live.atomicUpdated}
-        refresh={snapshotRefreshState}
-        retry={live.reload}
-        simulated={!!fixtureMode}
-        historicalReport={!fixtureMode && lockReadiness.loadedUrl === lockReadinessUrl &&
-          lockReadiness.data?.intervalMinutes === interval ? lockReadiness.data : null}
-        historicalLoading={!fixtureMode && lockReadiness.loading}
-        historicalError={!fixtureMode && lockReadiness.error && lockReadiness.errorUrl === lockReadinessUrl ? lockReadiness.error : undefined}
-        retryHistorical={lockReadiness.reload}
+        refresh={{ pending: snapshotRefreshState.pending, error: snapshotRefreshState.error }}
+        onRetry={live.reload}
       />
+      <details className="mo-readiness-audit">
+        <summary>Full round decision readiness · audit detail</summary>
+        <RoundDecisionPanel
+          view={atomicDecisionView}
+          interval={interval as ResearchInterval}
+          round={decisionRound}
+          now={serverNow}
+          browserReceivedAtMs={live.atomicUpdated}
+          refresh={snapshotRefreshState}
+          retry={live.reload}
+          simulated={!!fixtureMode}
+          historicalReport={!fixtureMode && lockReadiness.loadedUrl === lockReadinessUrl &&
+            lockReadiness.data?.intervalMinutes === interval ? lockReadiness.data : null}
+          historicalLoading={!fixtureMode && lockReadiness.loading}
+          historicalError={!fixtureMode && lockReadiness.error && lockReadiness.errorUrl === lockReadinessUrl ? lockReadiness.error : undefined}
+          retryHistorical={lockReadiness.reload}
+        />
+      </details>
        <div className="chart-market-layout">
         <section className="chart-panel">
         <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Coinbase comparison only{waterxReferenceValid ? " · dashed line is the WaterX price to beat" : " · WaterX reference unavailable"}.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>

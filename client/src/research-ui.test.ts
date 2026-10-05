@@ -22,7 +22,7 @@ test("research report is interval-polled and never fetched during existing live 
 
 test("current round choice and odds use one exact atomic decision projection", () => {
   assert.match(app, /getAtomicDecisionView\(atomicEnvelope, interval, decisionRound, serverNow\)/);
-  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 2);
+  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 3);
   assert.match(choice, /const decision = view\.decision/);
   assert.match(choice, /view\.fresh \? view\.lean : null/);
   assert.match(choice, /view\.fresh \? decision\?\.market/);

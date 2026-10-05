@@ -1,4 +1,5 @@
 import type {LockReadiness} from "./lock-readiness";
+import type {EarlyDecision,OpportunityContext} from "./manual-opportunity";
 
 /** Match the stored adaptive observation CHECK; never normalize an invalid pair into evidence. */
 export function validWaterxProbabilityPair(up:unknown,down:unknown):boolean{
@@ -16,6 +17,11 @@ export type RoundDecision = {
   persistence:{status:"WAITING_CHECKPOINT"|"QUEUED"|"WRITING"|"FAILED"|"AWAITING_CHOICE"|"COMMITTED";
     updatedAtMs:number;errorClass:string|null};
   canonical:null|{side:"UP"|"DOWN";probabilityUp:number;decisionAtMs:number;committedAtMs:number|null};
+  earlyDecision?:EarlyDecision|null;
+  earlyPersistence?:{status:"DEVELOPING"|"SAVING"|"FAILED"|"SAVED";errorClass:string|null};
+  opportunity?:OpportunityContext|null;
+  componentHealth?:{priceFeed:"AVAILABLE"|"UNAVAILABLE";decisionService:"AVAILABLE"|"STALE"|"UNAVAILABLE";
+    storage:"UNKNOWN"|"FAILED"|"COMMITTED";orderAdapter:"UNVERIFIED"};
   latestSafeOrderAtMs:null; executionWindowRemainingMs:null;
   executionBlocker:string; tradeAllowed:false;
   timestampSemantics:"Application receipt/evaluation/publication clocks; provider odds time unknown; commit is application acknowledgement";

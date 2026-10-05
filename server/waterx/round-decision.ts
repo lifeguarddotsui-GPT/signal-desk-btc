@@ -3,11 +3,13 @@ import {lockPolicy,type LockObservation} from "../../shared/lock-readiness";
 import type {RoundDecision} from "../../shared/round-decision";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {WATERX_RESEARCH_CONFIG} from "../../shared/waterx-research";
+import type {EarlyDecision,OpportunityContext} from "../../shared/manual-opportunity";
 import {evaluateLockReadiness} from "./lock-readiness";
 
 type Identity={intervalMinutes:5|15;roundId:string;startMs:number;expiryMs:number};
 type Entry={identity:Identity;observations:LockObservation[];updatedAtMs:number;
-  canonical:RoundDecision["canonical"];persistence:RoundDecision["persistence"]};
+  canonical:RoundDecision["canonical"];persistence:RoundDecision["persistence"];
+  early:EarlyDecision|null;earlyError:string|null;opportunity:OpportunityContext|null};
 const key=(r:Identity)=>`${r.intervalMinutes}:${r.roundId}:${r.startMs}:${r.expiryMs}`;
 const validIdentity=(r:Identity)=>!!r.roundId&&(r.intervalMinutes===5||r.intervalMinutes===15)&&
   Number.isSafeInteger(r.startMs)&&Number.isSafeInteger(r.expiryMs)&&
@@ -24,6 +26,7 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
     if(entry&&identity.startMs===entry.identity.startMs&&key(entry.identity)!==key(identity))return null;
     if(!entry||key(entry.identity)!==key(identity)){
       entry={identity:{...identity},observations:[],updatedAtMs:now,canonical:null,
+        early:null,earlyError:null,opportunity:null,
         persistence:{status:"WAITING_CHECKPOINT",updatedAtMs:now,errorClass:null}};
       entries.set(identity.intervalMinutes,entry);
     }
@@ -37,6 +40,31 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
     entry.persistence={status,updatedAtMs:now,errorClass};
   }
   return {
+    context(identity:Identity,context:OpportunityContext){
+      const entry=entries.get(identity.intervalMinutes);
+      if(entry&&key(entry.identity)===key(identity)&&
+        (!entry.opportunity||context.receivedAtMs>=entry.opportunity.receivedAtMs)){
+        const previous=entry.opportunity;
+        context.priceLastChangedAtMs=previous&&
+          (previous.purchase.up.askCents!==context.purchase.up.askCents||
+           previous.purchase.down.askCents!==context.purchase.down.askCents)?
+          context.receivedAtMs:previous?.priceLastChangedAtMs??null;
+        entry.opportunity=context;
+      }
+    },
+    earlyFailed(identity:Identity,errorClass:string){
+      const entry=entries.get(identity.intervalMinutes);
+      if(entry&&key(entry.identity)===key(identity)&&!entry.early)entry.earlyError=errorClass;
+    },
+    earlySaved(identity:Identity,early:EarlyDecision){
+      const entry=entries.get(identity.intervalMinutes);
+      if(!entry||key(entry.identity)!==key(identity)||early.decisionAtMs<identity.startMs||
+        early.decisionAtMs>=identity.expiryMs||!Number.isFinite(early.probabilityUp)||
+        !/^\d+$/.test(early.eventId)||early.policyVersion!==lockPolicy(identity.intervalMinutes).version)return;
+      if(entry.early&&(entry.early.eventId!==early.eventId||entry.early.side!==early.side))return;
+      entry.early={...early,committedAtMs:entry.early?.committedAtMs??early.committedAtMs};
+      entry.earlyError=null;
+    },
     discovered(identity:Identity,now:number){discover(identity,now);},
     observe(identity:Identity,observation:LockObservation){
       if(!Number.isSafeInteger(observation.atMs)||!Number.isSafeInteger(observation.receivedAtMs)||
@@ -53,12 +81,13 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
     queued(identity:Identity,now:number){persistence(identity,"QUEUED",now);},
     writing(identity:Identity,now:number){persistence(identity,"WRITING",now);},
     failed(identity:Identity,errorClass:string,now:number){persistence(identity,"FAILED",now,errorClass);},
-    writeFinished(identity:Identity,now:number):boolean|null{
+    writeFinished(identity:Identity,now:number,result?:string):boolean|null{
       const entry=entries.get(identity.intervalMinutes);
       const target=identity.expiryMs-WATERX_RESEARCH_CONFIG.primaryLockSeconds[identity.intervalMinutes]*1000;
       if(!entry||key(entry.identity)!==key(identity)||now<target||now>=identity.expiryMs)return null;
       if(entry.canonical)return true;
-      entry.persistence={status:"AWAITING_CHOICE",updatedAtMs:now,errorClass:"NO_CANONICAL_CHOICE"};
+      entry.persistence={status:"AWAITING_CHOICE",updatedAtMs:now,errorClass:
+        result?.startsWith("Research evidence rejected:")?"CANONICAL_INPUT_REJECTED":"NO_CANONICAL_CHOICE"};
       return false;
     },
     committed(identity:Identity,canonical:NonNullable<RoundDecision["canonical"]>){
@@ -86,6 +115,14 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
         readiness,market:last?{probabilityUp:last.probabilityUp,probabilityDown:last.probabilityDown,
           observedAtMs:last.atMs,receivedAtMs:last.receivedAtMs,providerOddsAtMs:null}:null,
         persistence:{...entry.persistence},canonical:entry.canonical?{...entry.canonical}:null,
+        earlyDecision:entry.early?{...entry.early}:null,
+        earlyPersistence:{status:entry.early?"SAVED":entry.earlyError?"FAILED":
+          readiness.state==="READY"?"SAVING":"DEVELOPING",errorClass:entry.earlyError},
+        opportunity:entry.opportunity,
+        componentHealth:{priceFeed:"UNAVAILABLE",decisionService:last?
+          readiness.components.fresh?"AVAILABLE":"STALE":"UNAVAILABLE",
+          storage:entry.early||entry.canonical?"COMMITTED":entry.earlyError||entry.persistence.status==="FAILED"?"FAILED":"UNKNOWN",
+          orderAdapter:"UNVERIFIED"},
         latestSafeOrderAtMs:null,executionWindowRemainingMs:null,tradeAllowed:false,
         executionBlocker:"HOLD: no verified executable quote, qualified signal or measured lock-to-accepted latency. Research readiness is not trade authority.",
         timestampSemantics:"Application receipt/evaluation/publication clocks; provider odds time unknown; commit is application acknowledgement"};

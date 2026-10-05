@@ -74,7 +74,8 @@ export function validateDecisionSnapshot(p:LiveSnapshotEnvelope,interval:5|15,pr
     market.observedAtMs!==d.updatedAtMs||market.providerOddsAtMs!==null))return "SOURCE_OBSERVATION_INVALID";
   if(ready.components.fresh&&(!market||now-market.receivedAtMs>DECISION_FRESH_MS||
     now-market.observedAtMs>DECISION_FRESH_MS))return "SOURCE_STALE";
-  if(market&&(ready.components.observationCount<1||
+  // observationCount counts the stability window, not lifetime source evidence.
+  if(market&&((ready.components.fresh&&ready.components.observationCount<1)||
     !ready.components.sourceHealthy||
     ready.components.ageMs!==now-market.receivedAtMs||
     ready.probability!==Math.max(market.probabilityUp,market.probabilityDown)||
@@ -90,6 +91,21 @@ export function validateDecisionSnapshot(p:LiveSnapshotEnvelope,interval:5|15,pr
     d.canonical.decisionAtMs>=r.expiryMs||d.canonical.decisionAtMs>now||
     (d.canonical.committedAtMs!==null&&(!integer(d.canonical.committedAtMs)||
       d.canonical.committedAtMs<d.canonical.decisionAtMs||d.canonical.committedAtMs>now))))return "CANONICAL_CHOICE_INVALID";
+  const early=d.earlyDecision;
+  if(early&&(!["UP","DOWN"].includes(early.side)||!bounded(early.probabilityUp)||
+    !integer(early.decisionAtMs)||early.decisionAtMs<r.startMs||early.decisionAtMs>=r.expiryMs||
+    early.decisionAtMs>now||early.policyVersion!==d.policyVersion||
+    !early.observationId||!/^\d+$/.test(early.eventId)||
+    (early.committedAtMs!==null&&(!integer(early.committedAtMs)||early.committedAtMs<early.decisionAtMs||
+      early.committedAtMs>now))))return "EARLY_DECISION_INVALID";
+  if(old?.roundId===d.roundId&&old.earlyDecision&&(!early||
+    early.side!==old.earlyDecision.side||early.decisionAtMs!==old.earlyDecision.decisionAtMs||
+    early.probabilityUp!==old.earlyDecision.probabilityUp||early.eventId!==old.earlyDecision.eventId))
+    return "IMMUTABLE_EARLY_DECISION_REGRESSION";
+  if(d.opportunity&&(d.opportunity.sourceId!=="waterx.public.crypto.v1"||
+    !d.opportunity.observationId||!integer(d.opportunity.receivedAtMs)||
+    d.opportunity.receivedAtMs<r.startMs||d.opportunity.receivedAtMs>now))
+    return "OPPORTUNITY_PROVENANCE_INVALID";
   if(!d.persistence||!["WAITING_CHECKPOINT","QUEUED","WRITING","FAILED","AWAITING_CHOICE","COMMITTED"].includes(d.persistence.status)||
     !integer(d.persistence.updatedAtMs)||d.persistence.updatedAtMs<r.startMs||d.persistence.updatedAtMs>now||
     (d.canonical!==null)!==(d.persistence.status==="COMMITTED"))return "PERSISTENCE_STATE_INVALID";
@@ -114,7 +130,10 @@ export function getAtomicDecisionView(p:LiveSnapshotEnvelope|null,interval:5|15,
   const fresh=age!==null&&age>=0&&age<=DECISION_FRESH_MS&&now-d.publishedAtMs>=0&&
     now-d.publishedAtMs<=DECISION_FRESH_MS&&d.readiness.components.fresh;
   const reason=d.persistence.status==="FAILED"?`Database write failed (${d.persistence.errorClass??"UNKNOWN"}); research choice not committed.`:
-    d.persistence.status==="AWAITING_CHOICE"?"Checkpoint write finished without a frozen canonical choice; capture needs investigation.":
+     d.persistence.status==="AWAITING_CHOICE"?
+       d.persistence.errorClass==="CANONICAL_INPUT_REJECTED"?
+         "Canonical checkpoint evidence rejected; awaiting valid exact-round input, not a database failure.":
+         "Checkpoint write finished without a frozen canonical choice; capture needs investigation.":
     !d.market?"Waiting for a fresh WaterX observation.":!fresh?
     `Source stale (${Math.max(0,Math.floor((age??0)/1000))}s); last same-round record retained, live lean withheld.`:
     d.persistence.status==="WRITING"?"Database write pending; no committed choice is asserted.":

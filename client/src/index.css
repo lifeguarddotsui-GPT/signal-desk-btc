@@ -2417,6 +2417,10 @@ input:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
 .agent-copy-card > div + div { margin-top: 8px; }
 .agent-copy-card b { color: var(--lime); font: 9px var(--mono); }
 .agent-current-round { margin-top: 13px; padding: 19px; border: 1px solid rgba(167,236,117,.24); background: linear-gradient(115deg, rgba(27,53,49,.62), rgba(12,27,35,.96) 58%); }
+.agent-benchmarks { margin-top: 10px; border: 1px solid var(--edge-soft); background: rgba(4,13,18,.34); }
+.agent-benchmarks > summary { padding: 10px 12px; color: #a9bdb2; cursor: pointer; font: 8px var(--mono); letter-spacing: .045em; }
+.agent-benchmarks[open] > summary { border-bottom: 1px solid var(--edge-soft); }
+.agent-benchmarks .agent-round-evidence { margin: 0; padding: 10px; }
 .agent-current-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .agent-current-head h2 { margin: 5px 0 0; font-size: 22px; letter-spacing: -.055em; }
 .agent-current-head p { margin: 6px 0 0; color: var(--muted); font-size: 9px; }

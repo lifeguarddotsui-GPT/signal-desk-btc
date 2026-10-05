@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import "./beta-interface.css";
+import TimedDecisionHistory from "./TimedDecisionHistory";
 
 type IntervalFilter = "all" | "5" | "15";
 type WindowFilter = "lifetime" | "100" | "50" | "20" | "24h" | "7d";
@@ -148,6 +149,8 @@ function CanonicalHistory() {
         </select>
       </div>
     </section>
+
+    <TimedDecisionHistory />
 
     <p className="history-source-note">
       {baseline

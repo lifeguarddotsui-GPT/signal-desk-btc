@@ -4,6 +4,9 @@ import type { BluewaterReport } from "../../shared/bluewater-research";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
 import type { ResearchReport } from "../../shared/waterx-research";
 import { currentBaselineChoice, currentChampionForecast, currentLockReadiness, currentResearchRound } from "./agent-round-contract";
+import { ManualOpportunity } from "./ManualOpportunity";
+import { getAtomicDecisionView, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
+import { useLiveSnapshot } from "./useLiveSnapshot";
 
 type Interval = 5 | 15;
 type Props = { agentStatus?: string | null };
@@ -31,6 +34,7 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
   const [errors, setErrors] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(Date.now());
+  const timedLive = useLiveSnapshot<LiveSnapshotEnvelope>(`/api/waterx/advisory?interval=${interval}&amount=5`, interval);
 
   useEffect(() => {
     let active = true;
@@ -74,6 +78,12 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
   }, []);
 
   const round = useMemo(() => currentResearchRound(reports.research, interval, now), [reports.research, interval, now]);
+  const timedEnvelope = timedLive.atomicData?.intervalMinutes === interval ? timedLive.atomicData : null;
+  const timedServerTime = timedEnvelope?.serverTime ? Date.parse(timedEnvelope.serverTime) : NaN;
+  const timedNow = Number.isFinite(timedServerTime) && timedLive.atomicUpdated
+    ? projectServerClock(timedServerTime, timedLive.atomicUpdated, now) : now;
+  const timedRound = timedEnvelope?.round ?? null;
+  const timedView = getAtomicDecisionView(timedEnvelope, interval, timedRound, timedNow);
   const choice = round ? currentBaselineChoice(reports.research, interval, round, now) : null;
   const forecast = round ? currentChampionForecast(reports.bluewater, interval, round, now) : null;
   const readiness = round ? currentLockReadiness(reports.readiness, interval, round, now) : null;
@@ -101,7 +111,11 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
       <div><span>INTERVAL</span><strong>{interval} minutes</strong></div>
       <div><span>RESEARCH SNAPSHOT</span><strong>{clockStamp(reports.research?.asOf)}</strong></div>
     </div>
-    <div className="agent-round-evidence">
+    <ManualOpportunity view={timedView} now={timedNow} browserReceivedAtMs={timedLive.atomicUpdated}
+      onRetry={timedLive.reload} refresh={{ pending: timedLive.loading, error: timedLive.error }} />
+    <details className="agent-benchmarks">
+      <summary>Canonical, champion &amp; readiness benchmarks · separate research references</summary>
+      <div className="agent-round-evidence">
       <article className={`agent-round-evidence-card${choice ? " current" : ""}`}>
         <span className="agent-kicker">IMMUTABLE CANONICAL CHOICE</span>
         <h3>WaterX Market Baseline</h3>
@@ -122,7 +136,8 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
         <p>{readiness?.reason || reports.readiness?.current?.readiness?.reason || "No fresh exact-round readiness report is available."}</p>
         <small>{readiness ? `Evidence evaluated ${clockStamp(readiness.evaluatedAtMs)}` : reports.readiness?.reason || "No readiness evidence reported."}</small>
       </article>
-    </div>
+      </div>
+    </details>
     <div className="agent-round-execution">
       <div><span className="agent-kicker">AGENT {agentStatus ? `· ${agentStatus.replaceAll("_", " ")}` : ""}</span><strong>{round ? "HOLD" : "WAITING"}</strong><p>{waitReason}</p></div>
       <div className="agent-unavailable-economics"><span>EXECUTABLE BREAK-EVEN</span><b>Unavailable</b><span>VERIFIED NET EDGE</span><b>Unavailable</b></div>

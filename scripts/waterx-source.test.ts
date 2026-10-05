@@ -261,6 +261,16 @@ test("a delayed round response cannot restore expired odds or replace an equal-t
     id: "e92e2a42-341e-4be1-946d-d2fbfe465312", startsAt: detail.round.startsAt - 300,
   }), false);
 });
+test("stale provider reads preserve a known current round but never claim live odds or carry it past expiry",()=>{
+  const detail=parseWaterxResponse(marketFixture({phase:"live"}),5);
+  const received=(start+10)*1000,now=received+25000;
+  const snapshot={observedAt:new Date(received).toISOString(),status:"LIVE" as const,round:detail.round,
+    reason:"Active round",sourceError:null};
+  const payload=buildWaterxLivePayload(5,snapshot,now,null);
+  assert.equal(payload.status,"STALE");assert.equal(payload.round?.id,detail.round.id);
+  assert.equal(payload.availability.odds.status,"unavailable");
+  assert.equal(buildWaterxLivePayload(5,snapshot,detail.round.endsAt*1000,null).round,null);
+});
 
 test("active-round discovery prefers a validated active neighbor over a future preview", () => {
   const active = marketFixture({

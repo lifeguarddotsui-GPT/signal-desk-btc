@@ -111,7 +111,7 @@ test("stale odds do not replace a saved early DOWN choice or switch to an availa
     stage: "WATCHING", score: null, reason: "Source stale; saved record retained.",
   });
   assert.match(markup, /DOWN/);
-  assert.match(markup, /Locked/);
+  assert.match(markup, /Adaptive benchmark saved/);
   assert.match(markup, /DOWN purchase unavailable/);
   assert.match(markup, /Stale source receipt/);
   assert.match(markup, /Age is measured from app receipt, not last price change/);

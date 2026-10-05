@@ -9,6 +9,7 @@ import {refreshHealth,refreshErrorClass} from "./refresh-health";
 import {boundedDatabaseRetry} from "./bounded-retry";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {observationId} from "./observation-provenance";
+import {observeTimedStrategy,stopTimedStrategy,timedStrategyQueueMetrics} from "./timed-decision-coordinator";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement, type WaterxRoundInput } from "./learning";
@@ -266,7 +267,9 @@ export function buildWaterxLivePayload(
 ) {
   const snapshotMs = snapshot.observedAt ? Date.parse(snapshot.observedAt) : NaN;
   const stale = !Number.isFinite(snapshotMs) || now - snapshotMs > (interval === 5 ? 16_000 : 31_000);
-  const active = !stale && snapshot.status === "LIVE" && snapshot.round &&
+  // A source outage does not erase already verified, still-current round identity.
+  // It cannot refresh observations or make quotes executable.
+  const active = snapshot.status === "LIVE" && snapshot.round &&
     snapshot.round.startsAt * 1000 <= now && now < snapshot.round.endsAt * 1000;
   const round = active && snapshot.round ? snapshot.round : null;
   const outsideRoundWindow = !stale && snapshot.status === "LIVE" && !!snapshot.round && !active;
@@ -282,12 +285,12 @@ export function buildWaterxLivePayload(
   const pricesPresent = [upSide, downSide].some(side =>
     side?.availability === "reported" && side.oddsCents !== null && side.oddsCents !== undefined);
   const bothSidesLocked = upSide?.availability === "locked" && downSide?.availability === "locked";
-  const oddsStatus = bothSidesLocked ? "locked"
+  const oddsStatus = stale ? "unavailable" : bothSidesLocked ? "locked"
     : probabilitiesPresent === 2 && upSide?.availability === "reported" && downSide?.availability === "reported"
       ? "available" : probabilitiesPresent > 0 || pricesPresent ? "partial" : "unavailable";
-  const liveStatus = round ? "LIVE" : stale || outsideRoundWindow ? "STALE" : snapshot.status;
+  const liveStatus = stale || outsideRoundWindow ? "STALE" : round ? "LIVE" : snapshot.status;
   const reason = round
-    ? snapshot.reason
+    ? stale ? "Source stale; retaining recorded round identity and saved decisions, not fresh quotes." : snapshot.reason
     : stale ? "WaterX round read is stale; no active round can be certified."
       : outsideRoundWindow && snapshot.round!.startsAt * 1000 > now
         ? "WaterX round starts in the future; no active round can be certified."
@@ -317,7 +320,7 @@ export function buildWaterxLivePayload(
   return {
     serverTime: new Date(now).toISOString(),
     captureQueues:{canonical:canonicalLockQueue.metrics(now),early:earlyLockQueue.metrics(now),
-      optional:observationQueue.metrics(now)},
+      timed:timedStrategyQueueMetrics(now),optional:observationQueue.metrics(now)},
     refreshHealth:refreshHealth.read(interval),
     decision,
     status: liveStatus,
@@ -501,6 +504,13 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
     refreshHealth.record({interval,roundId:round.id,stage:"READINESS_INPUT",outcome:"ok",
       elapsedMs:performance.now()-evaluatedAt,sourceAgeMs:Date.now()-input.receivedAtMs!});
     earlyLockTimers.arm({intervalMinutes:interval,roundId:round.id,startMs,expiryMs});
+    const comparison=latestComparison();
+    observeTimedStrategy({...input,features:{referenceQuality:round.anchorPriceConfirmed?"confirmed":"provisional",
+      purchaseUp:{status:round.sides.up.availability,askCents:round.sides.up.oddsCents},
+      purchaseDown:{status:round.sides.down.availability,askCents:round.sides.down.oddsCents},
+      comparison:comparison?{price:comparison.price,source:comparison.source,asOf:comparison.asOf}:null,
+      executableQuote:null,settlementRule:"UNVERIFIED_COMPARISON_IS_NOT_SETTLEMENT",
+      marketId:round.marketId,providerUrl:providerUrl(interval,round.endsAt)}});
     roundDecisions.queued(input,Date.now());
     canonicalLockQueue.enqueue(input);
     const queued=canonicalLockQueue.metrics();
@@ -686,6 +696,7 @@ export function startWaterxCapture(options: {
   }
   return () => {
     earlyLockTimers.stop();
+    stopTimedStrategy();
     for (const timer of Array.from(timers.values())) clearTimeout(timer);
     for (const controller of Array.from(refreshControllers.values())) controller.abort();
     for (const watchdog of Array.from(watchdogs.values())) clearInterval(watchdog);

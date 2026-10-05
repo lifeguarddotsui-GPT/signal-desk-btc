@@ -644,3 +644,17 @@ mtime_ms = 1791219367305
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/7fcdba7b-d026-4d6f-adfc-226d17a376eb/8d6804a0-02bd-406c-89e3-0b61e509b7dc"
 storage_version_token = "1791219382042613"
 content_type = "text/html"
+
+[[outputs]]
+id = "V1tTOEgcSe4Xg4LwoNKBg"
+uri = "file://reports/timed-strategy-development-evidence.html"
+type = "html"
+title = "Early-decision development evidence"
+description = "Exact build, real 5m/15m decisions, strict late-commit evidence, verification results and unresolved mainnet/publication gates."
+logical_id = "5a4b2602-39ce-40de-8c95-8dcac5efe1af"
+content_hash = "sha256:c27224a4d51fa919339dfd00aefdf2c8b85ed3d076e5db1cd2458944188219b1"
+size = 9095
+mtime_ms = 1791223948487
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/5a4b2602-39ce-40de-8c95-8dcac5efe1af/5105783d-ee88-40a1-a8d0-f2b59e41a319"
+storage_version_token = "1791223950564709"
+content_type = "text/html"

@@ -1,4 +1,5 @@
 import {acknowledgeEarlyDecisionEvents,lockPool} from "../waterx/lock-store";
+import {consumeTimedDecisionReceipts} from "../waterx/timed-decision-store";
 import { pathToFileURL } from "node:url";
 import { agentPool, agentTransaction, ledger } from "./store";
 import { agentPolicySchema } from "../../shared/agent-policy";
@@ -11,11 +12,24 @@ import { agentPolicySchema } from "../../shared/agent-policy";
 export async function shadowWorkerTick() {
   if (process.env.NODE_ENV !== "development") throw new Error("Agent worker is development-only");
   await acknowledgeEarlyDecisionEvents(agentPool);
+  await consumeTimedDecisionReceipts(agentPool);
   const agents=(await agentPool.query("SELECT owner FROM bluewater_agents WHERE status='SHADOW' LIMIT 101")).rows;
   if(agents.length>100)throw new Error("Agent worker bound exceeded; no partial processing accepted");
   for(const {owner}of agents)await agentTransaction(owner,async(c,row)=>{
     if(row.status!=="SHADOW"||!row.paper)return; // Recheck under same lock as pause/policy changes.
     const p=agentPolicySchema.parse(row.policy),paper=row.paper,day=new Date().toISOString().slice(0,10);
+    const timed=(await c.query(`SELECT decision FROM waterx_timed_decisions WHERE status='LOCKED'
+      AND interval_minutes=ANY($1::int[]) AND (decision->>'expiryMs')::bigint>extract(epoch FROM clock_timestamp())*1000
+      ORDER BY decision_at_ms LIMIT 10`,[p.intervals])).rows;
+    for(const event of timed){
+      const decision=event.decision;
+      const roundKey=`timed:${decision.strategyVersion}:${decision.intervalMinutes}:${decision.roundId}`;
+      await c.query(`INSERT INTO bluewater_agent_ledger(owner,event,policy_version,round_key,details)
+        VALUES($1,'WOULD_HOLD',$2,$3,$4) ON CONFLICT DO NOTHING`,
+        [owner,row.policy_version,roundKey,JSON.stringify({decisionId:decision.id,
+          reason:decision.ambiguous?"AMBIGUOUS_RESEARCH_TIE":"TIMED_MAINNET_ADAPTER_UNVERIFIED",
+          signalSource:decision.strategyVersion,waitingForCanonical:false,signing:false,submission:false})]);
+    }
     if(paper.day!==day){
       paper.day=day;paper.dayStartingCents=paper.availableCents;paper.dayTurnoverCents=0;paper.dayRealizedPnlCents=0;
       await ledger(c,owner,"UTC_DAY_RESET",Number(row.policy_version),{day,sessionId:paper.sessionId,sessionHighWaterCents:paper.highWaterCents});
@@ -52,6 +66,7 @@ export async function runAgentWorker(){
   const listener=await lockPool.connect();
   listener.on("notification",()=>wake?.());
   await listener.query("LISTEN bluewater_early_decision");
+  await listener.query("LISTEN bluewater_timed_decision");
   while(!stopped){
     try{await shadowWorkerTick();}catch{console.error("Agent shadow observer unavailable; no trades submitted.");}
     await new Promise<void>(resolve=>{
@@ -59,7 +74,7 @@ export async function runAgentWorker(){
       const timer=setTimeout(done,3000);wake=done;
     });
   }
-  await listener.query("UNLISTEN bluewater_early_decision");listener.release();
+  await listener.query("UNLISTEN *");listener.release();
   await lockPool.end();
   await agentPool.end();
 }

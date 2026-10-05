@@ -1,3 +1,4 @@
+import {timedHistory} from "./waterx/timed-decision-store";
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { healthResponse, historyResponse, live, modelResponse, predictionsResponse } from "./btc/service";
@@ -186,6 +187,14 @@ export function registerRoutes(app: Express) {
       refreshHealth.record({interval:event.interval,roundId:current.roundId,stage:event.stage,outcome:"ok",
         elapsedMs:event.elapsedMs,retryCount:event.attempt,clock:"browser-untrusted"});
     res.status(202).json({status:"diagnostic-only"});
+  });
+  app.get("/api/waterx/timed-history",async(req,res)=>{
+    const interval=Number(req.query.interval),limit=Number(req.query.limit??50);
+    if(![5,15].includes(interval)||!Number.isInteger(limit)||limit<1||limit>100){
+      res.status(400).json({error:"Invalid timed-history interval or limit"});return;
+    }
+    try{res.set("Cache-Control","no-store").json(await timedHistory(interval as 5|15,limit));}
+    catch{res.status(503).json({error:"Timed strategy history unavailable; no outcome is fabricated."});}
   });
   // Coverage is intentionally separate from the high-frequency health route:
   // its bounded historical scan must not delay live market reads.

@@ -2,6 +2,7 @@ import * as React from "react";
 import { useState } from "react";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import type { RoundDecision } from "../../shared/round-decision";
+import type { TimedDecision, TimedState } from "../../shared/timed-decision";
 import { indicativeFiveDollar } from "../../shared/manual-opportunity";
 import type { AtomicDecisionView } from "./live-decision-contract";
 
@@ -22,6 +23,16 @@ const percent = (value: number | null | undefined) => value == null || !Number.i
   ? "Unavailable" : `${(value * 100).toFixed(1)}%`;
 const duration = (value: number | null | undefined) => value == null || !Number.isFinite(value) || value < 0
   ? "Unknown" : value < 1000 ? `${Math.floor(value)} ms` : `${(value / 1000).toFixed(1)} sec`;
+const mmss = (value: number | null | undefined) => {
+  if (value == null || !Number.isFinite(value)) return "—:—";
+  const seconds = Math.max(0, Math.ceil(value / 1000));
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+};
+const elapsedLabel = (value: number) => {
+  const seconds = Math.max(0, Math.floor(value / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+};
+const exactReason = (value: string | null | undefined) => value?.replaceAll("_", " ") ?? "No blocker reported";
 
 function healthLabel(value: string | undefined) {
   return value?.replaceAll("_", " ") ?? "UNKNOWN";
@@ -29,6 +40,101 @@ function healthLabel(value: string | undefined) {
 
 function sideLabel(side: "UP" | "DOWN" | null | undefined) {
   return side ?? "Unavailable";
+}
+
+function TimedDecisionCard({ timed, decision, now, liveFresh }: { timed: TimedState | null; decision: RoundDecision | null; now: number; liveFresh: boolean }) {
+  const saved: TimedDecision | null = timed?.saved ?? null;
+  const isLocked = saved?.status === "LOCKED" && saved.side !== null;
+  const stateKind = isLocked ? "locked"
+    : saved?.status === "NO_VALID_INPUT" || saved?.status === "MISSED_DEADLINE" || timed?.persistence === "FAILED" ? "failed"
+      : timed?.persistence === "SAVING" ? "saving" : "watching";
+  const status = isLocked ? `${saved.side} locked`
+    : saved?.status === "NO_VALID_INPUT" ? "Recorded · no valid input"
+      : saved?.status === "MISSED_DEADLINE" ? "Recorded · deadline missed"
+        : timed?.persistence === "FAILED" ? "Decision persistence failed"
+          : timed?.persistence === "SAVING" ? "Saving decision"
+            : timed?.phase === "EVALUATING" ? "Evaluating"
+              : timed?.phase === "DEADLINE" ? "Mandatory deadline reached"
+                : timed?.phase === "EXPIRED" ? "Round expired · no saved decision"
+                  : "Observing";
+  const nextLabel = timed?.phase === "OBSERVING" ? "TARGET DECISION IN"
+    : timed?.phase === "EVALUATING" ? "MANDATORY DECISION IN"
+      : timed?.phase === "DEADLINE" ? "HARD DEADLINE"
+        : timed?.phase === "EXPIRED" ? "ROUND STATUS" : "DECISION STATUS";
+  const countdown = timed?.phase === "OBSERVING" ? timed.targetAtMs - now
+    : timed?.phase === "EVALUATING" ? timed.hardDeadlineAtMs - now : null;
+  const savedProbability = saved?.probabilityUp;
+  const sideProbability = saved?.side === "UP" ? savedProbability
+    : saved?.side === "DOWN" ? saved.probabilityDown : null;
+  const liveSide = timed?.liveSide;
+  const liveProbability = timed?.liveProbabilityUp;
+  const displayedLiveProbability = liveSide === "UP" ? liveProbability
+    : liveSide === "DOWN" && liveProbability != null ? decision?.market?.probabilityDown ?? null : null;
+  const remainingRound = saved ? Math.max(0, saved.expiryMs - (saved.committedAtMs ?? saved.decisionAtMs)) : null;
+  const timeProgress = Math.max(0, Math.min(100, timed?.timeProgress == null ? 0 : timed.timeProgress * 100));
+  const readiness = Math.max(0, Math.min(100, timed?.readinessPercent ?? 0));
+
+  return <section className="mo-timed" aria-label="Early timed decision">
+    <div className="mo-timed-top">
+      <div className="mo-timed-title">
+        <span className="mo-label">EARLY STRATEGY · {timed?.strategyVersion ?? "waterx-timed-baseline-v1"}</span>
+        <strong className={`mo-timed-status ${stateKind}`} role="status">{status}</strong>
+        <small>{decision ? `${decision.intervalMinutes}m round · ${decision.roundId}` : "Waiting for exact-round authoritative state"}</small>
+      </div>
+      <div className="mo-timed-countdown">
+        <span className="mo-label">{nextLabel}</span>
+        <strong>{countdown == null ? (timed?.phase === "DEADLINE" ? "00:00" : "—:—") : mmss(countdown)}</strong>
+      </div>
+    </div>
+    <div className="mo-timed-evidence">
+      <div className="mo-timed-direction">
+        <span className="mo-label">{isLocked ? "FROZEN RESEARCH CHOICE" : "CURRENT LIVE LEAN"}</span>
+        <strong className={`mo-side ${(isLocked ? saved.side : liveSide)?.toLowerCase() ?? "unavailable"}`}>
+          {sideLabel(isLocked ? saved.side : liveSide)}
+        </strong>
+        <small>{isLocked
+          ? `Frozen probability ${percent(sideProbability)} · ${saved.observationId ? `source ${saved.observationId}` : "source not reported"}${liveFresh ? "" : " · current quote unavailable; frozen choice retained"}`
+          : `Live observation ${percent(displayedLiveProbability)} · source age ${duration(timed?.sourceAgeMs)}`}</small>
+      </div>
+      <div className="mo-progress-set">
+        <div className="mo-progress-label"><span>OBSERVATION TIME</span><b>{timed ? elapsedLabel(timed.elapsedMs) : "—:—"} elapsed</b></div>
+        <div className="mo-progress-track" role="progressbar" aria-label="Observation time progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(timeProgress)}>
+          <i style={{ transform: `scaleX(${timeProgress / 100})` }} />
+        </div>
+        <div className="mo-progress-label"><span>READINESS CONDITIONS</span><b>{timed ? `${readiness}%` : "Unavailable"}</b></div>
+        <div className="mo-progress-track readiness" role="progressbar" aria-label="Readiness conditions" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(readiness)}>
+          <i style={{ transform: `scaleX(${readiness / 100})` }} />
+        </div>
+      </div>
+    </div>
+    <div className="mo-timed-bottom">
+      {isLocked ? <div className="mo-timed-result">
+        <b>{saved.side} LOCKED · {elapsedLabel(saved.elapsedMs)} INTO ROUND · {elapsedLabel(remainingRound ?? 0)} REMAINING</b>
+        <span>{saved.lockReason.replaceAll("_", " ")} · decision ID <code>{saved.id}</code></span>
+        <span>Observation {saved.observationId ?? "not reported"} · received {stamp(saved.receivedAtMs)} · commit {stamp(saved.committedAtMs)}</span>
+        {saved.onTime === null && <span>On-time commit status not yet acknowledged.</span>}
+        {saved.operationalFailure && <span className="mo-failure-note">Operational failure: {saved.operationalFailure}</span>}
+      </div> : saved?.status === "NO_VALID_INPUT" ? <div className="mo-timed-result failed">
+        <b>NO VALID INPUT RECORDED</b>
+        <span>{saved.earlyBlocker.replaceAll("_", " ")}</span>
+        <span>Decision ID <code>{saved.id}</code> · operational failure {saved.operationalFailure ?? "none reported"}</span>
+      </div> : saved?.status === "MISSED_DEADLINE" ? <div className="mo-timed-result failed">
+        <b>HARD DEADLINE MISSED</b>
+        <span>{saved.earlyBlocker.replaceAll("_", " ")} · no late choice substituted.</span>
+        <span>Decision ID <code>{saved.id}</code> · recorded {stamp(saved.committedAtMs)}</span>
+      </div> : <div className="mo-timed-blocker">
+        <b>{timed?.phase === "EVALUATING" ? "CURRENT BLOCKER" : "READINESS BLOCKER"}</b>
+        <span>{exactReason(timed?.blocker)}</span>
+        {timed?.persistence === "FAILED" && <span className="mo-failure-note">Persistence failed · {timed.errorClass ?? "error class not reported"}</span>}
+        {timed?.phase === "DEADLINE" && <span>Deadline reached; waiting for authoritative persistence outcome. No lock is asserted before commit acknowledgement.</span>}
+      </div>}
+      <div className="mo-timed-safety">
+        <b>READ ONLY</b>
+        <span>Automatic execution disabled · order adapter unverified</span>
+        <span>Research probability is not a win guarantee.</span>
+      </div>
+    </div>
+  </section>;
 }
 
 function safeRoundUrl(value: string | undefined,decision:RoundDecision|null) {
@@ -83,7 +189,7 @@ function DecisionContent({
   const workerDuration = earlyCommit != null && early?.workerReceivedAtMs != null &&
     early.workerReceivedAtMs >= earlyCommit ? early.workerReceivedAtMs - earlyCommit : null;
   const persistenceStatus = decision?.earlyPersistence?.status;
-  const status = early ? "Locked"
+  const status = early ? "Adaptive benchmark saved"
     : persistenceStatus === "FAILED" ? "Conditions met; saving decision failed"
       : persistenceStatus === "SAVING" ? "Saving decision"
         : persistenceStatus === "SAVED" ? "Saved record unavailable"
@@ -110,7 +216,7 @@ function DecisionContent({
         <strong className={selectedSide ? `mo-side ${selectedSide.toLowerCase()}` : "mo-side unavailable"}>
           {sideLabel(selectedSide)}
         </strong>
-        <small>{early ? "Early research choice · immutable" : view.fresh && view.lean ? "Current live lean · not yet saved" : "No current side is established"}</small>
+        <small>{early ? "Adaptive early benchmark · separate from timed strategy" : view.fresh && view.lean ? "Current live lean · not yet saved" : "No current side is established"}</small>
       </div>
       <div className="mo-state-block">
         <span className="mo-label">STATUS</span>
@@ -188,8 +294,8 @@ function DecisionContent({
         <b className="mo-filter-result">UNQUALIFIED · requires {usd(minimumWinningProfit)} net profit if correct</b>
       </div>
       <div className="mo-early-audit">
-        <span className="mo-label">EARLY / CANONICAL ARE INDEPENDENT</span>
-        <strong>Early {early ? `${early.side} · ${stamp(early.committedAtMs)}` : persistenceStatus === "FAILED" ? "Save failed" : "Not saved"}</strong>
+        <span className="mo-label">ADAPTIVE / CANONICAL BENCHMARKS</span>
+        <strong>Adaptive early {early ? `${early.side} · ${stamp(early.committedAtMs)}` : persistenceStatus === "FAILED" ? "Save failed" : "Not saved"}</strong>
         <small>Canonical {canonical ? `${canonical.side} · ${stamp(canonical.committedAtMs)}` : "not committed"}{early ? ` · commit → browser ${duration(browserDuration)} · worker receipt ${duration(workerDuration)}` : ""}</small>
       </div>
     </div>
@@ -233,8 +339,12 @@ export function ManualOpportunity({ view, now, onRetry, refresh, browserReceived
       <span className="mo-missing-mark" aria-hidden="true">—</span>
       <div><strong>Data delayed · no exact-round decision snapshot</strong><p>{view.reason} Quotes and decisions are withheld until a matching snapshot arrives.</p></div>
     </div>}
-    {(!pending || decision) && <DecisionContent decision={decision} view={view} now={now} browserReceivedAtMs={browserReceivedAtMs}
-      minimumWinningProfit={minimumWinningProfit} onMinimumWinningProfitChange={setMinimumWinningProfit} />}
+    <TimedDecisionCard timed={decision?.timedDecision ?? null} decision={decision} now={now} liveFresh={view.fresh} />
+    <details className="mo-benchmark-details">
+      <summary>Canonical benchmark &amp; indicative $5 economics · separate from early strategy</summary>
+      {(!pending || decision) && <DecisionContent decision={decision} view={view} now={now} browserReceivedAtMs={browserReceivedAtMs}
+        minimumWinningProfit={minimumWinningProfit} onMinimumWinningProfitChange={setMinimumWinningProfit} />}
+    </details>
     <p className="mo-safety">Research display only · no wallet connection, signing, funded order or in-app submission. Requote after any navigation delay.</p>
   </section>;
 }

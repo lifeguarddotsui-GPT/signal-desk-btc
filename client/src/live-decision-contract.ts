@@ -1,6 +1,7 @@
 import type {RoundDecision} from "../../shared/round-decision";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {lockPolicy} from "../../shared/lock-readiness";
+import {TIMED_STRATEGY,timedWindow,type TimedDecision,type TimedState} from "../../shared/timed-decision";
 
 export type LiveSnapshotEnvelope={
   serverTime?:string;intervalMinutes?:number;status?:string;reason?:string;
@@ -14,6 +15,77 @@ export const projectServerClock=(serverAtMs:number,browserReceivedAtMs:number,br
 const integer=(n:unknown):n is number=>typeof n==="number"&&Number.isSafeInteger(n);
 const bounded=(n:unknown):n is number=>typeof n==="number"&&Number.isFinite(n)&&n>=0&&n<=1;
 const serverTime=(p:LiveSnapshotEnvelope)=>Date.parse(p.serverTime??"");
+const probabilityOrNull=(n:unknown):n is number|null=>n===null||bounded(n);
+
+function validateTimedDecisionState(timed:TimedState,d:RoundDecision,now:number):string|null{
+  const round=d,window=timedWindow(d.intervalMinutes),target=round.startMs+window.targetSeconds*1000;
+  const hard=round.startMs+window.hardSeconds*1000,elapsed=Math.max(0,now-round.startMs);
+  if(!timed||timed.strategyVersion!==TIMED_STRATEGY||timed.targetAtMs!==target||
+    timed.hardDeadlineAtMs!==hard||!integer(timed.elapsedMs)||timed.elapsedMs!==elapsed||
+    !Number.isFinite(timed.timeProgress)||timed.timeProgress<0||timed.timeProgress>1||
+    Math.abs(timed.timeProgress-Math.min(1,elapsed/(hard-round.startMs)))>0.001||
+    !["OBSERVING","EVALUATING","DEADLINE","EXPIRED"].includes(timed.phase)||
+    !integer(timed.readinessPercent)||timed.readinessPercent<0||timed.readinessPercent>100||
+    typeof timed.qualified!=="boolean"||typeof timed.blocker!=="string"||!timed.blocker||
+    (timed.liveSide!==null&&timed.liveSide!=="UP"&&timed.liveSide!=="DOWN")||
+    !probabilityOrNull(timed.liveProbabilityUp)||
+    (timed.liveProbabilityUp!==null&&!timed.liveSide)||
+    (timed.liveSide!==null&&timed.liveProbabilityUp===null)||
+    (timed.sourceAgeMs!==null&&(!integer(timed.sourceAgeMs)||timed.sourceAgeMs<0))||
+    !["WAITING","SAVING","FAILED","COMMITTED"].includes(timed.persistence)||
+    (timed.errorClass!==null&&typeof timed.errorClass!=="string"))
+    return "TIMED_STATE_INVALID";
+  const expectedPhase=now>=round.expiryMs?"EXPIRED":now>=hard?"DEADLINE":now>=target?"EVALUATING":"OBSERVING";
+  if(timed.phase!==expectedPhase)return "TIMED_PHASE_MISMATCH";
+
+  const saved=timed.saved;
+  if((timed.persistence==="COMMITTED")!==!!saved)return "TIMED_PERSISTENCE_STATE_MISMATCH";
+  if(!saved)return null;
+  if(saved.strategyVersion!==TIMED_STRATEGY||saved.network!=="sui:mainnet"||
+    saved.intervalMinutes!==round.intervalMinutes||saved.roundId!==round.roundId||
+    saved.startMs!==round.startMs||saved.expiryMs!==round.expiryMs||
+    typeof saved.id!=="string"||!saved.id||
+    !["LOCKED","NO_VALID_INPUT","MISSED_DEADLINE"].includes(saved.status)||
+    (saved.side!==null&&saved.side!=="UP"&&saved.side!=="DOWN")||
+    !probabilityOrNull(saved.probabilityUp)||!probabilityOrNull(saved.probabilityDown)||
+    !integer(saved.decisionAtMs)||saved.decisionAtMs<round.startMs||saved.decisionAtMs>now||
+    !integer(saved.elapsedMs)||saved.elapsedMs!==saved.decisionAtMs-round.startMs||
+    !integer(saved.targetAtMs)||saved.targetAtMs!==target||
+    !integer(saved.hardDeadlineAtMs)||saved.hardDeadlineAtMs!==hard||
+    (saved.committedAtMs!==null&&(!integer(saved.committedAtMs)||saved.committedAtMs<saved.decisionAtMs||saved.committedAtMs>now))||
+    // PostgreSQL notification delivery may precede the app observing its COMMIT response.
+    // These are distinct clocks/stages, not a guaranteed ack -> receipt ordering.
+    (saved.workerReceivedAtMs!==null&&(!integer(saved.workerReceivedAtMs)||
+      saved.workerReceivedAtMs<round.startMs||saved.workerReceivedAtMs>now+1000))||
+    (saved.onTime!==null&&typeof saved.onTime!=="boolean")||
+    (saved.onTime===true&&(saved.committedAtMs===null||saved.committedAtMs>hard))||
+    typeof saved.lockReason!=="string"||!saved.lockReason||
+    typeof saved.earlyBlocker!=="string"||!saved.earlyBlocker||
+    typeof saved.ambiguous!=="boolean"||
+    !saved.coverage||!integer(saved.coverage.n)||saved.coverage.n<0||
+    ![saved.coverage.firstAtMs,saved.coverage.lastAtMs,saved.coverage.maxGapMs]
+      .every(value=>value===null||integer(value)&&value>=0)||
+    (saved.observationId!==null&&typeof saved.observationId!=="string")||
+    (saved.receivedAtMs!==null&&(!integer(saved.receivedAtMs)||saved.receivedAtMs<round.startMs||saved.receivedAtMs>now))||
+    (saved.operationalFailure!==null&&typeof saved.operationalFailure!=="string")||
+    saved.automaticExecutionAllowed!==false||
+    !saved.evidence||typeof saved.evidence!=="object"||Array.isArray(saved.evidence))
+    return "TIMED_SAVED_IDENTITY_OR_FIELDS_INVALID";
+
+  if(saved.status==="LOCKED"){
+    if((saved.side!=="UP"&&saved.side!=="DOWN")||
+      !validWaterxProbabilityPair(saved.probabilityUp,saved.probabilityDown)||
+      !saved.observationId||saved.receivedAtMs===null||saved.coverage.n<1||
+      saved.decisionAtMs>=round.expiryMs||
+      (saved.receivedAtMs!==null&&saved.receivedAtMs>saved.decisionAtMs)||
+      (saved.side==="UP"&&saved.probabilityUp!==null&&saved.probabilityUp<saved.probabilityDown!)||
+      (saved.side==="DOWN"&&saved.probabilityDown!==null&&saved.probabilityDown<saved.probabilityUp!))
+      return "TIMED_LOCKED_CHOICE_INVALID";
+  }else if(saved.side!==null||saved.probabilityUp!==null||saved.probabilityDown!==null){
+    return "TIMED_FAILURE_RECORD_HAS_CHOICE";
+  }
+  return null;
+}
 export function validateLiveEnvelope(p:LiveSnapshotEnvelope,interval:5|15,previous:LiveSnapshotEnvelope|null=null):string|null{
   const now=serverTime(p),prior=previous?serverTime(previous):NaN;
   if(!Number.isFinite(now)||p.intervalMinutes!==interval)return "INTERVAL_OR_SERVER_TIME_INVALID";
@@ -102,6 +174,20 @@ export function validateDecisionSnapshot(p:LiveSnapshotEnvelope,interval:5|15,pr
     early.side!==old.earlyDecision.side||early.decisionAtMs!==old.earlyDecision.decisionAtMs||
     early.probabilityUp!==old.earlyDecision.probabilityUp||early.eventId!==old.earlyDecision.eventId))
     return "IMMUTABLE_EARLY_DECISION_REGRESSION";
+  const timed=d.timedDecision??null;
+  if(timed){
+    const timedError=validateTimedDecisionState(timed,d,now);
+    if(timedError)return timedError;
+  }
+  const previousTimed=old?.timedDecision??null;
+  if(previousTimed?.saved&&old?.roundId===d.roundId&&old.startMs===d.startMs&&old.expiryMs===d.expiryMs){
+    const priorSaved=previousTimed.saved,currentSaved=timed?.saved;
+    if(!currentSaved||currentSaved.id!==priorSaved.id||currentSaved.status!==priorSaved.status||
+      currentSaved.side!==priorSaved.side||currentSaved.decisionAtMs!==priorSaved.decisionAtMs||
+      currentSaved.probabilityUp!==priorSaved.probabilityUp||
+      currentSaved.probabilityDown!==priorSaved.probabilityDown)
+      return "IMMUTABLE_TIMED_DECISION_REGRESSION";
+  }
   if(d.opportunity&&(d.opportunity.sourceId!=="waterx.public.crypto.v1"||
     !d.opportunity.observationId||!integer(d.opportunity.receivedAtMs)||
     d.opportunity.receivedAtMs<r.startMs||d.opportunity.receivedAtMs>now))

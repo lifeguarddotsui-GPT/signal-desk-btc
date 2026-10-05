@@ -4,6 +4,7 @@ import { createWaterxBackgroundQueue } from "./background-queue";
 import { captureLockObservation } from "./lock-store";
 import { createLockTimers } from "./lock-timers";
 import { captureResearchObservation } from "./research-store";
+import { roundDecisions } from "./round-decision";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement, type WaterxRoundInput } from "./learning";
@@ -241,6 +242,10 @@ export function buildWaterxLivePayload(
 
   return {
     serverTime: new Date(now).toISOString(),
+    captureQueues:{canonical:canonicalLockQueue.metrics(now),early:earlyLockQueue.metrics(now),
+      optional:observationQueue.metrics(now)},
+    decision:round?roundDecisions.read({intervalMinutes:interval,roundId:round.id,
+      startMs:round.startsAt*1000,expiryMs:round.endsAt*1000},now):null,
     status: liveStatus,
     intervalMinutes: interval,
     round: round ? {
@@ -307,7 +312,7 @@ export function buildWaterxLivePayload(
       },
       model: optionalEndpoint("/api/waterx/model"),
     },
-    decision: { action: "HOLD" as const, reason: "Read-only data source; no recommendation or order is generated." },
+    execution: { action: "HOLD" as const, reason: "Read-only data source; no recommendation or order is generated." },
     reason,
   };
 }
@@ -385,6 +390,11 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
       // Do not substitute it into odds provenance.
       providerSourceAtMs:null,
     };
+    // Publish live progress independently of slow storage and historical reports.
+    if(input.probabilityUp!==null&&input.probabilityDown!==null)roundDecisions.observe(input,{
+      atMs:Date.parse(input.observedAt),receivedAtMs:input.receivedAtMs??Date.parse(input.observedAt),
+      providerSourceAtMs:null,probabilityUp:input.probabilityUp,probabilityDown:input.probabilityDown,
+      sourceHealthy:true});
     earlyLockTimers.arm({intervalMinutes:interval,roundId:round.id,startMs,expiryMs});
     canonicalLockQueue.enqueue(input);
     // Early readiness remains research/shadow, never an execution trigger.

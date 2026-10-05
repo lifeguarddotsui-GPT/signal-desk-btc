@@ -8,12 +8,14 @@ import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
 import { AdvisoryCards } from "./AdvisoryCards";
 import { type AdvisoryPayload } from "./advisory-contract";
 import type { ResearchDailyJob, ResearchInterval, ResearchReport } from "../../shared/waterx-research";
+import type { HistorySource } from "../../shared/canonical-history";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
 import CanonicalHistory from "./CanonicalHistory";
 import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
 import type { BluewaterReport } from "../../shared/bluewater-research";
+import { RoundDecisionPanel, type RoundDecisionEvidence } from "./LockReadinessPanel";
 import AgentPage from "./AgentPage";
 
 type Interval = 5 | 15;
@@ -29,6 +31,7 @@ type LivePayload = {
   availability?: Availability;
   learning?: Record<string, unknown>;
   advisory?: AdvisoryPayload & { amountEnteredUsd?: number };
+  decision?: RoundDecisionEvidence | null;
 };
 type ChartCoverage = { startMs?: number; endMs?: number; expectedSamples?: number; observedSamples?: number; percent?: number; partial?: boolean; status?: string; reason?: string; observationSpanMs?: number; requestedDurationMs?: number; missingStartMs?: number | null; missingEndMs?: number | null; gapCount?: number; observedPointCount?: number; measurement?: string };
 type ChartPayload = { windowMinutes: number; source: string; points: Point[]; coverage?: ChartCoverage };
@@ -37,12 +40,15 @@ type ResearchOperations = {
   status: "ok";
   intervalMinutes: number;
   asOfMs: number;
-  cohort: { intervalMinutes: number; window: string; source: "baseline" | "bluewater" };
+  cohort: { intervalMinutes: number; window: string; source: HistorySource };
   summary: { correct: number; incorrect: number; pending: number; withdrawn: number; noChoice: number; scored: number; hitRate: number | null; ratio: string; coverage: number | null; total: number };
   operations: { lastCaptureAt: string | null; lastTrainingAt: string | null; lastCalibrationAt: string | null; lastEvaluationAt: string | null; lastCandidateAt: string | null; lastPromotionAt: string | null; blockers: string[]; trainingCount: number };
   definitions: { history: string; training: string };
   dailyJob: ResearchDailyJob;
 };
+
+const historySourceLabel = (source: HistorySource) => source === "baseline" ? "WaterX market baseline"
+  : source === "bluewater" ? "Bluewater champion" : "Deterministic 50/50 fallback · research-only";
 
 function useApi<T>(url: string, refreshMs = 0, enabled = true) {
   const [data, setData] = useState<T | null>(null);
@@ -170,7 +176,7 @@ function LivePage() {
   const learning = useApi<Record<string, unknown>>(learningUrl, 60000, !fixtureMode);
   const health = useApi<WaterxHealth>(healthUrl, 10000, !fixtureMode);
   const research = useApi<ResearchReport>(researchUrl, 3000, !fixtureMode);
-  const lockReadiness = useApi<LockReadinessReport>(lockReadinessUrl, 3000, import.meta.env.DEV && !fixtureMode);
+  const lockReadiness = useApi<LockReadinessReport>(lockReadinessUrl, 60000, !fixtureMode);
   const bluewater = useApi<BluewaterReport>(bluewaterUrl, 5000, !fixtureMode);
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const fixtureNow = now;
@@ -477,21 +483,28 @@ function LivePage() {
         <div className="distance-readout"><span>DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Percent unavailable" : `${Math.abs(priceDeltaPct).toFixed(3)}% ${priceDelta! >= 0 ? "above" : "below"}`}</small></div>
         <span className="round-count"><span>BTC · {interval}m CLOSES</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong></span>
       </div>
+      <RoundDecisionPanel
+        decision={!fixtureMode && live.loadedUrl === liveUrl ? payload?.decision ?? null : null}
+        interval={interval as ResearchInterval}
+        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
+        now={serverNow}
+        browserReceivedAtMs={live.updated}
+        loading={!fixtureMode && live.loading && !payload}
+        error={!fixtureMode && live.error && live.errorUrl === liveUrl ? live.error : undefined}
+        retry={live.reload}
+        simulated={!!fixtureMode}
+        historicalReport={!fixtureMode && lockReadiness.loadedUrl === lockReadinessUrl &&
+          lockReadiness.data?.intervalMinutes === interval ? lockReadiness.data : null}
+        historicalLoading={!fixtureMode && lockReadiness.loading}
+        historicalError={!fixtureMode && lockReadiness.error && lockReadiness.errorUrl === lockReadinessUrl ? lockReadiness.error : undefined}
+        retryHistorical={lockReadiness.reload}
+      />
       <ResearchChoiceCard
         report={research.loadedUrl === researchUrl && research.data?.intervalMinutes === interval ? research.data : null}
         interval={interval as ResearchInterval}
         round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
         loading={!fixtureMode && research.loading}
         error={!fixtureMode && research.error && research.errorUrl === researchUrl ? research.error : undefined}
-        lockReport={import.meta.env.DEV && !fixtureMode && lockReadiness.loadedUrl === lockReadinessUrl &&
-          lockReadiness.data?.intervalMinutes === interval &&
-          lockReadiness.data.current?.roundId === round?.id &&
-          lockReadiness.data.current?.startMs === round?.startMs &&
-          lockReadiness.data.current?.expiryMs === round?.expiryMs ? lockReadiness.data : null}
-        lockNow={now}
-        lockEnabled={import.meta.env.DEV && !fixtureMode}
-        lockLoading={import.meta.env.DEV && !fixtureMode && lockReadiness.loading}
-        lockError={import.meta.env.DEV && !fixtureMode && lockReadiness.error && lockReadiness.errorUrl === lockReadinessUrl ? lockReadiness.error : undefined}
         marketOdds={{
           up: upProbabilityCurrent ? fmtProbability(odds?.up) : "Unavailable",
           down: downProbabilityCurrent ? fmtProbability(odds?.down) : "Unavailable",
@@ -646,20 +659,27 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
 
 function HistoryPage() {
   const [interval, setInterval] = useIntervalPreference();
-  const url = `/api/waterx/history?interval=${interval}`;
+  const [historySource, setHistorySource] = useState<HistorySource>("baseline");
+  const url = `/api/waterx/history?interval=${interval}&source=${historySource}`;
   const result = useApi<{ rows?: Record<string, unknown>[] }>(url, 30000);
   const intervalResponseReady = result.loadedUrl === url;
   const rows = intervalResponseReady ? result.data?.rows ?? [] : [];
   return <div className="page inner-page">
-    <PageTitle index="02" title="Round history"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
-    <div className="intro-line"><p>Recorded WaterX rounds and their reported reference prices. Each interval is a different market duration.</p><span>{rows.length} rows returned</span></div>
+    <PageTitle index="02" title="Round history"><div className="heading-right"><label className="history-source-select">HISTORY SOURCE<select value={historySource} onChange={event => setHistorySource(event.target.value as HistorySource)}><option value="baseline">WaterX market baseline</option><option value="bluewater">Bluewater champion</option><option value="fallback">Deterministic 50/50 fallback · research-only</option></select></label><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
+    <div className="intro-line"><p>Recorded WaterX rounds and their reported reference prices. Each interval is a different market duration.</p><span>{historySourceLabel(historySource)} · {rows.length} rows</span></div>
+    {historySource === "fallback" && <div className="history-note"><ShieldAlert size={15} /> Deterministic 50/50 tie-break evidence only · low-confidence research cohort, isolated from baseline and champion denominators. No trade, return, or P&amp;L inference.</div>}
     {result.error && result.errorUrl === url ? <ErrorBox message={result.error} retry={result.reload} /> : !intervalResponseReady ? <Skeleton height={330} /> :
       rows.length ? <div className="table-frame"><table><thead><tr><th>Round</th><th>Start · UTC</th><th>Close · UTC</th><th>Price to beat</th><th>Settlement</th><th>Outcome</th><th>Evidence</th><th>Market UP at capture</th></tr></thead><tbody>{rows.map((r, i) => {
         const id = String(r.roundId ?? `round-${i}`);
         const started = r.startMs;
         const ended = r.expiryMs;
         const anchor = typeof r.anchorPrice === "number" ? r.anchorPrice : null;
-        return <tr key={id}><td className="mono-cell" title={id}>{id.slice(0, 8)}…</td><td>{utc(typeof started === "number" ? started : undefined)}</td><td>{utc(typeof ended === "number" ? ended : undefined)}</td><td>{fmtUsd(anchor)}{r.anchorConfirmed !== true && <small> · pending confirmation</small>}</td><td>{fmtUsd(typeof r.settlePrice === "number" ? r.settlePrice : null)}</td><td><span className={`outcome ${String(r.outcome ?? "").toLowerCase()}`}>{String(r.outcome ?? "Unresolved")}</span></td><td title={typeof r.withheldReason === "string" ? r.withheldReason : undefined}>{String(r.labelStatus ?? "unresolved")}</td><td>{typeof r.probabilityUp === "number" ? `${(r.probabilityUp * 100).toFixed(1)}%` : "Not captured"}</td></tr>;
+        const evidence = r.evidence && typeof r.evidence === "object" ? r.evidence as Record<string, unknown> : {};
+        const tieBreakApplied = evidence.tieBreakApplied === true;
+        const evidenceLabel = tieBreakApplied ? "50/50 tie-break · research-only"
+          : historySource === "fallback" ? "Fallback cohort · tie-break evidence unavailable"
+            : String(r.labelStatus ?? "unresolved");
+        return <tr key={id}><td className="mono-cell" title={id}>{id.slice(0, 8)}…</td><td>{utc(typeof started === "number" ? started : undefined)}</td><td>{utc(typeof ended === "number" ? ended : undefined)}</td><td>{fmtUsd(anchor)}{r.anchorConfirmed !== true && <small> · pending confirmation</small>}</td><td>{fmtUsd(typeof r.settlePrice === "number" ? r.settlePrice : null)}</td><td><span className={`outcome ${String(r.outcome ?? "").toLowerCase()}`}>{String(r.outcome ?? "Unresolved")}</span></td><td title={typeof r.withheldReason === "string" ? r.withheldReason : undefined}>{evidenceLabel}</td><td>{typeof r.probabilityUp === "number" ? `${(r.probabilityUp * 100).toFixed(1)}%` : "Not captured"}</td></tr>;
       })}</tbody></table></div> : <div className="empty-state"><Clock3 size={22} /><strong>No recorded rounds returned</strong><span>History is shown only when the WaterX archive has recorded rows. No examples are fabricated.</span></div>}
     <div className="history-note"><ShieldCheck size={15} /> These are observed records, not a performance claim or trading recommendation.</div>
   </div>;
@@ -667,7 +687,7 @@ function HistoryPage() {
 
 function LearningPage() {
   const [interval, setInterval] = useIntervalPreference();
-  const [operationsSource, setOperationsSource] = useState<"baseline" | "bluewater">("baseline");
+  const [operationsSource, setOperationsSource] = useState<HistorySource>("baseline");
   const [operationsWindow, setOperationsWindow] = useState("lifetime");
   const url = `/api/waterx/model?interval=${interval}`;
   const result = useApi<Record<string, unknown>>(url, 60000);
@@ -750,18 +770,18 @@ function LearningPage() {
       <section className="research-operations-panel">
         <div className="learning-section-heading">
           <div><div className="eyebrow">READ-ONLY RESEARCH OPERATIONS</div><h2>Capture & learning status</h2></div>
-          <span>{interval}m · {operationsWindow} · {operationsSource === "baseline" ? "WaterX baseline" : "Bluewater champion"}</span>
+          <span>{interval}m · {operationsWindow} · {historySourceLabel(operationsSource)}</span>
         </div>
-        <p className="research-operations-note">Operational timestamps and cohort summary use the same selected source, interval, and window denominators. Bluewater champion results are never substituted with the market baseline.</p>
+        <p className="research-operations-note">Operational timestamps and cohort summary use the same selected source, interval, and window denominators. The 50/50 fallback is an isolated low-confidence research cohort selected only through its tie-break evidence; it does not modify baseline or champion results and implies no trade or P&amp;L.</p>
         <div className="research-operations-filters">
-          <label>History source<select value={operationsSource} onChange={event => setOperationsSource(event.target.value as "baseline" | "bluewater")}><option value="baseline">WaterX market baseline</option><option value="bluewater">Bluewater champion</option></select></label>
+          <label>History source<select value={operationsSource} onChange={event => setOperationsSource(event.target.value as HistorySource)}><option value="baseline">WaterX market baseline</option><option value="bluewater">Bluewater champion</option><option value="fallback">Deterministic 50/50 fallback · research-only</option></select></label>
           <label>History window<select value={operationsWindow} onChange={event => setOperationsWindow(event.target.value)}>{[["lifetime","Lifetime"],["100","Last 100"],["50","Last 50"],["20","Last 20"],["24h","24 hours"],["7d","7 days"]].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         </div>
         {operations.error && operations.loadedUrl !== operationsUrl ? <div className="research-operations-state" role="alert"><strong>Research operations unavailable</strong><span>{operations.error}</span><button className="quiet-button" onClick={operations.reload}>Retry</button></div>
           : !operations.data || operations.loadedUrl !== operationsUrl ? <div className="research-operations-skeleton" role="status">Loading selected cohort operations…</div>
             : <>
               {operations.error && operations.loadedUrl === operationsUrl && <div className="research-operations-refresh-warning" role="status">Refresh failed; showing the last successfully loaded operations report for this selected cohort. <button className="quiet-button" onClick={operations.reload}>Retry</button></div>}
-              <p className="research-operations-asof">API cohort · {operations.data.cohort.intervalMinutes}m · {operations.data.cohort.window} · {operations.data.cohort.source === "baseline" ? "WaterX market baseline" : "Bluewater champion"} · as of {new Date(operations.data.asOfMs).toLocaleString()}</p>
+              <p className="research-operations-asof">API cohort · {operations.data.cohort.intervalMinutes}m · {operations.data.cohort.window} · {historySourceLabel(operations.data.cohort.source)} · as of {new Date(operations.data.asOfMs).toLocaleString()}</p>
               <div className="research-operations-summary">
                 {([["Correct",operations.data.summary.correct],["Incorrect",operations.data.summary.incorrect],["Pending",operations.data.summary.pending],["Withdrawn / disputed",operations.data.summary.withdrawn],["No choice",operations.data.summary.noChoice],["Scored",operations.data.summary.scored],["Correct : incorrect",operations.data.summary.ratio],["Hit rate",fmtProbability(operations.data.summary.hitRate)],["Choice coverage",fmtProbability(operations.data.summary.coverage)],["Cohort rounds",operations.data.summary.total]] as [string,string | number][]).map(([label,value]) => <div key={label}><span>{label}</span><b>{value}</b></div>)}
               </div>

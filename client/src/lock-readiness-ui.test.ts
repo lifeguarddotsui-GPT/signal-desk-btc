@@ -4,27 +4,30 @@ import { test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
-import { LockReadinessPanel } from "./LockReadinessPanel";
+import { LockReadinessPanel, RoundDecisionPanel, type RoundDecisionEvidence } from "./LockReadinessPanel";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const panel = readFileSync(new URL("./LockReadinessPanel.tsx", import.meta.url), "utf8");
 const card = readFileSync(new URL("./ResearchChoiceCard.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("./index.css", import.meta.url), "utf8");
 
-test("readiness is development-only, interval polled, fixture-suppressed, and exact-round scoped", () => {
+test("live decision readiness is production-loaded, interval polled, fixture-suppressed, and mounted above the chart", () => {
   assert.match(app, /`\/api\/waterx\/lock-readiness\?interval=\$\{interval\}`/);
-  assert.match(app, /useApi<LockReadinessReport>\(lockReadinessUrl, 3000, import\.meta\.env\.DEV && !fixtureMode\)/);
-  for (const key of ["loadedUrl === lockReadinessUrl", "intervalMinutes === interval", "roundId === round?.id", "startMs === round?.startMs", "expiryMs === round?.expiryMs"]) {
-    assert.ok(app.includes(key), `missing report identity gate: ${key}`);
-  }
-  assert.match(app, /lockReport=\{import\.meta\.env\.DEV && !fixtureMode/);
+  assert.match(app, /useApi<LockReadinessReport>\(lockReadinessUrl, 60000, !fixtureMode\)/);
+  assert.match(app, /<RoundDecisionPanel/);
+  assert.ok(app.indexOf("<RoundDecisionPanel") < app.indexOf("<section className=\"chart-panel\">"), "decision card must appear above the chart");
+  assert.match(app, /decision=\{!fixtureMode && live\.loadedUrl === liveUrl/);
+  assert.match(panel, /decision\.roundId === round\.id/);
+  assert.match(panel, /decision\.startMs === round\.startMs/);
+  assert.match(panel, /decision\.expiryMs === round\.expiryMs/);
+  assert.match(panel, /latestSafeOrderAtMs === null/);
 });
 
 test("candidate status can never overwrite the immutable canonical lifecycle", () => {
-  assert.match(card, /lockReport\?: LockReadinessReport \| null/);
-  assert.match(card, /<LockReadinessPanel/);
   assert.match(card, /FINAL CHOICE: \$\{finalSide\}/);
   assert.match(card, /research-lifecycle/);
+  assert.doesNotMatch(card, /LockReadinessPanel/);
+  assert.match(panel, /Historical readiness comparison · separate research feed/);
   assert.match(panel, /SHADOW EARLY CANDIDATE/);
   assert.match(panel, /canonical FINAL CHOICE remains governed by the existing lifecycle/);
   assert.match(panel, /Lock readiness is not win probability/);
@@ -71,4 +74,42 @@ test("small-phone layouts constrain readiness details without hiding evidence", 
   assert.match(css, /@media \(max-width: 700px\)[\s\S]*?\.lock-readiness-grid \{ grid-template-columns: repeat\(2/);
   assert.match(css, /@media \(max-width: 380px\)[\s\S]*?\.lock-comparison, \.lock-checkpoints \{ grid-template-columns: minmax\(0,1fr\)/);
   assert.match(css, /\.lock-current \{ display: grid; grid-template-columns: 1\.4fr/);
+  assert.match(css, /\.round-decision-facts \{ grid-template-columns: repeat\(2/);
+  assert.match(css, /@media \(max-width: 390px\)[\s\S]*?\.round-decision-detail/);
+});
+
+test("primary progress uses only exact fresh server evidence and never invents execution timing", () => {
+  const now = 1_700_000_000_000;
+  const round = { id: "round-live", startMs: now - 10_000, expiryMs: now + 240_000 };
+  const decision: RoundDecisionEvidence = {
+    network: "sui:mainnet", intervalMinutes: 5, roundId: round.id, ...round,
+    policyVersion: "policy-v1", stateVersion: 4, updatedAtMs: now, publishedAtMs: now,
+    readiness: {
+      state: "READY", score: 83, side: "UP", probability: .71, evaluatedAtMs: now,
+      secondsRemaining: 240, sameSideMs: 25_000, earliestPossibleAtMs: now,
+      reason: "Source gap exceeds the allowed observation interval.", health: "WAITING FOR EVIDENCE",
+      components: { strength: .71, requiredStrength: .65, persistenceMs: 25_000, requiredPersistenceMs: 12_000, range: .02, reversals: 0, observationCount: 8, ageMs: 900, gapReset: false, velocity: .001, acceleration: .001, sourceHealthy: true, withinWindow: true, fresh: true, stable: true },
+    },
+    canonical: null, latestSafeOrderAtMs: null, executionWindowRemainingMs: null,
+    executionBlocker: "No verified order path.", tradeAllowed: false,
+  };
+  const markup = renderToStaticMarkup(React.createElement(RoundDecisionPanel, {
+    decision, interval: 5, round, now, browserReceivedAtMs: now, historicalReport: null,
+  }));
+  assert.match(markup, /83/);
+  assert.match(markup, /DIRECTION STRENGTH/);
+  assert.match(markup, /Source gap exceeds the allowed observation interval/);
+  assert.match(markup, /LATEST SAFE ORDER TIME<\/span><strong>Unknown/);
+  assert.match(markup, /EXECUTION WINDOW<\/span><strong>Unknown/);
+  assert.match(markup, /Browser receipt · local clock/);
+  assert.match(markup, /Signal strength · not win probability/);
+  assert.doesNotMatch(markup, /0\.71/);
+
+  const otherRound = renderToStaticMarkup(React.createElement(RoundDecisionPanel, {
+    decision, interval: 5, round: { ...round, id: "next-round" }, now, browserReceivedAtMs: now,
+  }));
+  assert.doesNotMatch(otherRound, /83/);
+  assert.match(otherRound, /aria-valuenow="0"/);
+  assert.doesNotMatch(otherRound, /LEANING UP/);
+  assert.match(otherRound, /Waiting for fresh advisory evidence matching the active round/);
 });

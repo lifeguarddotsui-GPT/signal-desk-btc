@@ -38,9 +38,7 @@ export const agentPolicySchema = z.object({
       ["sizingMode", p.sizingMode !== "FIXED"], ["compound", p.compound],
       ["fixedCents", p.fixedCents > 500],
       ["maxOrderCents", p.maxOrderCents === null || p.maxOrderCents > 500],
-      ["dailyTurnoverCents", p.dailyTurnoverCents === null || p.dailyTurnoverCents > 500],
-      ["maxUnresolved", p.maxUnresolved.mode !== "AMOUNT" || p.maxUnresolved.value > 500],
-    ] as const) if (invalid) c.addIssue({code:"custom",path:[path],message:"Single-order mainnet pilot requires <= $5 per order, <= $5 wallet-wide unresolved exposure, <= $5 daily turnover and no compounding"});
+    ] as const) if (invalid) c.addIssue({code:"custom",path:[path],message:"Mainnet beta requires <= $5 all-in per order, fixed sizing and no compounding; exposure and daily turnover are separate owner controls"});
   }
   for (const [path, v] of [["dailyLoss", p.dailyLoss], ["maxUnresolved", p.maxUnresolved]] as const) {
     if (v?.mode === "PERCENT" && v.value > 100) c.addIssue({ code: "custom", path: [path], message: "Percentage must be at most 100" });

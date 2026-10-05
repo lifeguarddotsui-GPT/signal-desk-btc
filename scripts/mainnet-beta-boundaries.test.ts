@@ -10,10 +10,13 @@ test("mainnet beta defaults are fixed <= $5, no compounding, bounded turnover an
   assert.equal(p.network,"mainnet");assert.equal(p.sizingMode,"FIXED");assert.equal(p.compound,false);
   assert.equal(p.maxOrderCents,500);assert.deepEqual(p.intervals,[5,15]);
   for(const patch of [{fixedCents:501},{sizingMode:"AVAILABLE_PERCENT"},{sizingMode:"ALLOCATION_PERCENT"},
-    {compound:true},{maxOrderCents:null},{maxOrderCents:501},{dailyTurnoverCents:null},
-    {maxUnresolved:{mode:"PERCENT",value:30}},{maxUnresolved:{mode:"AMOUNT",value:1001}}])
+    {compound:true},{maxOrderCents:null},{maxOrderCents:501}])
     assert.equal(agentPolicySchema.safeParse({...p,...patch}).success,false,JSON.stringify(patch));
   assert.equal(agentPolicySchema.safeParse({...p,fixedCents:100,maxOrderCents:100}).success,true);
+  for(const patch of [{dailyTurnoverCents:null},{dailyTurnoverCents:2500},
+    {maxUnresolved:{mode:"PERCENT",value:30}},{maxUnresolved:{mode:"AMOUNT",value:1001}}])
+    assert.equal(agentPolicySchema.safeParse({...p,...patch}).success,true);
+  assert.equal(p.dailyTurnoverCents,500);assert.deepEqual(p.maxUnresolved,{mode:"AMOUNT",value:500});
 });
 test("mainnet risk ceiling includes settlement fees, independently from the order-sizing cap",()=>{
   const now=290000;

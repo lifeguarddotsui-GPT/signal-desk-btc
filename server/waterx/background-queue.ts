@@ -11,13 +11,20 @@ export function createWaterxBackgroundQueue<T extends { intervalMinutes: WaterxI
 ) {
   const active = new Map<WaterxInterval, Promise<void>>();
   const pending = new Map<WaterxInterval, T>();
+  const startedAt=new Map<WaterxInterval,number>();
+  let completed=0,failures=0,coalesced=0,lastFailureAtMs:number|null=null;
   const enqueue = (input: T): void => {
     const interval = input.intervalMinutes;
     if (active.has(interval)) {
+      coalesced++;
       pending.set(interval, input);
       return;
     }
-    const job = run(input).catch(error => onFailure(interval, error)).finally(() => {
+    startedAt.set(interval,Date.now());
+    const job = run(input).catch(error => {
+      failures++;lastFailureAtMs=Date.now();onFailure(interval,error);
+    }).finally(() => {
+      completed++;startedAt.delete(interval);
       if (active.get(interval) === job) active.delete(interval);
       const next = pending.get(interval);
       pending.delete(interval);
@@ -25,5 +32,8 @@ export function createWaterxBackgroundQueue<T extends { intervalMinutes: WaterxI
     });
     active.set(interval, job);
   };
-  return { enqueue, active, pending };
+  return { enqueue, active, pending,metrics:(now=Date.now())=>({
+    active:active.size,pending:pending.size,depth:active.size+pending.size,
+    oldestActiveAgeMs:startedAt.size?Math.max(...Array.from(startedAt.values(),at=>Math.max(0,now-at))):null,
+    completed,failures,coalesced,lastFailureAtMs}) };
 }

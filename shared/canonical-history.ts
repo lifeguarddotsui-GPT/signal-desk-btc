@@ -1,5 +1,5 @@
 export type HistoryResult = "CORRECT" | "INCORRECT" | "PENDING" | "WITHDRAWN-DISPUTED" | "NO CHOICE";
-export type HistorySource = "baseline" | "bluewater";
+export type HistorySource = "baseline" | "bluewater" | "fallback";
 export type HistoryFact = {
   intervalMinutes:5|15;roundId:string;startMs:number;expiryMs:number;
   choiceState:string|null;side:string|null;probabilityUp:number|null;lockAtMs:number|null;
@@ -14,8 +14,10 @@ export function projectHistory(f:HistoryFact,source:HistorySource) {
     !f.verifiedOutcome?"PENDING":f.side===f.outcome?"CORRECT":"INCORRECT";
   return {intervalMinutes:f.intervalMinutes,roundId:f.roundId,startMs:f.startMs,expiryMs:f.expiryMs,
     side:valid?f.side:null,probability:valid?(f.side==="UP"?f.probabilityUp:1-f.probabilityUp!):null,
-    source:!valid?(source==="bluewater"?"No champion choice recorded":"No baseline choice recorded"):
-      source==="baseline"?"WaterX Market Baseline":"Bluewater frozen champion",
+    source:!valid?(source==="bluewater"?"No champion choice recorded":source==="fallback"?
+      "No fallback choice recorded":"No baseline choice recorded"):
+      source==="baseline"?"WaterX Market Baseline":source==="fallback"?
+      "Deterministic 50/50 research fallback":"Bluewater frozen champion",
     modelVersion:valid?f.modelVersion:null,lockAtMs:valid?f.lockAtMs:null,
     secondsBeforeExpiry:valid?(f.expiryMs-f.lockAtMs!)/1000:null,
     outcome:f.verifiedOutcome&&!f.disputed?f.outcome:null,

@@ -6,7 +6,7 @@ import type { ResearchTrainingQueryable } from "./research-training";
 export const historyQuerySchema=z.object({
   interval:z.enum(["all","5","15"]).default("all"),
   window:z.enum(["lifetime","100","50","20","24h","7d"]).default("lifetime"),
-  source:z.enum(["baseline","bluewater"]).default("baseline"),
+  source:z.enum(["baseline","bluewater","fallback"]).default("baseline"),
 }).strict();
 export async function canonicalHistory(query:unknown,now=Date.now(),db:ResearchTrainingQueryable=researchPool) {
   const q=historyQuerySchema.parse(query),source=q.source as HistorySource;
@@ -15,11 +15,12 @@ export async function canonicalHistory(query:unknown,now=Date.now(),db:ResearchT
   // No later odds fill a missing choice. Exact identity includes both boundaries.
   // Multiple champion freezes for one primary checkpoint are an ambiguity, not
   // permission to pick the most successful model after observing its outcome.
-  const choiceJoin=source==="baseline"?`LEFT JOIN LATERAL (
+  const choiceJoin=source!=="bluewater"?`LEFT JOIN LATERAL (
       SELECT count(*) AS n,jsonb_agg(to_jsonb(c)) AS choices FROM waterx_research_choices c
       WHERE c.interval_minutes=l.interval_minutes AND c.round_id=l.round_id
         AND c.start_ms=l.start_ms AND c.expiry_ms=l.expiry_ms
         AND (c.choice_source IS NULL OR c.choice_source='market_baseline')
+         AND COALESCE(c.evidence->>'tieBreakApplied','false') ${source==="fallback"?"=":"<>"} 'true'
     ) c ON true`:`LEFT JOIN LATERAL (
       SELECT count(*) AS n,jsonb_agg(jsonb_build_object('state','FROZEN','side',f.chosen_side,
         'probability_up',f.displayed_probability_up,'decision_at_ms',f.decision_at_ms,'model_version',f.model_version,
@@ -60,7 +61,8 @@ export async function canonicalHistory(query:unknown,now=Date.now(),db:ResearchT
           "Multiple frozen choices match this exact checkpoint; no choice was selected after settlement.":
           c?.no_choice_reason??(source==="bluewater"?
             "No champion forecast was prospectively frozen at the pinned primary checkpoint. Baseline and shadow forecasts do not substitute.":
-            "No valid prospective baseline choice was recorded. Historical observations are not backfilled into predictions."),
+             source==="fallback"?"No prospectively frozen 50/50 fallback was recorded. This cohort excludes ordinary baseline and champion choices.":
+             "No valid prospective non-tied baseline choice was recorded. Historical observations are not backfilled into predictions."),
         artifactDigest:projected.side===null?null:c?.artifact_digest??c?.evidence?.artifactDigest??null,
         evidence:projected.side===null?null:c?.evidence??null};
     });

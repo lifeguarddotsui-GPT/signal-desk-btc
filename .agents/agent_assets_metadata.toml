@@ -602,3 +602,17 @@ mtime_ms = 1791059864402
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/32d84728-c776-43b5-be86-8cd372db9755/3868dbf0-1db2-4117-9401-955681639a46"
 storage_version_token = "1791060186293618"
 content_type = "text/csv"
+
+[[outputs]]
+id = "HRTJcFLuv0nNHpuYCNydu"
+uri = "file://reports/repair-release-evidence.html"
+type = "html"
+title = "Bluewater repair audit and real preview screenshots"
+description = "Build parity, production coverage and timing findings, learning status, official mainnet SDK probe, implemented preview repairs, and explicit release blockers. Not a live beta."
+logical_id = "e3713105-0ab2-4816-9570-f04a0a6ec68e"
+content_hash = "sha256:e3cb91736c6b0313075381ab87d806b368057a6511a922a48f843c9e75839232"
+size = 442542
+mtime_ms = 1791168736112
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/e3713105-0ab2-4816-9570-f04a0a6ec68e/a77147ca-f5ce-4465-b456-51d641fcb4ae"
+storage_version_token = "1791168736936033"
+content_type = "text/html"

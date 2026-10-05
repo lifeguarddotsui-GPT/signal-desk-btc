@@ -11,6 +11,7 @@ import { captureBluewaterForecasts, appendModelResults } from "./bluewater-store
 import { appendLockTiming } from "./lock-store";
 import { lockLatency } from "./lock-readiness";
 import { createWaterxBackgroundQueue } from "./background-queue";
+import { roundDecisions } from "./round-decision";
 import {
   pinResearchRoundPolicy, recordResearchHorizonSnapshot, recordResearchLifecycleEvent,
   recordResearchLiveObservation, recordVerifiedResearchResult, hasResearchHorizonSnapshot,
@@ -129,6 +130,7 @@ export async function captureResearchObservation(input:ResearchObservation,
   let canonicalEvaluationMs=now;
   let canonicalTransactionMs=transactionStartMs;
   let canonicalComputeMs=0;
+  let committedChoice:ResearchChoice|null=null;
   const commit = async () => {
     if (client) {
       await q.query("COMMIT");
@@ -137,6 +139,9 @@ export async function captureResearchObservation(input:ResearchObservation,
     }
     if(canonicalLockPersisted){
       const committedAtMs=Date.now();
+      if(committedChoice?.state==="FROZEN"&&committedChoice.side&&committedChoice.probabilityUp!==null)
+        roundDecisions.committed(input,{side:committedChoice.side,probabilityUp:committedChoice.probabilityUp,
+          decisionAtMs:committedChoice.decisionAtMs,committedAtMs});
       try {await appendLockTiming(db,event,{...lockLatency("CANONICAL_LOCK",{
         atMs:Date.parse(input.observedAt),receivedAtMs:input.receivedAtMs??Date.parse(input.observedAt),
         providerSourceAtMs:input.providerSourceAtMs??null,
@@ -147,9 +152,20 @@ export async function captureResearchObservation(input:ResearchObservation,
   };
   try {
     if (client) await q.query("BEGIN");
-    const priorChoice=await q.query(`SELECT 1 FROM waterx_research_choices
+    const priorChoice=await q.query(`SELECT state,side,probability_up,decision_at_ms FROM waterx_research_choices
       WHERE interval_minutes=$1 AND round_id=$2 AND start_ms=$3 AND expiry_ms=$4`,
     [input.intervalMinutes,input.roundId,input.startMs,input.expiryMs]);
+    // All configured research horizons precede or equal the primary. Once
+    // immutable, repeating feature/model/lifecycle writes cannot improve it and
+    // can starve the next round's bounded checkpoint connection.
+    if(priorChoice.rows[0]?.state==="FROZEN"){
+      const previous=priorChoice.rows[0];
+      if(previous.side==="UP"||previous.side==="DOWN")roundDecisions.committed(input,{
+        side:previous.side,probabilityUp:Number(previous.probability_up),
+        decisionAtMs:Number(previous.decision_at_ms),committedAtMs:null});
+      await commit();
+      return "Research primary choice already immutable for this round.";
+    }
     if(priorChoice.rows.length) {
       const oldPolicy=await q.query(`SELECT 1 FROM waterx_research_round_policy
         WHERE interval_minutes=$1 AND round_id=$2 AND start_ms=$3 AND expiry_ms=$4`,
@@ -277,6 +293,7 @@ export async function captureResearchObservation(input:ResearchObservation,
           primaryLockSeconds:pinned.primaryLockSeconds}});
       if(!finalEvent) throw new Error("Canonical primary choice and FINAL_CHOICE lifecycle event could not be persisted atomically.");
       canonicalLockPersisted=true;
+      committedChoice=choice;
     } else {
       const noDataEvent=await recordResearchLifecycleEvent(q,{...event,eventType:"NO_VALID_DATA",
         actualAtMs:Math.min(now,input.expiryMs),

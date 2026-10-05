@@ -1,6 +1,135 @@
 import * as React from "react";
-import type { LockReadinessReport } from "../../shared/lock-readiness";
+import { RefreshCw } from "lucide-react";
+import type { LockReadiness, LockReadinessReport } from "../../shared/lock-readiness";
 import type { ResearchInterval } from "../../shared/waterx-research";
+
+export type RoundDecisionEvidence = {
+  network: "sui:mainnet";
+  intervalMinutes: number;
+  roundId: string;
+  startMs: number;
+  expiryMs: number;
+  policyVersion: string;
+  stateVersion: number;
+  updatedAtMs: number;
+  publishedAtMs: number;
+  readiness: LockReadiness;
+  canonical: null | { side: string; probabilityUp: number; decisionAtMs: number; committedAtMs: number|null };
+  latestSafeOrderAtMs: null;
+  executionWindowRemainingMs: null;
+  executionBlocker: string;
+  tradeAllowed: false;
+};
+
+type RoundDecisionProps = {
+  decision: RoundDecisionEvidence | null;
+  interval: ResearchInterval;
+  round: { id: string; startMs: number; expiryMs: number } | null;
+  now: number;
+  browserReceivedAtMs: number;
+  loading?: boolean;
+  error?: string;
+  retry?: () => void;
+  simulated?: boolean;
+  historicalReport?: LockReadinessReport | null;
+  historicalLoading?: boolean;
+  historicalError?: string;
+  retryHistorical?: () => void;
+};
+
+const decisionStamp = (ms: number | null | undefined) => ms == null || !Number.isFinite(ms)
+  ? "Not reported"
+  : new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC", hour12: false }) + " UTC";
+
+export function RoundDecisionPanel({
+  decision, interval, round, now, browserReceivedAtMs, loading = false, error,
+  retry, simulated = false, historicalReport = null, historicalLoading = false, historicalError, retryHistorical,
+}: RoundDecisionProps) {
+  const exact = !!decision && !!round && decision.network === "sui:mainnet" &&
+    decision.intervalMinutes === interval && decision.roundId === round.id &&
+    decision.startMs === round.startMs && decision.expiryMs === round.expiryMs &&
+    decision.tradeAllowed === false && decision.latestSafeOrderAtMs === null &&
+    decision.executionWindowRemainingMs === null;
+  const readiness = exact ? decision?.readiness : null;
+  const evidenceAge = readiness?.components.ageMs == null ? null :
+    readiness.components.ageMs + Math.max(0, now - readiness.evaluatedAtMs);
+  const ageOfPublication = decision ? now - decision.updatedAtMs : Infinity;
+  const fresh = exact && ageOfPublication >= -1_000 && ageOfPublication <= 10_000 &&
+    evidenceAge != null && evidenceAge >= 0 && evidenceAge <= 10_000 &&
+    readiness?.components.fresh === true && now < (decision?.expiryMs ?? 0);
+  const score = fresh && readiness && Number.isFinite(readiness.score)
+    ? Math.max(0, Math.min(100, Math.round(readiness.score))) : null;
+  const state = fresh ? readiness?.state ?? "WATCHING" : "WATCHING";
+  const stage = state === "READY" ? 2 : state === "LEANING" || state === "BUILDING LOCK" ? 1 : 0;
+  const remainingSeconds = round ? Math.max(0, Math.ceil((round.expiryMs - now) / 1000)) : null;
+  const countdown = remainingSeconds == null ? "—:—"
+    : `${String(Math.floor(remainingSeconds / 60)).padStart(2, "0")}:${String(remainingSeconds % 60).padStart(2, "0")}`;
+  const browserTime = browserReceivedAtMs > 0 ? decisionStamp(browserReceivedAtMs) : "Not received";
+  const strength = fresh && readiness ? pct(readiness.components.strength) : "—";
+  const freshness = fresh && evidenceAge != null ? elapsed(evidenceAge) : "Unavailable";
+
+  return <section className={`round-decision-panel${fresh ? " is-current" : ""}`} aria-label="Exact-round decision readiness">
+    <header className="round-decision-head">
+      <div>
+        <span className="research-side-label">LIVE ADVISORY · SUI MAINNET · {interval} MIN</span>
+        <h2>Round decision readiness</h2>
+        <p>Research progress for this exact round; not an execution signal.</p>
+      </div>
+      <div className="decision-readiness-ring" style={{ "--readiness-angle": `${score ?? 0}%` } as React.CSSProperties} aria-label={`Readiness score ${score == null ? "unavailable" : `${score} out of 100`}`}>
+        <strong>{score == null ? "—" : score}</strong><span>/ 100</span>
+      </div>
+    </header>
+    <div className="round-decision-progress">
+      <div className="round-progress-top"><span>DECISION PROGRESS</span><b>{score == null ? "WITHHELD" : `${score}%`}</b></div>
+      <div className="round-progress-track" role="progressbar" aria-label="Readiness score, not win probability" aria-valuemin={0} aria-valuemax={100} aria-valuenow={score ?? 0}>
+        <i style={{ width: `${score ?? 0}%` }} />
+      </div>
+      <ol aria-label="Research readiness progression">
+        {(["WATCHING", "LEANING", "READY"] as const).map((label, index) =>
+          <li key={label} className={`${index < stage ? "is-complete" : ""}${index === stage ? " is-current" : ""}`}><i />{label}</li>)}
+      </ol>
+    </div>
+    <div className="round-decision-facts">
+      <article><span>DIRECTION STRENGTH</span><strong>{strength}</strong><small>Signal strength · not win probability</small></article>
+      <article><span>STABILITY</span><strong>{fresh && readiness ? readiness.components.stable ? "STABLE" : "UNPROVEN" : "Unavailable"}</strong><small>{fresh && readiness ? `Range ${pct(readiness.components.range)}` : "Exact-round evidence withheld"}</small></article>
+      <article><span>FRESHNESS</span><strong>{freshness}</strong><small>Observation age</small></article>
+      <article><span>REVERSALS</span><strong>{fresh && readiness ? readiness.components.reversals : "—"}</strong><small>Recent direction reversals</small></article>
+    </div>
+    <div className="round-decision-detail">
+      <div><span>PREFERRED SIDE</span><strong>{fresh && readiness?.side ? `LEANING ${readiness.side}` : "NO VALID LEAN"}</strong></div>
+      <div><span>SAME-SIDE DURATION</span><strong>{fresh && readiness ? elapsed(readiness.sameSideMs) : "—"}</strong></div>
+      <div><span>ROUND CLOSES IN</span><strong className="round-close-clock">{round ? countdown : "—:—"}</strong></div>
+    </div>
+    <div className="round-decision-blocker"><span>EXACT READINESS REASON</span><p>{fresh && readiness ? readiness.reason : exact ? "Exact-round readiness is stale or expired; previous state withheld." : "Waiting for fresh advisory evidence matching the active round."}</p></div>
+    <div className="round-execution-facts">
+      <div><span>LATEST SAFE ORDER TIME</span><strong>Unknown</strong><small>No measured safe-order estimate supplied.</small></div>
+      <div><span>EXECUTION WINDOW</span><strong>Unknown</strong><small>Quote-to-accepted-order latency is unmeasured.</small></div>
+      <div><span>EXECUTION STATUS</span><strong>NOT ALLOWED</strong><small>No connection, signing, or order state is asserted.</small></div>
+    </div>
+    <div className="round-decision-blocker execution-blocker"><span>EXACT EXECUTION BLOCKER</span><p>{fresh && exact ? decision?.executionBlocker || "Not reported" : "Withheld until fresh evidence matches this exact round."}</p></div>
+    {exact && decision?.canonical && <div className="round-canonical">
+      <span>CANONICAL DECISION · EXACT ROUND</span>
+      <b>{decision.canonical.side}</b>
+      <small>{decision.canonical.committedAtMs===null?
+        "Committed database record · acknowledgement timestamp not observed in this process":
+        `Commit acknowledged ${decisionStamp(decision.canonical.committedAtMs)} · application clock`}</small>
+    </div>}
+    {simulated && <p className="round-decision-notice">SIMULATION · development fixture active; no live decision evidence is shown.</p>}
+    {error && <div className="round-decision-notice" role="status">Live advisory unavailable: {error}{retry && <button className="text-button" onClick={retry}><RefreshCw size={12} /> Retry</button>}</div>}
+    {loading && !decision && <div className="round-decision-skeleton" aria-label="Loading exact-round decision"><i /><i /><i /></div>}
+    {!simulated && !error && !loading && !decision && <p className="round-decision-notice">No live exact-round decision payload received.</p>}
+    <small className="round-browser-receipt">Browser receipt · local clock {browserTime} · not server time</small>
+    {exact && decision && <small className="round-decision-audit">Exact round {decision.roundId} · policy {decision.policyVersion} · state v{decision.stateVersion} · published {decisionStamp(decision.publishedAtMs)}</small>}
+    <details className="round-historical-details">
+      <summary>Historical readiness comparison · separate research feed</summary>
+      <p>Aggregate historical comparison only. This feed does not drive the live readiness score above.</p>
+      {historicalError && <div className="lock-inline-error" role="status">Historical comparison unavailable: {historicalError}{retryHistorical && <button className="text-button" onClick={retryHistorical}><RefreshCw size={12} /> Retry</button>}</div>}
+      {historicalLoading && !historicalReport && <div className="lock-loading" aria-label="Loading historical comparison"><i /><i /><i /></div>}
+      {historicalReport && <LockReadinessPanel report={historicalReport} interval={interval} round={null} now={now} />}
+      {!historicalReport && !historicalLoading && !historicalError && <p>No historical comparison report received.</p>}
+    </details>
+  </section>;
+}
 
 type Props = {
   report: LockReadinessReport | null;

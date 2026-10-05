@@ -89,6 +89,12 @@ function side(value: unknown, label: string): WaterxRound["sides"]["up"] {
     probabilityCents: probability.value,
     availability,
     reason,
+    ...(raw.trade&&typeof raw.trade==="object"&&
+      typeof (raw.trade as Record<string,unknown>).marketId==="string"&&
+      /^0x[0-9a-f]{64}$/i.test((raw.trade as Record<string,string>).marketId)&&
+      ["YES","NO"].includes(String((raw.trade as Record<string,unknown>).selection))?
+      {trade:{marketId:(raw.trade as Record<string,string>).marketId.toLowerCase(),
+        selection:(raw.trade as {selection:"YES"|"NO"}).selection}}:{}),
   };
 }
 

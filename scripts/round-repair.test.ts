@@ -15,13 +15,14 @@ test("capture percentage points are not multiplied by 100 a second time",()=>{
   assert.equal(captureRateLabel(8909.5),"Not reported");
 });
 
-test("mainnet single-order limits cannot exceed $5 individually or together",()=>{
+test("mainnet per-order ceiling is independent from explicitly owner-set turnover and exposure",()=>{
   const p={...defaultAgentPolicy,network:"mainnet" as const};
   assert.equal(agentPolicySchema.safeParse(p).success,true);
-  for(const patch of [{maxOrderCents:501},{dailyTurnoverCents:501},
-    {maxUnresolved:{mode:"AMOUNT",value:501}},{compound:true}]){
+  for(const patch of [{maxOrderCents:501},{fixedCents:501},{compound:true}]){
     assert.equal(agentPolicySchema.safeParse({...p,...patch}).success,false);
   }
+  assert.equal(agentPolicySchema.safeParse({...p,dailyTurnoverCents:501,
+    maxUnresolved:{mode:"AMOUNT",value:501}}).success,true);
 });
 const row={interval_minutes:5,round_id:"fixture",start_ms:1000000,expiry_ms:1300000,
   outcome:"UP",label_status:"verified",settlement_disputed:false,n:"1",

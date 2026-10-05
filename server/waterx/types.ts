@@ -5,6 +5,7 @@ export type WaterxSide = {
   probabilityCents: number | null;
   availability: "reported" | "locked" | "unavailable";
   reason: string | null;
+  trade?:{marketId:string;selection:"YES"|"NO"};
 };
 
 export type WaterxRound = {

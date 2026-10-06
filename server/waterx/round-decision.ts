@@ -158,8 +158,13 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
       if(timing.saved?.side&&timing.saved.status==="LOCKED")
         timing.lifecycle=timing.saved.side==="UP"?"LOCKED_UP":"LOCKED_DOWN";
       else if(timing.persistence==="SAVING")timing.lifecycle="SAVING";
-      return {...identity,format:"waterx-live-decision-v2",streamId,network:"sui:mainnet",
-        policyVersion:policy.version,stateVersion:++version,updatedAtMs:entry.updatedAtMs,publishedAtMs:now,
+       const snapshotVersion=++version;
+       return {...identity,format:"waterx-live-decision-v2",streamId,network:"sui:mainnet",
+         policyVersion:policy.version,stateVersion:snapshotVersion,snapshotVersion,updatedAtMs:entry.updatedAtMs,publishedAtMs:now,
+         projectionVersion:"waterx-timed-projection-v1",strategyVersion:timing.strategyVersion,
+         componentTimestamps:{decisionSnapshotAtMs:entry.updatedAtMs,
+           probabilitiesReceivedAtMs:last?.receivedAtMs??null,
+           persistenceAtMs:timing.saved?.committedAtMs??timing.lastGate?.evaluatedAtMs??entry.updatedAtMs},
         readiness,market:last&&!inputUnavailable?{probabilityUp:last.probabilityUp,probabilityDown:last.probabilityDown,
           observedAtMs:last.atMs,receivedAtMs:last.receivedAtMs,providerOddsAtMs:null}:null,
         persistence:{...entry.persistence},canonical:entry.canonical?{...entry.canonical}:null,

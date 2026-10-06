@@ -728,3 +728,17 @@ mtime_ms = 1791307561209
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/07c2508c-316a-43d6-a69c-6243a85db0c0/13de1612-3286-4666-8907-d3d872a970aa"
 storage_version_token = "1791307562285952"
 content_type = "text/markdown"
+
+[[outputs]]
+id = "UHuJtVuKqWCa3DUAnVsTc"
+uri = "file://reports/live-desk-repair/live-desk-evidence.html"
+type = "html"
+title = "Live Desk repair — screenshots and verification"
+description = "All five states, four phone widths and desktop, with the repair report and release limits. 614 tests passed; no new publication or trading enablement."
+logical_id = "302c7c87-18af-4819-ab8f-847c5b390620"
+content_hash = "sha256:c9c91af71093e739aa5ebe979e7a9219584bc5427ee58d8716412d0962025fc4"
+size = 1054255
+mtime_ms = 1791319114675
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/302c7c87-18af-4819-ab8f-847c5b390620/5fa5f5b8-180e-4d46-947b-d57eaa088959"
+storage_version_token = "1791319115421798"
+content_type = "text/html"

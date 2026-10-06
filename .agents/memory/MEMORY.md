@@ -23,3 +23,4 @@
 - [Production SQL evidence](production-sql-evidence.md) — success plus transaction markers is not query evidence; require actual expected result data.
 - [Signer control-plane isolation](signer-control-plane-isolation.md) — encrypted remote keys are not isolated if the public website can redeploy the signer.
 - [Development batch identity](development-batch-identity.md) — old compiled helpers can hide source repairs; verify worker identity and actual persisted report fields.
+- [Isolated release validation](isolated-release-validation.md) — passing ordinary tests can hide skipped auth/research regressions; run complete isolated database suites before release claims.

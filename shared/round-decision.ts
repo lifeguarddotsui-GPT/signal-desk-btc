@@ -12,6 +12,8 @@ export type RoundDecision = {
   format:"waterx-live-decision-v2"; streamId:string;
   network:"sui:mainnet"; intervalMinutes:5|15; roundId:string; startMs:number; expiryMs:number;
   policyVersion:string; stateVersion:number; updatedAtMs:number; publishedAtMs:number;
+  projectionVersion?:"waterx-timed-projection-v1";strategyVersion?:string;snapshotVersion?:number;
+  componentTimestamps?:{decisionSnapshotAtMs:number;probabilitiesReceivedAtMs:number|null;persistenceAtMs:number};
   readiness:LockReadiness;
   market:null|{probabilityUp:number;probabilityDown:number;observedAtMs:number;
     receivedAtMs:number;providerOddsAtMs:null};

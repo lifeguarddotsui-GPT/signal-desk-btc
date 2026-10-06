@@ -5,7 +5,7 @@ import type { LockReadinessReport } from "../../shared/lock-readiness";
 import type { ResearchReport } from "../../shared/waterx-research";
 import { currentBaselineChoice, currentChampionForecast, currentLockReadiness, currentResearchRound } from "./agent-round-contract";
 import { ManualOpportunity } from "./ManualOpportunity";
-import { getAtomicDecisionView, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
+import { projectExactRoundDecision, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
 import { useLiveSnapshot } from "./useLiveSnapshot";
 
 type Interval = 5 | 15;
@@ -83,7 +83,7 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
   const timedNow = Number.isFinite(timedServerTime) && timedLive.atomicUpdated
     ? projectServerClock(timedServerTime, timedLive.atomicUpdated, now) : now;
   const timedRound = timedEnvelope?.round ?? null;
-  const timedView = getAtomicDecisionView(timedEnvelope, interval, timedRound, timedNow);
+  const timedView = projectExactRoundDecision(timedEnvelope, interval, timedRound, timedNow);
   const choice = round ? currentBaselineChoice(reports.research, interval, round, now) : null;
   const forecast = round ? currentChampionForecast(reports.bluewater, interval, round, now) : null;
   const readiness = round ? currentLockReadiness(reports.readiness, interval, round, now) : null;
@@ -105,7 +105,7 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
         {([5, 15] as const).map(value => <button key={value} type="button" aria-pressed={interval === value} className={interval === value ? "selected" : ""} onClick={() => setInterval(value)}>{value}m</button>)}
       </div>
     </div>
-    <ManualOpportunity view={timedView} now={timedNow} browserReceivedAtMs={timedLive.atomicUpdated}
+    <ManualOpportunity view={timedView} now={timedNow} interval={interval} round={timedRound}
       onRetry={timedLive.reload} refresh={{ pending: timedLive.loading, error: timedLive.error }} />
     <details className="agent-round-identity-audit">
       <summary>Active round identity &amp; snapshot diagnostics</summary>

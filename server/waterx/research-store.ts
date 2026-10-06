@@ -167,6 +167,17 @@ export async function captureResearchObservation(input:ResearchObservation,
         side:previous.side,probabilityUp:Number(previous.probability_up),
         decisionAtMs:Number(previous.decision_at_ms),committedAtMs:null});
       await commit();
+      // Frozen choice is authoritative, but it must not stop the distinct
+      // mutable live-odds observation. This optional write is post-commit and
+      // cannot alter the saved choice or reconstruct an on-time horizon.
+      const at=Date.parse(input.observedAt),up=input.probabilityUp,down=input.probabilityDown;
+      if(Number.isFinite(at)&&at>=input.startMs&&at<=now&&now<input.expiryMs&&
+        now-at<=POLICY.maxOddsAgeMs&&up!==null&&down!==null&&
+        Number.isFinite(up)&&Number.isFinite(down)&&up>=0&&up<=1&&down>=0&&down<=1&&
+        Math.abs(up+down-1)<=0.000001){
+        await recordResearchLiveObservation(q,{...event,probabilityUp:up,probabilityDown:down,
+          side:up>=down?"UP":"DOWN",source:"waterx_market_baseline",observedAtMs:at});
+      }
       return "Research primary choice already immutable for this round.";
     }
     if(priorChoice.rows.length) {

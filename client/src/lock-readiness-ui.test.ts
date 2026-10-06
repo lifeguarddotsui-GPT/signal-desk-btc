@@ -114,32 +114,22 @@ function renderBoth(view: ReturnType<typeof getAtomicDecisionView>, options?: {
   return { panel, card };
 }
 
-test("live desk uses the atomic snapshot hook and passes one view to both current-state components", () => {
+test("live desk uses one atomic snapshot projection for the compact current-state card", () => {
   assert.match(app, /useLiveSnapshot<LivePayload>\(liveUrl, interval, !fixtureMode\)/);
   assert.doesNotMatch(app.slice(0, app.indexOf("function HealthPage")), /const live = useApi<LivePayload>/);
   assert.match(app, /live\.atomicLoadedUrl === liveUrl/);
   assert.match(app, /validatedAtomicSnapshot\.current/);
   assert.match(app, /serverNow < cachedRound\.expiryMs/);
   assert.match(app, /!verifiedDifferentRound/);
-  assert.match(app, /getAtomicDecisionView\(projectionEnvelope, interval, decisionRound, serverNow\)/);
+  assert.match(app, /projectExactRoundDecision\(projectionEnvelope, interval, decisionRound, serverNow\)/);
   assert.match(app, /atomicOddsAsOfMs === decisionMarket\.observedAtMs/);
   assert.match(app, /atomicOdds\.up === decisionMarket\.probabilityUp && atomicOdds\.down === decisionMarket\.probabilityDown/);
-  assert.match(app, /atomicDecisionView\.fresh && atomicQuoteMatchesDecision/);
-  assert.match(app, /roundCurrent=\{fixtureMode \? roundCurrent : !!roundCurrent/);
-  assert.match(app, /const matchedAdvisory = !fixtureMode && !!expectedAdvisoryIdentity/);
-  assert.match(app, /dataHealth=\{fixtureMode \? undefined : atomicDecisionView\.dataHealth \?\? payload\?\.dataHealth\}/);
-  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 3);
-  assert.equal((app.match(/round=\{decisionRound\}/g) ?? []).length, 2);
-  assert.match(app, /browserReceivedAtMs=\{live\.atomicUpdated\}/);
+  assert.match(app, /!fixtureMode && atomicDecisionView\.fresh/);
+  assert.match(app, /<ManualOpportunity/);
+  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 1);
   assert.doesNotMatch(app, /live\.error && live\.errorUrl === liveUrl && payload == null \? <ErrorBox/);
   assert.doesNotMatch(choiceSource, /currentChoice|liveProbabilities|liveModelEstimate/);
   assert.match(panelSource, /export type RoundDecisionEvidence = RoundDecision/);
-  assert.match(app, /`\/api\/waterx\/refresh-health\?interval=\$\{interval\}`/);
-  assert.match(app, /PROCESS-LOCAL · NO DATABASE READ/);
-  assert.match(app, /comparisonFresh \? comparison\?\.source/);
-  assert.match(app, /streamCoinbaseFresh \? latestStreamPoint\?\.source/);
-  assert.match(app, /typeof body\.source === "string" \? body\.source : "Not reported"/);
-  assert.match(app, /not durable coverage, proof of a persisted round, or trade evidence/);
 });
 
 test("a coherent fresh snapshot produces the same lean, canonical record and version in both components", () => {
@@ -231,7 +221,8 @@ test("fresh metadata with both or one probability side missing reports probabili
       dataHealth: view.dataHealth,
       marketOdds: { up: "Unavailable", down: "Unavailable", current: false, source: "WaterX" },
     }));
-    assert.match(manual, /WaterX probabilities missing; active round metadata is available/);
+    assert.match(manual, /LOCKED UP/);
+    assert.match(manual, /PROBABILITIES MISSING/);
     assert.match(cards, /WaterX probabilities missing; active round metadata is available/);
   }
 });
@@ -293,10 +284,10 @@ test("round mismatch and rollover withhold previous canonical state in both comp
   assert.equal(outageRollover.dataHealth, undefined);
 });
 
-test("compact readiness and blocker remain placed above the chart on narrow screens and desktop", () => {
-  assert.ok(app.indexOf("<RoundDecisionPanel") < app.indexOf("<section className=\"chart-panel\">"));
-  assert.match(css, /@media \(max-width: 700px\)[\s\S]*?\.round-decision-facts \{ grid-template-columns: repeat\(2/);
-  assert.match(css, /@media \(max-width: 390px\)[\s\S]*?\.round-decision-detail/);
+test("compact decision stays immediately above the chart and retains explicit agent details", () => {
+  assert.ok(app.indexOf("<ManualOpportunity") < app.indexOf("<section className=\"chart-panel\">"));
+  assert.match(css, /@media \(max-width: 700px\)/);
+  assert.match(readFileSync(new URL("./AgentCurrentRound.tsx", import.meta.url), "utf8"), /<details className="agent-benchmarks">/);
   assert.match(panelSource, /LATEST SAFE ORDER TIME<\/span><strong>Unknown/);
   assert.match(panelSource, /EXECUTION WINDOW<\/span><strong>Unknown/);
 });

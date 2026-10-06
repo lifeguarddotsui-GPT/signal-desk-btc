@@ -1,5 +1,5 @@
 import {z} from "zod";
-import {timedPool} from "./timed-db";
+import {researchPool} from "./research-store";
 import type {LockDb} from "./lock-store";
 import {TIMED_STRATEGY,PREVIOUS_TIMED_STRATEGY,LEGACY_TIMED_STRATEGY,type TimedDecision} from "../../shared/timed-decision";
 export const timedHistoryQuery=z.object({
@@ -21,7 +21,7 @@ export function projectTimedResult(d:TimedDecision,verified:boolean,outcome:unkn
 /** All metrics are computed in PostgreSQL over the cohort, not the display page.
  * The join is reevaluated on every read: withdrawn/disputed labels cease scoring immediately.
  * No settled choice, future odds or account P/L is backfilled into a prediction. */
-export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=timedPool){
+export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=researchPool){
   const q=timedHistoryQuery.parse(query),since=q.window==="24h"?now-86400000:q.window==="7d"?now-604800000:0;
   const cohortLimit=["20","50","100"].includes(q.window)?Number(q.window):null;
   const args=[q.interval==="all"?null:Number(q.interval),q.strategy==="all"?null:q.strategy,since,now,cohortLimit];
@@ -34,6 +34,9 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
     SELECT r.start_ms,r.interval_minutes,r.strategy_version,r.round_id,d.decision,d.id,
       d.status,o.committed_ack_at_ms,o.worker_received_at_ms,upper(l.outcome) AS outcome,
       l.settlement_disputed AS disputed,
+      coalesce(g.source_unavailable,0) AS source_unavailable_gates,
+      coalesce(g.no_qualified_signal,0) AS no_qualified_signal_gates,
+      coalesce(g.scheduler_missed,0) AS scheduler_missed_gates,
       COALESCE(l.label_status='verified' AND NOT l.settlement_disputed
         AND (l.settlement_quarantine IS NULL OR l.settlement_quarantine='[]'::jsonb)
         AND l.settled_at>r.expiry_ms AND l.settled_at<=$4
@@ -45,6 +48,12 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
     FROM cohort r LEFT JOIN waterx_timed_decisions d
       USING(network,strategy_version,interval_minutes,round_id)
     LEFT JOIN waterx_timed_outbox o ON o.decision_id=d.id
+    LEFT JOIN LATERAL (SELECT
+      count(*) FILTER(WHERE j.result IN('WAIT_FRESH_DATA','INVALID_ROUND'))::int AS source_unavailable,
+      count(*) FILTER(WHERE j.result IN('WAIT_WEAK_EVIDENCE','WAIT_UNSTABLE'))::int AS no_qualified_signal,
+      count(*) FILTER(WHERE j.result='MISSED_GATE')::int AS scheduler_missed
+      FROM waterx_gate_journals j WHERE j.network=r.network AND j.strategy_version=r.strategy_version
+        AND j.interval_minutes=r.interval_minutes AND j.round_id=r.round_id) g ON true
     LEFT JOIN waterx_learning_rounds l ON l.interval_minutes=r.interval_minutes AND l.round_id=r.round_id
       AND l.start_ms=r.start_ms AND l.expiry_ms=r.expiry_ms
   ), scored AS (
@@ -67,6 +76,13 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
       (status='LOCKED' AND committed_ack_at_ms>(decision->>'hardDeadlineAtMs')::bigint))::int AS missed,
     count(*) FILTER(WHERE status='ABSTAINED_NO_QUALIFIED_SIGNAL')::int AS abstained,
     count(*) FILTER(WHERE status='DATA_FAILURE')::int AS data_failures,
+    count(*) FILTER(WHERE source_unavailable_gates>0)::int AS source_unavailable_rounds,
+    count(*) FILTER(WHERE scheduler_missed_gates>0)::int AS scheduler_missed_rounds,
+    count(*) FILTER(WHERE decision->'evidence'->>'persistenceFailureCount' IS NOT NULL
+      AND (decision->'evidence'->>'persistenceFailureCount')::int>0)::int AS persistence_failure_rounds,
+    coalesce(sum(source_unavailable_gates),0)::int AS source_unavailable_gates,
+    coalesce(sum(no_qualified_signal_gates),0)::int AS no_qualified_signal_gates,
+    coalesce(sum(scheduler_missed_gates),0)::int AS scheduler_missed_gates,
      count(*) FILTER(WHERE status='MISSED_DEADLINE' OR
        (status='LOCKED' AND committed_ack_at_ms>(decision->>'hardDeadlineAtMs')::bigint))::int AS deadline_misses,
      count(*) FILTER(WHERE result='MISSING_RECORD' OR status IN('NO_VALID_INPUT','DATA_FAILURE','MISSED_DEADLINE') OR
@@ -94,6 +110,14 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
         d.strategyVersion===TIMED_STRATEGY?"COMMIT_AFTER_GATE_GRACE":"COMMIT_AFTER_HARD_DEADLINE":null,
       result:projectTimedResult(d,row.verified===true,row.outcome,row.disputed===true),
       verifiedOutcome:row.verified===true?row.outcome:null,
+      operationalReasons:[
+        ...(Number(row.source_unavailable_gates)>0?["SOURCE_UNAVAILABLE"]:[]),
+        ...(Number(row.scheduler_missed_gates)>0?["SCHEDULER_MISSED_GATE"]:[]),
+        ...(d.status==="ABSTAINED_NO_QUALIFIED_SIGNAL"?["NO_QUALIFIED_SIGNAL"]:[]),
+        ...(Number((d.evidence as Record<string,unknown>)?.persistenceFailureCount)>0?["PERSISTENCE_FAILURE"]:[]),
+        ...(d.status==="LOCKED"&&ack===null?["COMMIT_ACKNOWLEDGEMENT_UNKNOWN"]:[]),
+        ...(d.status==="LOCKED"&&ack!==null&&ack>d.hardDeadlineAtMs?["COMMIT_AFTER_GATE_GRACE"]:[]),
+      ],
       executionStatus:"NOT_INFERRED",actualPnl:null};
   });
   return {strategyVersion:q.strategy,asOfMs:now,cohort:q,entries,metrics:{
@@ -105,6 +129,13 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
     ratio:`${correct}:${incorrect}`,hitRate:settledN?correct/settledN:null,
     choiceCoverage:n?Number(s.locks)/n:null,onTimeCoverage:n?Number(s.on_time_locks)/n:null,
     abstained:Number(s.abstained),dataFailures:Number(s.data_failures),
+    operationalBreakdown:{sourceUnavailable:Number(s.source_unavailable_rounds??0),
+      noQualifiedSignal:Number(s.abstained??0),schedulerMissedGate:Number(s.scheduler_missed_rounds??0),
+      persistenceFailure:Number(s.persistence_failure_rounds??0),
+      unclassifiedMissingRecords:Number(s.missing_records??0),
+      gates:{sourceUnavailable:Number(s.source_unavailable_gates??0),
+        noQualifiedSignal:Number(s.no_qualified_signal_gates??0),schedulerMissedGate:Number(s.scheduler_missed_gates??0)},
+      semantics:"Overlapping round categories and distinct gate counts; zero confirmed persistence failures is not proof of no failures. Missing records have an unknown cause."},
     abstentionRate:n?Number(s.abstained)/n:null,operationalFailureRate:n?Number(s.operational_failures)/n:null,
     medianElapsedMs:s.median_elapsed_ms===null?null:Number(s.median_elapsed_ms)},
     rowsTruncated:Number(s.n)>entries.length,

@@ -2,25 +2,22 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link, Route, Switch, useLocation } from "wouter";
 import { Activity, BookOpen, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldAlert, ShieldCheck, Waves, X } from "lucide-react";
 import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
-import { insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxPriceDistance, selectWaterxReference, sseReconnectUrl } from "./waterx-ui-contract";
+import { insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxReference, sseReconnectUrl } from "./waterx-ui-contract";
 import { mergeComparisonPoints } from "./chart-contract";
 import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
-import { AdvisoryCards } from "./AdvisoryCards";
 import { type AdvisoryPayload } from "./advisory-contract";
 import type { ResearchDailyJob, ResearchInterval, ResearchReport } from "../../shared/waterx-research";
 import type { HistorySource } from "../../shared/canonical-history";
 import type { RoundDecision } from "../../shared/round-decision";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
 import CanonicalHistory from "./CanonicalHistory";
-import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
 import EarlyLearningJobsPanel from "./EarlyLearningJobsPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
 import type { BluewaterReport } from "../../shared/bluewater-research";
-import { RoundDecisionPanel } from "./LockReadinessPanel";
 import { ManualOpportunity } from "./ManualOpportunity";
 import "./ManualOpportunity.css";
-import { getAtomicDecisionView, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
+import { projectExactRoundDecision, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
 import { useLiveSnapshot } from "./useLiveSnapshot";
 import AgentPage from "./AgentPage";
 
@@ -104,12 +101,22 @@ function useApi<T>(url: string, refreshMs = 0, enabled = true) {
 
 function useIntervalPreference() {
   const [value, setValue] = useState<Interval>(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (import.meta.env.DEV && params.has("fixture") && (params.get("interval") === "5" || params.get("interval") === "15"))
+      return Number(params.get("interval")) as Interval;
     try { return window.localStorage.getItem("bluewater.interval") === "15" ? 15 : 5; }
     catch { return 5; }
   });
   const change = useCallback((next: Interval) => {
     setValue(next);
     try { window.localStorage.setItem("bluewater.interval", String(next)); } catch { /* storage may be unavailable */ }
+    if (import.meta.env.DEV) {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has("fixture")) {
+        params.set("interval", String(next));
+        window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+      }
+    }
   }, []);
   return [value, change] as const;
 }
@@ -170,13 +177,13 @@ function LivePage() {
   const [chartWindow, setChartWindow] = useState<"observed" | "round" | 5 | 15>("observed");
   const [now, setNow] = useState(Date.now());
   const rolloverSince = useRef<number | null>(null);
-  const fixtureNames = ["high-likelihood-up", "high-likelihood-down", "favorable-risk-reward-up", "favorable-risk-reward-down", "wait", "unvalidated", "stale-quote", "collector-stalled", "rollover", "too-late", "locked"] as const;
+  const fixtureNames = ["normal", "high-likelihood-up", "high-likelihood-down", "favorable-risk-reward-up", "favorable-risk-reward-down", "wait", "unvalidated", "stale-quote", "missing-odds", "collector-stalled", "loading", "request-failure", "rollover", "too-late", "locked"] as const;
   const requestedFixture = new URLSearchParams(window.location.search).get("fixture");
   const fixtureMode = import.meta.env.DEV && fixtureNames.includes(requestedFixture as typeof fixtureNames[number])
     ? requestedFixture as typeof fixtureNames[number] : null;
-  const [fixtureControlsOpen, setFixtureControlsOpen] = useState(() => window.innerWidth > 760 || !!fixtureMode);
+  const [fixtureControlsOpen, setFixtureControlsOpen] = useState(false);
   useEffect(() => {
-    const onResize = () => setFixtureControlsOpen(window.innerWidth > 760 || !!fixtureMode);
+    const onResize = () => { if (fixtureMode) setFixtureControlsOpen(true); };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [fixtureMode]);
@@ -198,27 +205,27 @@ function LivePage() {
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const fixtureNow = now;
   const fixtureStart = useMemo(() => Date.now() - 60_000, [interval, fixtureMode]);
-  const fixtureRound = fixtureMode === "rollover" || fixtureMode === "collector-stalled" ? null : {
+  const fixtureRound = fixtureMode === "rollover" || fixtureMode === "collector-stalled" || fixtureMode === "loading" || fixtureMode === "request-failure" ? null : {
     id: `DEV-FIXTURE-${interval}-${fixtureStart}`,
     marketId: `DEV-MARKET-${interval}`,
     startMs: fixtureMode === "too-late" ? fixtureStart - interval * 60_000 : fixtureStart,
     expiryMs: fixtureMode === "too-late" ? fixtureNow - 1 : fixtureStart + interval * 60_000,
     referencePrice: 83642.18, anchorConfirmed: true, phase: "ROUND IN PROGRESS",
   };
-  const fixturePayload: LivePayload | null = fixtureMode ? fixtureMode === "rollover" ? {
+  const fixturePayload: LivePayload | null = fixtureMode ? fixtureMode === "loading" || fixtureMode === "request-failure" ? null : fixtureMode === "rollover" ? {
     serverTime: new Date(fixtureNow).toISOString(), status: "COLLECTION_DELAYED", intervalMinutes: interval,
     reason: "Fixture: active round discovery is delayed beyond the normal rollover window.", round: null,
     odds: null, comparison: { price: 83671.42, asOf: new Date(fixtureNow).toISOString(), source: "Coinbase (fixture)" },
   } : {
     serverTime: new Date(fixtureNow).toISOString(),
     status: fixtureMode === "collector-stalled" ? "COLLECTION_DELAYED" : "LIVE", intervalMinutes: interval, round: fixtureRound,
-    odds: fixtureMode === "stale-quote" || fixtureMode === "collector-stalled" ? null : {
+    odds: fixtureMode === "stale-quote" || fixtureMode === "missing-odds" || fixtureMode === "collector-stalled" ? null : {
       up: .583, down: .417,
       upPriceCents: fixtureMode === "locked" ? 0 : 58, downPriceCents: fixtureMode === "locked" ? 0 : 42,
       asOf: new Date(fixtureNow).toISOString(), source: "WaterX (fixture)",
     },
     comparison: { price: 83671.42, asOf: new Date(fixtureNow).toISOString(), source: "Coinbase (fixture)" },
-    availability: { referencePrice: { status: "available" }, odds: fixtureMode === "stale-quote" ? { status: "unavailable", reason: "Fixture: $5 quote is stale." } : fixtureMode === "collector-stalled" ? { status: "unavailable", reason: "Fixture: market snapshot is stale." } : fixtureMode === "locked" ? { status: "locked", up: { side: "locked" }, down: { side: "locked" } } : { status: "available" } },
+    availability: { referencePrice: { status: "available" }, odds: fixtureMode === "missing-odds" ? { status: "unavailable", reason: "Fixture: current probabilities are missing." } : fixtureMode === "stale-quote" ? { status: "unavailable", reason: "Fixture: $5 quote is stale." } : fixtureMode === "collector-stalled" ? { status: "unavailable", reason: "Fixture: market snapshot is stale." } : fixtureMode === "locked" ? { status: "locked", up: { side: "locked" }, down: { side: "locked" } } : { status: "available" } },
   } : null;
   // Keep the selected interval internally consistent; freshness gates withhold
   // responses that arrive for a different market cadence.
@@ -262,16 +269,24 @@ function LivePage() {
   const projectionEnvelope = !fixtureMode && rootHealthMatchesAtomicRound && payload?.dataHealth && atomicEnvelope
     ? { ...atomicEnvelope, dataHealth: payload.dataHealth } : atomicEnvelope;
   const decisionProjection = fixtureMode
-    ? getAtomicDecisionView(null, interval, null, serverNow)
-    : getAtomicDecisionView(projectionEnvelope, interval, decisionRound, serverNow);
+    ? projectExactRoundDecision(null, interval, null, serverNow)
+    : projectExactRoundDecision(projectionEnvelope, interval, decisionRound, serverNow);
   const atomicDecisionView = {
     ...decisionProjection,
     dataHealth: decisionProjection.dataHealth ??
-      (rootHealthMatchesIdentity ? payload?.dataHealth : undefined),
+      (rootHealthMatchesIdentity ? payload?.dataHealth : undefined) ??
+      (fixtureMode === "missing-odds" ? {
+        transport: { status: "HEALTHY", lastReceivedAtMs: fixtureNow, errorClass: null },
+        round: { status: "KNOWN" }, reference: { status: "CONFIRMED" },
+        probabilities: { status: "PROBABILITIES_MISSING", lastValid: null },
+        storage: { status: "UNKNOWN", errorClass: null },
+        execution: { eligible: false, reason: "Research only." },
+        primaryReason: "PROBABILITIES_MISSING",
+      } as NonNullable<LivePayload["dataHealth"]> : undefined),
   };
   const snapshotRefreshState = {
-    pending: !fixtureMode && live.loading,
-    error: !fixtureMode && live.errorUrl === liveUrl ? live.error : "",
+    pending: fixtureMode === "loading" || !fixtureMode && live.loading,
+    error: fixtureMode === "request-failure" ? "Request failed. The current round has not been inferred." : !fixtureMode && live.errorUrl === liveUrl ? live.error : "",
     retryCount: fixtureMode ? 0 : live.retryCount,
     failureCount: fixtureMode ? 0 : live.failureCount,
   };
@@ -417,15 +432,6 @@ function LivePage() {
      proof: fixtureClassification !== "OBSERVE" || fixtureMode === "stale-quote"
       ? { up: fixtureProof("up"), down: fixtureProof("down") } : undefined,
    } as AdvisoryPayload) : null;
-  const priceDistance = selectWaterxPriceDistance({
-    referencePrice: waterxReference,
-    comparisonFresh,
-    comparisonPrice: comparison?.price,
-    comparisonAtMs: comparisonMs,
-    roundStartMs: round?.startMs,
-  });
-  const priceDelta = priceDistance?.distance ?? null;
-  const priceDeltaPct = priceDistance?.percent ?? null;
   const roundProvisional = waterxReferenceValid && (referenceAvailability?.status === "provisional" || round?.anchorConfirmed === false);
   const deskState = fixtureMode === "rollover" ? "Collection delayed · active round not discovered"
     : !roundCurrent
@@ -550,17 +556,16 @@ function LivePage() {
     );
   }, [acceptedPoints, stream, fixtureMode, fixtureNow]);
 
-  const refreshAll = () => { live.reload(); chart.reload(); learning.reload(); };
   return <div className="page live-page">
       <div className="desk-toolbar">
-      <div className="desk-market"><span className="eyebrow">WATERX / BTC · {interval} MIN</span><strong className={roundCurrent ? "desk-state" : "desk-state caution"}>{deskState}</strong></div>
-      <div className="heading-right"><span className="sync-label"><i />{live.error && live.errorUrl === liveUrl ? "SYNC DELAYED" : "AUTO-REFRESH · 3 SEC"}</span><IntervalSwitch value={interval} onChange={setInterval} /></div>
+      <div className="desk-market"><span className="eyebrow">LIVE DESK</span></div>
+      <div className="heading-right"><IntervalSwitch value={interval} onChange={setInterval} /></div>
     </div>
     {import.meta.env.DEV && <details className="fixture-banner fixture-picker" open={fixtureControlsOpen} onToggle={event => setFixtureControlsOpen(event.currentTarget.open)}>
       <summary>{fixtureMode ? "DEVELOPMENT-ONLY FIXTURES" : "DEVELOPMENT PREVIEW"} <span>{fixtureMode ? "synthetic test data · live polling disabled" : "Live API observations · no fixture active"}</span></summary>
       <select id="advisory-fixture" value={fixtureMode || ""} onChange={event => {
         const value = event.target.value;
-        window.location.href = value ? `${window.location.pathname}?fixture=${encodeURIComponent(value)}` : window.location.pathname;
+        window.location.href = value ? `${window.location.pathname}?fixture=${encodeURIComponent(value)}&interval=${interval}` : window.location.pathname;
       }}>
         <option value="">Live API response</option>
         {fixtureNames.map(name => <option key={name} value={name}>{name.toUpperCase().replaceAll("-", " ")}</option>)}
@@ -569,7 +574,9 @@ function LivePage() {
       <ManualOpportunity
         view={atomicDecisionView}
         now={serverNow}
-        browserReceivedAtMs={live.atomicUpdated}
+        interval={interval}
+        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
+        fixtureName={fixtureMode}
         marketReference={{
           price: waterxReferenceValid ? round?.referencePrice ?? null : null,
           quality: roundProvisional ? "provisional" : waterxReferenceValid ? "confirmed" : "unavailable",
@@ -582,82 +589,25 @@ function LivePage() {
             ? typeof coinbaseDisplayAt === "number" ? coinbaseDisplayAt : Date.parse(coinbaseDisplayAt) : null,
         }}
         refresh={{ pending: snapshotRefreshState.pending, error: snapshotRefreshState.error }}
-        onRetry={live.reload}
+        onRetry={fixtureMode ? () => { window.location.href = window.location.pathname; } : live.reload}
       />
-      <details className="mo-readiness-audit">
-        <summary>Full round decision readiness · audit detail</summary>
-        <RoundDecisionPanel
-          view={atomicDecisionView}
-          interval={interval as ResearchInterval}
-          round={decisionRound}
-          now={serverNow}
-          browserReceivedAtMs={live.atomicUpdated}
-          refresh={snapshotRefreshState}
-          retry={live.reload}
-          simulated={!!fixtureMode}
-          historicalReport={!fixtureMode && lockReadiness.loadedUrl === lockReadinessUrl &&
-            lockReadiness.data?.intervalMinutes === interval ? lockReadiness.data : null}
-          historicalLoading={!fixtureMode && lockReadiness.loading}
-          historicalError={!fixtureMode && lockReadiness.error && lockReadiness.errorUrl === lockReadinessUrl ? lockReadiness.error : undefined}
-          retryHistorical={lockReadiness.reload}
-        />
-      </details>
-       <div className="chart-market-layout">
+      <div className="chart-market-layout">
         <section className="chart-panel">
-        <div className="section-head chart-head"><div><div className="eyebrow">INDEPENDENT OBSERVATION · COINBASE</div><h2>BTC price trace</h2><p>Coinbase comparison only{waterxReferenceValid ? " · dashed line is the WaterX price to beat" : " · WaterX reference unavailable"}.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
-         {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <ErrorBox message={chart.error} retry={chart.reload} /> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
-             <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} referenceDistance={priceDelta} referenceDistancePercent={priceDeltaPct} />}
-        {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive refresh failed. Live Coinbase observations remain visible where available. <button className="text-button" onClick={chart.reload}>Retry archive</button></div>}
-        {chartPayload?.coverage?.partial && <div className="gap-caption">Partial archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. Unobserved periods remain blank.</div>}
+        <div className="section-head chart-head"><div><div className="eyebrow">PRICE OBSERVATIONS</div><h2>BTC / USD</h2><p>Observed prices only · missing intervals remain blank.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
+          {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <div className="chart-empty"><Activity size={22} /><strong>Archive unavailable</strong><span>The live comparison feed remains independent.</span></div> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
+             <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
+          }
+         {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive unavailable. Live comparison observations remain visible where available.</div>}
+          {chartPayload?.coverage?.partial && (typeof chartWindow === "number" || chartWindow === "round") && <div className="gap-caption">Rolling archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. This does not describe complete coverage of the current round.</div>}
         {chartPayload && !archiveMatches && <div className="gap-caption">Archive source mismatch: historical points withheld; expected Coinbase comparison data.</div>}
         <div className="legend-row"><span><i className="legend-price" /> Coinbase observations</span><span><i className="legend-anchor" /> WaterX price to beat</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
-        <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live records · archive observed span {durationLabel(chartPayload?.coverage?.observationSpanMs)} / {durationLabel(chartPayload?.coverage?.requestedDurationMs ?? (chartPayload?.windowMinutes ?? interval) * 60_000)} · initial unobserved {durationLabel(chartPayload?.coverage?.missingStartMs)}</span><button className="text-button" onClick={chart.reload}><RefreshCw size={13} /> Refresh archive</button></div>
+        <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live observations{typeof chartWindow === "number" ? ` · rolling archive coverage ${chartPayload?.coverage?.percent == null ? "not reported" : `${chartPayload.coverage.percent}%`}` : " · active-round window; archive coverage is separate"}</span></div>
       </section>
-        <AdvisoryCards advisory={fixtureMode ? fixtureAdvisory : matchedAdvisory}
-          expectedIdentity={expectedAdvisoryIdentity}
-          roundCurrent={fixtureMode ? roundCurrent : !!roundCurrent && !!expectedAdvisoryIdentity &&
-            serverNow >= expectedAdvisoryIdentity.startMs && serverNow < expectedAdvisoryIdentity.expiryMs}
-          quoteCurrent={fixtureMode ? oddsFresh : atomicDecisionView.fresh && atomicQuoteMatchesDecision && oddsFresh}
-          dataHealth={fixtureMode ? undefined : atomicDecisionView.dataHealth ?? payload?.dataHealth}
-          locked={{ up: upLocked || lockedPair, down: downLocked || lockedPair }}
-          nowMs={now} fixtureName={fixtureMode}
-          marketOdds={{
-            up: upProbabilityCurrent ? fmtProbability(odds?.up) : "Unavailable",
-            down: downProbabilityCurrent ? fmtProbability(odds?.down) : "Unavailable",
-            current: oddsFresh && roundCurrent,
-            source: odds?.source ?? "WaterX",
-            asOf: odds?.asOf,
-            upPrice: oddsFresh && oddsDisplay.up.priceCents != null ? fmtOdds(oddsDisplay.up.priceCents) : "Withheld",
-            downPrice: oddsFresh && oddsDisplay.down.priceCents != null ? fmtOdds(oddsDisplay.down.priceCents) : "Withheld",
-          }} />
-        </div>
-      <ResearchChoiceCard
-        report={research.loadedUrl === researchUrl && research.data?.intervalMinutes === interval ? research.data : null}
-        interval={interval as ResearchInterval}
-        round={decisionRound}
-        view={atomicDecisionView}
-        refresh={snapshotRefreshState}
-        retrySnapshot={live.reload}
-        fixture={!!fixtureMode}
-        loading={!fixtureMode && research.loading}
-        error={!fixtureMode && research.error && research.errorUrl === researchUrl ? research.error : undefined}
-      />
-      <BluewaterResearchPanel
-        report={bluewater.loadedUrl === bluewaterUrl && bluewater.data?.intervalMinutes === interval ? bluewater.data : null}
-        interval={interval}
-        round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
-        loading={!fixtureMode && bluewater.loading}
-        error={!fixtureMode && bluewater.error && bluewater.errorUrl === bluewaterUrl ? bluewater.error : ""}
-        retry={bluewater.reload}
-        compact
-      />
-          <details className="round-details"><summary><span>Data health &amp; source details</span><ChevronDown size={14} /></summary><div><span>Round ID</span><b>{roundCurrent ? round?.id : "Unavailable"}</b><span>Window</span><b>{roundCurrent && round ? `${utc(round.startMs)} — ${utc(round.expiryMs)}` : "No active verified window"}</b><span>Reference</span><b>{waterxReferenceValid ? roundProvisional ? "Provisional" : "Reported" : "Unavailable"}</b><span>WaterX odds</span><b>{oddsFresh ? odds?.source : "Not current"} · market observations, not a model forecast</b><span>Market lean</span><b>{waterxLean} · no reliability or economic edge implied</b><span>Model reliability</span><b>Unrated · training {learningTrainCount ?? "not reported"} · forward predictions {forwardCount ?? "not reported"}</b><span>Coinbase chart</span><b>Comparison only; not used for official settlement</b><span>Settlement</span><b>Chainlink BTC/USD TWAP compared with WaterX beginning reference</b><span>Samples</span><b>{merged.length.toLocaleString()} retained archive and live records</b><span>Collection</span><b>{payload?.reason || "No additional collection issue reported"}</b></div></details>
-      <details className="method-card"><summary><span><CircleHelp size={15} /> How this market resolves</span><ChevronDown size={15} /></summary><p>The price to beat is the beginning reference reported by WaterX. Settlement uses the official Chainlink BTC/USD time-weighted average price (TWAP), compared with that beginning reference; Up wins at equality. Coinbase is shown only as a live comparison and is never used for settlement.</p></details>
-      <div className="live-bottom"><span>{snapshotCurrent ? `Snapshot as of ${utc(payload?.serverTime)}` : payload ? `Last response · stale · ${utc(payload.serverTime)}` : "No current live snapshot"}</span><button className="quiet-button" onClick={refreshAll}><RefreshCw size={14} /> Refresh desk</button><Link href="/health" className="inline-link">Inspect data health <ExternalLink size={13} /></Link></div>
+      </div>
   </div>;
 }
 
-function PriceChart({ points, interval, anchor, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange, referenceDistance, referenceDistancePercent }: { points: Point[]; interval: Interval; anchor: number | null; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void; referenceDistance: number | null; referenceDistancePercent: number | null }) {
+function PriceChart({ points, interval, anchor, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void }) {
   const measureRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(720);
@@ -710,7 +660,8 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
     for (const sample of samples) if (Math.abs(Number(sample.at) - t) < Math.abs(Number(nearest.at) - t)) nearest = sample;
     setSelectedKey(inspectedPointKey(nearest));
   };
-  const partialWindow = coveragePartial || (typeof activeWindowMode === "number" && archiveWindow != null && activeWindowMode > archiveWindow);
+  const partialWindow = activeWindowMode === "round" ? coveragePartial
+    : typeof activeWindowMode === "number" && (coveragePartial || archiveWindow != null && activeWindowMode > archiveWindow);
   const startInside = !!round && round.startMs >= start && round.startMs <= end;
   const endInside = !!round && round.expiryMs >= start && round.expiryMs <= end;
   const nowInside = nowAt >= start && nowAt <= end;
@@ -720,15 +671,10 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
   const anchorLabelY = anchor == null ? top : Math.max(top + 12, Math.min(H - bottom - 4, y(anchor) + 18));
    return <div ref={measureRef} className="chart-wrap">
     <div className="chart-controls" role="group" aria-label="Chart time window">
-      {(["observed", "round", 5, 15] as const).map(mode => <button key={mode} className={activeWindowMode === mode ? "active" : ""} aria-pressed={activeWindowMode === mode} disabled={mode === "round" && !round} onClick={() => { onWindowChange(mode); setSelectedKey(null); }}>{mode === "observed" ? "Observed" : mode === "round" ? "Full round" : `Last ${mode}m`}</button>)}
-       <span>{activeWindowMode === "round" ? "Full round · future unobserved" : activeWindowMode === "observed" ? "Active round · future unobserved" : "Rolling archive"}{partialWindow ? " · partial" : ""}</span>
+      {(["observed", "round", 5, 15] as const).map(mode => <button key={mode} className={activeWindowMode === mode ? "active" : ""} aria-pressed={activeWindowMode === mode} disabled={mode === "round" && !round} onClick={() => { onWindowChange(mode); setSelectedKey(null); }}>{mode === "observed" ? "Observed" : mode === "round" ? "Round window" : `Last ${mode}m`}</button>)}
+       <span>{activeWindowMode === "round" ? "Round window · future unobserved" : activeWindowMode === "observed" ? round ? "Active round · future unobserved" : "Recent observations · no active round" : "Rolling archive"}{partialWindow ? " · partial" : ""}</span>
       {active && <button className="return-live" onClick={() => setSelectedKey(null)}>Return to live</button>}
     </div>
-     {anchor != null && <div className={`chart-distance-readout ${referenceDistance == null ? "unavailable" : referenceDistance >= 0 ? "above" : "below"}`}>
-       <span>Coinbase vs WaterX reference</span>
-       <b>{referenceDistance == null ? "Distance unavailable" : `${referenceDistance >= 0 ? "+" : "−"}${fmtUsd(Math.abs(referenceDistance))}`}</b>
-       <small>{referenceDistancePercent == null ? "Percent unavailable" : `${Math.abs(referenceDistancePercent).toFixed(3)}% ${referenceDistance! >= 0 ? "above" : "below"}`}</small>
-     </div>}
     {samples.length ? <div className="chart-measure">
        <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase BTC comparison observations over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
         <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>

@@ -12,6 +12,7 @@ import {probabilityState,type WaterxDataHealth} from "../../shared/waterx-data-h
 import {observationId} from "./observation-provenance";
 import {observeTimedStrategy,timedSourceUnavailable,stopTimedStrategy,startTimedRecovery,timedStrategyQueueMetrics} from "./timed-decision-coordinator";
 import {timedPoolHealth} from "./timed-db";
+import {healthyCollectionDelay,collectionTimerDelay,collectionCadence,observeCollectionResponse} from "./collection-cadence";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement, type WaterxRoundInput } from "./learning";
@@ -43,6 +44,7 @@ const failures = new Map<WaterxInterval, number>();
 const retryDelays = new Map<WaterxInterval, number>();
 const probabilityFailures = new Map<WaterxInterval, number>();
 const nextPollAt = new Map<WaterxInterval, number>();
+const collectionPeriods = new Map<WaterxInterval, number>();
 const refreshes = new Map<WaterxInterval, Promise<void>>();
 const latestRoundStarts = new Map<WaterxInterval, number>();
 const latestRoundIds = new Map<WaterxInterval, string>();
@@ -228,7 +230,7 @@ function queueSettlement(interval: WaterxInterval, now = Date.now()): void {
 export function calculateWaterxRetryDelay(
   interval: WaterxInterval, error: unknown, failureCount: number, random = Math.random(),
 ): number {
-  const rateLimited = error instanceof WaterxProviderError && error.retryAfterMs !== null;
+  const rateLimited = error instanceof WaterxProviderError && (error.status===429||error.retryAfterMs !== null);
   const base = rateLimited
     ? Math.max(5_000, error.retryAfterMs ?? Math.min(5 * 60_000, 5_000 * 2 ** (failureCount - 1)))
     : Math.min(60_000, (interval === 5 ? 5_000 : 10_000) * 2 ** Math.min(failureCount - 1, 3));
@@ -349,7 +351,8 @@ export function buildWaterxLivePayload(
   return {
     serverTime: new Date(now).toISOString(),
     captureQueues:{canonical:canonicalLockQueue.metrics(now),early:earlyLockQueue.metrics(now),
-      timed:{...timedStrategyQueueMetrics(now),database:timedPoolHealth()},optional:observationQueue.metrics(now)},
+      timed:{...timedStrategyQueueMetrics(now),database:timedPoolHealth()},optional:observationQueue.metrics(now),
+      collection:collectionCadence(interval,collectionPeriods.get(interval)??5000,nextPollAt.get(interval)??null,now)},
     refreshHealth:refreshHealth.read(interval),
     decision,
     dataHealth,
@@ -440,6 +443,7 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
     onRequestReceived: at => {
       if(signal.aborted)return;
       waterxRequestSucceeded(interval, at);
+       observeCollectionResponse(interval,Date.parse(at));
       refreshHealth.record({interval,stage:"PROVIDER_RESPONSE",outcome:"ok",elapsedMs:Date.parse(at)-requestedAt});
     },
   });
@@ -499,7 +503,8 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
    if(inputState!=="CURRENT"){
      const count=Math.min(8,(probabilityFailures.get(interval)??0)+1);
      probabilityFailures.set(interval,count);
-     retryDelays.set(interval,Math.min(60000,5000*2**Math.min(count-1,4)));
+      // An HTTP success with absent fields is not a transport failure. Keep
+      // metadata/reference discovery on the bounded healthy request cadence.
    }else probabilityFailures.delete(interval);
     snapshot = {
       observedAt,receivedAtMs:Date.parse(result.requestReceivedAt), status: "LIVE", round,
@@ -693,8 +698,14 @@ export function startWaterxCapture(options: {
     if (running.has(interval)) continue;
     running.add(interval);
     const periodMs = options.periods?.[interval] ?? 5_000;
+    collectionPeriods.set(interval,periodMs);
     const tick = () => {
       timers.delete(interval);
+      const remaining=(nextPollAt.get(interval)??0)-Date.now();
+      if(remaining>0){
+        const wait=setTimeout(tick,collectionTimerDelay(Date.now()+remaining));
+        wait.unref?.();timers.set(interval,wait);return;
+      }
       waterxScheduleTick(interval);
       void pollWaterx(interval, options.poll ?? collectWaterx, options.readTimeoutMs, !options.poll)
         .catch(error => {
@@ -703,15 +714,16 @@ export function startWaterxCapture(options: {
         }).finally(() => {
           if (!running.has(interval) || timers.has(interval)) return;
           const round=snapshots.get(interval)?.round;
-          const inEarlyWindow=round&&
-            round.endsAt*1000-Date.now()<=(interval===5?120_000:360_000);
           let nextAt = Date.now() + (options.retryDelayMs ?? retryDelays.get(interval) ??
-            (inEarlyWindow?Math.min(periodMs,3000):periodMs));
+             healthyCollectionDelay(periodMs));
           // Discover the next identity promptly even when the old round has no odds.
-          if(round&&!failures.has(interval)&&probabilityFailures.has(interval)&&round.endsAt*1000>Date.now())
-            nextAt=Math.min(nextAt,round.endsAt*1000+250);
+           if(round&&!failures.has(interval)&&probabilityFailures.has(interval)&&round.endsAt*1000>Date.now()){
+             const lastAttempt=Date.parse(getWaterxDiagnostics(interval).lastFetchAttemptAt??"");
+             nextAt=Math.max((Number.isFinite(lastAttempt)?lastAttempt:Date.now())+periodMs,
+               Math.min(nextAt,round.endsAt*1000+250));
+           }
           nextPollAt.set(interval,nextAt);
-          const timer = setTimeout(tick, nextAt - Date.now());
+           const timer = setTimeout(tick, collectionTimerDelay(nextAt));
           timer.unref?.();
           timers.set(interval, timer);
           waterxScheduleNext(interval, nextAt);

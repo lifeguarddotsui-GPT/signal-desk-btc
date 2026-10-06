@@ -10,6 +10,7 @@ const MAX_RESPONSE_BYTES = 1_000_000;
 const cache = new Map<string, { expiresAt: number; detail: WaterxDetail }>();
 const inflight = new Map<string, Promise<WaterxDetail>>();
 const requestMetadata = new WeakMap<WaterxDetail, { receivedAt: string; sourceTimestamp: string | null }>();
+const embargoes=new Map<WaterxInterval,{untilMs:number;status:number}>();
 
 export class WaterxProviderError extends Error {
   constructor(
@@ -22,6 +23,11 @@ export class WaterxProviderError extends Error {
     super(message);
     this.name = "WaterxProviderError";
   }
+}
+export function parseWaterxRetryAfter(value:string|null,now=Date.now()):number|null{
+  const at=value&&/^\d+(?:\.\d+)?$/.test(value)?now+Number(value)*1000:
+    value?Date.parse(value):NaN;
+  return Number.isFinite(at)?Math.max(0,at-now):null;
 }
 
 export function waterxSlug(interval: WaterxInterval): string {
@@ -217,6 +223,11 @@ async function readDetail(
   onRequestReceived?: (at: string) => void,
 ): Promise<WaterxDetail> {
   const slug = waterxSlug(interval);
+  const embargo=embargoes.get(interval);
+  if(embargo&&embargo.untilMs>Date.now())
+    throw new WaterxProviderError("WaterX provider Retry-After embargo remains active",
+      embargo.status,embargo.untilMs-Date.now());
+  embargoes.delete(interval);
   const url = new URL(`${API}/${slug}`);
   url.searchParams.set("locale", "en");
   if (epoch !== undefined) url.searchParams.set("epoch", String(epoch));
@@ -238,11 +249,9 @@ async function readDetail(
   }
   if (!response.ok) {
     const retryAfter = response.headers.get("retry-after");
-    const retryAt = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter)
-      ? Date.now() + Number(retryAfter) * 1000
-      : retryAfter ? Date.parse(retryAfter) : NaN;
-    const retryAfterMs = Number.isFinite(retryAt)
-      ? Math.max(0, Math.min(5 * 60_000, retryAt - Date.now())) : null;
+    const retryAfterMs = parseWaterxRetryAfter(retryAfter);
+    if(retryAfterMs!==null&&retryAfterMs>0)
+      embargoes.set(interval,{untilMs:Date.now()+retryAfterMs,status:response.status});
     throw new WaterxProviderError(
       `WaterX HTTP ${response.status}${response.status === 429 ? " (rate limited)" : ""}`,
       response.status, retryAfterMs);

@@ -89,7 +89,9 @@ test("watchdog restarts a vanished timer and reports a genuinely stuck read once
   try {
     await wait(75);
     assert.equal(stalledReports, 1);
-    assert.ok((attempts.get(15) ?? 0) >= 2, "15m must recover its missing timer");
+    assert.equal(attempts.get(15),1,"watchdog must not spend the next request budget early");
+    await wait(200);
+    assert.ok((attempts.get(15) ?? 0) >= 2, "15m must resume within its configured request budget");
     assert.equal(attempts.get(5), 1, "a stuck read must never run concurrently");
   } finally {
     stop();

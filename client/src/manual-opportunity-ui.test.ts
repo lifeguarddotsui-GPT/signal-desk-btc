@@ -7,243 +7,162 @@ import type { RoundDecision } from "../../shared/round-decision";
 import { lockPolicy } from "../../shared/lock-readiness";
 import type { WaterxDataHealth } from "../../shared/waterx-data-health";
 import { ManualOpportunity } from "./ManualOpportunity";
-import type { AtomicDecisionView } from "./live-decision-contract";
+import { getAtomicDecisionView, type LiveSnapshotEnvelope } from "./live-decision-contract";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("./ManualOpportunity.css", import.meta.url), "utf8");
+const source = readFileSync(new URL("./ManualOpportunity.tsx", import.meta.url), "utf8");
 const now = 1_700_000_020_000;
-const round = { id: "manual-round-a", startMs: now - 20_000, expiryMs: now + 280_000 };
 
-function decision(overrides: Partial<RoundDecision> = {}): RoundDecision {
-  return {
-    format: "waterx-live-decision-v2",
-    streamId: "manual-stream-a",
-    network: "sui:mainnet",
-    intervalMinutes: 5,
-    roundId: round.id,
-    startMs: round.startMs,
-    expiryMs: round.expiryMs,
-    policyVersion: lockPolicy(5).version,
-    stateVersion: 4,
-    updatedAtMs: now,
-    publishedAtMs: now,
+function snapshot(interval: 5 | 15 = 5, overrides: Partial<RoundDecision> = {}, probability = .72) {
+  const round = { id: `desk-${interval}`, startMs: now - 20_000, expiryMs: now + interval * 60_000 - 20_000 };
+  const decision: RoundDecision = {
+    format: "waterx-live-decision-v2", streamId: `stream-${interval}`, network: "sui:mainnet",
+    intervalMinutes: interval, roundId: round.id, startMs: round.startMs, expiryMs: round.expiryMs,
+    policyVersion: lockPolicy(interval).version, stateVersion: 4, updatedAtMs: now, publishedAtMs: now,
     readiness: {
-      state: "READY", score: 100, side: "UP", probability: .72, evaluatedAtMs: now,
-      secondsRemaining: 280, sameSideMs: 30_000, earliestPossibleAtMs: now,
-      reason: "Exact-round evidence remains fresh.", health: "WAITING FOR EVIDENCE",
+      state: "LEANING", score: 61, side: "UP", probability, evaluatedAtMs: now,
+      secondsRemaining: interval * 60 - 20, sameSideMs: 12_000, earliestPossibleAtMs: now,
+      reason: "Same-round observations are developing.", health: "CURRENT",
       components: {
-        strength: .8, requiredStrength: .65, persistenceMs: 30_000, requiredPersistenceMs: 12_000,
-        range: .02, reversals: 0, observationCount: 12, ageMs: 0, gapReset: false,
-        velocity: .001, acceleration: .001, sourceHealthy: true, withinWindow: true,
-        fresh: true, stable: true,
+        strength: .7, requiredStrength: .6, persistenceMs: 12_000, requiredPersistenceMs: 10_000,
+        range: .02, reversals: 0, observationCount: 6, ageMs: 0, gapReset: false,
+        velocity: .001, acceleration: 0, sourceHealthy: true, withinWindow: true, fresh: true, stable: true,
       },
     },
-    market: { probabilityUp: .72, probabilityDown: .28, observedAtMs: now, receivedAtMs: now, providerOddsAtMs: null },
-    persistence: { status: "COMMITTED", updatedAtMs: now, errorClass: null },
-    canonical: null,
-    earlyDecision: {
-      side: "DOWN", probabilityUp: .39, decisionAtMs: now - 1000, committedAtMs: now - 700,
-      policyVersion: lockPolicy(5).version, observationId: "obs-4", eventId: "42", workerReceivedAtMs: now - 650,
-    },
-    earlyPersistence: { status: "SAVED", errorClass: null },
-    opportunity: {
-      sourceId: "waterx.public.crypto.v1", observationId: "quote-4", receivedAtMs: now - 500,
-      providerEventAtMs: null, priceLastChangedAtMs: now - 15_000,
-      reference: { price: 83_500, status: "confirmed" },
-      marketId: "waterx-market-a", url: `https://waterx.app/en/predict/market/crypto/crypto-btc-updown-5m/${round.expiryMs/1000}`,
-      orderCutoffAtMs: null, probabilityEvidence: "available",
-      purchase: {
-        up: { status: "reported", askCents: 40, marketObjectId: "yes-object", selection: "YES" },
-        down: { status: "reported", askCents: 62, marketObjectId: "no-object", selection: "NO" },
-      },
-    },
-    componentHealth: {
-      priceFeed: "AVAILABLE", decisionService: "AVAILABLE", storage: "COMMITTED", orderAdapter: "UNVERIFIED",
-    },
-    latestSafeOrderAtMs: null,
-    executionWindowRemainingMs: null,
-    executionBlocker: "No measured safe execution time.",
-    tradeAllowed: false,
-    timestampSemantics: "Application receipt/evaluation/publication clocks; provider odds time unknown; commit is application acknowledgement",
+    market: { probabilityUp: probability, probabilityDown: 1 - probability, observedAtMs: now, receivedAtMs: now, providerOddsAtMs: null },
+    persistence: { status: "WAITING_CHECKPOINT", updatedAtMs: now, errorClass: null },
+    canonical: null, latestSafeOrderAtMs: null, executionWindowRemainingMs: null,
+    executionBlocker: "Research only.", tradeAllowed: false,
+    timestampSemantics: "Application timestamps; provider odds timestamp unknown.",
     ...overrides,
   };
+  const envelope: LiveSnapshotEnvelope = {
+    serverTime: new Date(now).toISOString(), intervalMinutes: interval, round, decision,
+  };
+  return { round, envelope, decision };
 }
-
-function render(view: AtomicDecisionView, receipt = now, pending = false, error = "") {
-  return renderToStaticMarkup(React.createElement(ManualOpportunity, {
-    view, now, browserReceivedAtMs: receipt, refresh: { pending, error },
-  }));
-}
-
-function outageHealth(primaryReason: WaterxDataHealth["primaryReason"]): WaterxDataHealth {
+function health(status: WaterxDataHealth["probabilities"]["status"], lastValid: WaterxDataHealth["probabilities"]["lastValid"] = null): WaterxDataHealth {
+  const primaryReason = status === "CURRENT" ? "CURRENT" : status;
   return {
-    transport: { status: "PROVIDER_TIMEOUT", lastReceivedAtMs: now - 2_000, errorClass: "ETIMEDOUT" },
+    transport: { status: "HEALTHY", lastReceivedAtMs: now, errorClass: null },
     round: { status: "KNOWN" }, reference: { status: "CONFIRMED" },
-    probabilities: {
-      status: "PROBABILITIES_STALE",
-      lastValid: { up: .72, down: .28, receivedAtMs: now - 15_000, ageMs: 15_000 },
-    },
-    storage: { status: "UNKNOWN", errorClass: null },
-    execution: { eligible: false, reason: "No verified live input." }, primaryReason,
+    probabilities: { status, lastValid }, storage: { status: "UNKNOWN", errorClass: null },
+    execution: { eligible: false, reason: "Research only." }, primaryReason,
   };
 }
-
-test("initial snapshot loading uses a quiet skeleton instead of an invented quote or spinner", () => {
-  const markup = render({
-    decision: null, fresh: false, sourceAgeMs: null, lean: null, stage: "WATCHING",
-    score: null, reason: "Waiting for a valid active-round snapshot.",
-  }, now, true);
-  assert.match(markup, /Loading exact-round snapshot/);
-  assert.match(markup, /mo-skeleton-lines/);
-  assert.doesNotMatch(markup, /Data delayed · no exact-round decision snapshot|spinner/);
-});
-
-test("missing exact-round snapshot renders a composed delayed state and withholds purchase details", () => {
-  const markup = render({
-    decision: null, fresh: false, sourceAgeMs: null, lean: null, stage: "WATCHING",
-    score: null, reason: "Waiting for a valid active-round snapshot.",
-  });
-  assert.match(markup, /Data delayed · no exact-round decision snapshot/);
-  assert.match(markup, /No verified exact-round link/);
-  assert.match(markup, /Readiness is decision progress, not win probability/);
-  assert.doesNotMatch(markup, /UP · YES|DOWN · NO|40¢ \/ share/);
-});
-
-test("stale odds do not replace a saved early DOWN choice or switch to an available UP ask", () => {
-  const savedDown = decision({
-    opportunity: {
-      ...decision().opportunity!,
-      receivedAtMs: now - 15_000,
-      purchase: {
-        up: { status: "reported", askCents: 40, marketObjectId: "yes-object", selection: "YES" },
-        down: { status: "unavailable", askCents: null, marketObjectId: null, selection: null },
-      },
-    },
-  });
-  const markup = render({
-    decision: savedDown, fresh: false, sourceAgeMs: 15_000, lean: null,
-    stage: "WATCHING", score: null, reason: "Source stale; saved record retained.",
-  });
-  assert.match(markup, /DOWN/);
-  assert.match(markup, /Adaptive benchmark saved/);
-  assert.match(markup, /DOWN purchase unavailable/);
-  assert.match(markup, /Stale source receipt/);
-  assert.match(markup, /Age is measured from app receipt, not last price change/);
-  assert.doesNotMatch(markup, /40¢ \/ share/);
-  assert.match(markup, /commit → browser Unknown/);
-});
-
-test("a locked side stays explicitly unavailable and keeps its verified provider route separate from ordering", () => {
-  const locked = decision({
-    opportunity: {
-      ...decision().opportunity!,
-      purchase: {
-        up: { status: "reported", askCents: 41, marketObjectId: "yes-object", selection: "YES" },
-        down: { status: "locked", askCents: null, marketObjectId: "no-object", selection: "NO" },
-      },
-    },
-  });
-  const markup = render({
-    decision: locked, fresh: true, sourceAgeMs: 500, lean: "UP",
-    stage: "READY", score: 100, reason: "Ready.",
-  });
-  assert.match(markup, /DOWN/);
-  assert.match(markup, /DOWN purchase locked/);
-  assert.match(markup, /View verified provider round/);
-  assert.match(markup, /no in-app order submission/);
-  assert.match(markup, /Net profit if correct<\/span><b>Unknown/);
-  assert.match(markup, /ORDER ADAPTER<\/span><b>UNVERIFIED/);
-});
-
-test("one unavailable selected side preserves round data without substituting the available opposite purchase", () => {
-  const singleSide = decision({
-    earlyDecision: null,
-    earlyPersistence: { status: "DEVELOPING", errorClass: null },
-    opportunity: {
-      ...decision().opportunity!,
-      purchase: {
-        up: { status: "reported", askCents: 41, marketObjectId: "yes-object", selection: "YES" },
-        down: { status: "unavailable", askCents: null, marketObjectId: null, selection: null },
-      },
-    },
-  });
-  const markup = render({
-    decision: singleSide, fresh: true, sourceAgeMs: 500, lean: "DOWN",
-    stage: "LEANING", score: 61, reason: "Current lean is DOWN.",
-  });
-  assert.match(markup, /DOWN purchase unavailable/);
-  assert.doesNotMatch(markup, /41¢ \/ share/);
-  assert.match(markup, /28\.0%/);
-  assert.match(markup, /Round reference \$83,500\.00 · confirmed/);
-});
-
-test("WaterX outage distinguishes an existing immutable choice from no saved choice", () => {
-  const outage = outageHealth("PROVIDER_TIMEOUT");
-  const savedDecision = decision({ dataHealth: outage });
-  const savedMarkup = render({
-    decision: savedDecision, fresh: false, sourceAgeMs: 20_000, lean: null, stage: "WATCHING",
-    score: null, reason: "WaterX provider request timed out; current probabilities unavailable.", dataHealth: outage,
-  }, now, false, "request timeout");
-  assert.match(savedMarkup, /PROVIDER TIMEOUT/);
-  assert.match(savedMarkup, /Adaptive benchmark saved/);
-  assert.match(savedMarkup, /saved choice retained only for its exact round/);
-  assert.match(savedMarkup, /Last observed/);
-  assert.match(savedMarkup, /not current/);
-
-  const noChoice = decision({ earlyDecision: null, canonical: null, market: null, dataHealth: outage });
-  const noChoiceMarkup = render({
-    decision: noChoice, fresh: false, sourceAgeMs: null, lean: null, stage: "WATCHING",
-    score: null, reason: "WaterX provider request timed out; current probabilities unavailable.", dataHealth: outage,
-  }, now, false, "request timeout");
-  assert.match(noChoiceMarkup, /PROVIDER TIMEOUT/);
-  assert.match(noChoiceMarkup, /no frozen choice is retained/);
-  assert.doesNotMatch(noChoiceMarkup, /saved choice retained/);
-  assert.match(noChoiceMarkup, /WaterX provider request timed out/);
-});
-
-test("manual card is above the chart; audit readiness is collapsed and mobile layout has dedicated breakpoints", () => {
-  assert.ok(app.indexOf("<ManualOpportunity") < app.indexOf("<section className=\"chart-panel\">"));
-  assert.doesNotMatch(app, /className="metric-ribbon"|className="distance-line"/);
-  assert.ok(app.indexOf("<details className=\"mo-readiness-audit\">") < app.indexOf("<RoundDecisionPanel"));
-  assert.match(app, /browserReceivedAtMs=\{live\.atomicUpdated\}/);
-  assert.match(app, /refresh=\{\{ pending: snapshotRefreshState\.pending, error: snapshotRefreshState\.error \}\}/);
-  assert.match(css, /@media \(max-width: 700px\)/);
-  assert.match(css, /@media \(max-width: 440px\)/);
-});
-
-test("primary card consolidates source prices, gate timing and an explicit qualification checklist", () => {
-  const source = readFileSync(new URL("./ManualOpportunity.tsx", import.meta.url), "utf8");
-  const markup = renderToStaticMarkup(React.createElement(ManualOpportunity, {
-    view: { decision: decision({ timedDecision: null }), fresh: true, sourceAgeMs: 900, lean: "UP", stage: "LEANING", score: 60, reason: "Evidence is building." },
-    now, marketReference: { price: 83_500, quality: "confirmed", source: "WaterX" },
-    comparison: { price: 83_517.25, source: "Coinbase SSE", receivedAtMs: now - 900 },
+function render(interval: 5 | 15, view: ReturnType<typeof getAtomicDecisionView>, options: {
+  pending?: boolean; error?: string; round?: { id: string; startMs: number; expiryMs: number } | null;
+  fixtureName?: string;
+} = {}) {
+  return renderToStaticMarkup(React.createElement(ManualOpportunity, {
+    view, now, interval, round: options.round, refresh: { pending: !!options.pending, error: options.error ?? "" },
+    onRetry: () => {}, fixtureName: options.fixtureName,
+    marketReference: { price: 83_500, quality: "confirmed", source: "WaterX" },
+    comparison: { price: 83_517.25, source: "Coinbase comparison", receivedAtMs: now - 500 },
   }));
-  assert.match(markup, /Authoritative round research state/);
-  assert.match(markup, /PRICE TO BEAT · CONFIRMED/);
-  assert.match(markup, /\$83,500\.00/);
-  assert.match(markup, /BTC COMPARISON · Coinbase SSE/);
+}
+
+test("normal 5m and 15m rounds share the compact exact-round decision projection", () => {
+  for (const interval of [5, 15] as const) {
+    const { round, envelope } = snapshot(interval);
+    const view = getAtomicDecisionView(envelope, interval, round, now);
+    const markup = render(interval, view);
+    assert.match(markup, new RegExp(`· ${interval}m`));
+    assert.match(markup, /LEANING UP/);
+    assert.match(markup, /\$83,517\.25/);
+    assert.match(markup, /\$83,500\.00/);
+    assert.match(markup, /\+\$17\.25/);
+    assert.match(markup, /WaterX market/);
+    assert.equal(view.projectionVersion, "waterx-exact-round-client-v1");
+    assert.equal(view.snapshotVersion, 4);
+    assert.equal(view.roundIdentity?.id, round.id);
+  }
+});
+
+test("missing odds have one calm notice while comparison and exact price difference remain independent", () => {
+  const { round, envelope } = snapshot(5, { market: null });
+  const outage = health("PROBABILITIES_MISSING");
+  const withHealth = { ...envelope, dataHealth: outage, decision: { ...envelope.decision!, dataHealth: outage } };
+  const view = getAtomicDecisionView(withHealth, 5, round, now);
+  const markup = render(5, view);
+  assert.match(markup, /WAITING FOR ODDS/);
+  assert.equal(markup.match(/WaterX odds unavailable\. Live BTC chart remains available\./g)?.length, 1);
   assert.match(markup, /\$83,517\.25/);
-  assert.match(markup, /MARKET ODDS · CURRENT ONLY/);
-  assert.match(markup, /CURRENT CONDITIONS CHECKLIST/);
-  assert.match(app, /comparisonFresh \? comparison\?\.source/);
-  assert.match(app, /source: coinbaseDisplaySource \|\| "Not reported"/);
-  assert.doesNotMatch(app, /HTTP comparison|streamCoinbaseFresh \? "Coinbase SSE"/);
-  assert.match(source, /CURRENT CONDITIONS · ROUND ELAPSED/);
-  assert.doesNotMatch(source, /EVIDENCE READINESS/);
-  assert.doesNotMatch(source, /readinessPercent/);
-  assert.match(markup, /market probability · uncalibrated/i);
-  assert.match(markup, /CURRENT CONDITIONS · ROUND ELAPSED/);
-  assert.match(markup, /BENCHMARK DISCLOSURE · legacy canonical readiness/);
-  assert.match(markup, /CURRENT WATERX PUBLIC MARKET PROBABILITY/);
-  assert.match(source, /LAST GATE · SERVER-RECORDED/);
-  assert.match(source, /NEXT SERVER-SCHEDULED GATE/);
+  assert.match(markup, /\+\$17\.25/);
+  assert.doesNotMatch(markup, /0% confidence|0\.0%/);
 });
 
-test("unknown comparison provenance is withheld rather than defaulted to Coinbase", () => {
-  const markup = renderToStaticMarkup(React.createElement(ManualOpportunity, {
-    view: { decision: decision({ timedDecision: null }), fresh: true, sourceAgeMs: 900, lean: "UP", stage: "LEANING", score: 60, reason: "Evidence is building." },
-    now,
-  }));
-  assert.match(markup, /BTC COMPARISON · Not reported/);
-  assert.doesNotMatch(markup, /BTC COMPARISON · Coinbase/);
+test("last same-round odds are stale only in Details and never produce a current lean", () => {
+  const { round, envelope } = snapshot();
+  const outage = health("PROBABILITIES_STALE", {
+    up: .72, down: .28, receivedAtMs: now - 15_000, ageMs: 15_000,
+  });
+  const withHealth = { ...envelope, dataHealth: outage, decision: { ...envelope.decision!, dataHealth: outage } };
+  const view = getAtomicDecisionView(withHealth, 5, round, now);
+  const markup = render(5, view);
+  assert.match(markup, /WATCHING/);
+  assert.doesNotMatch(markup, /LEANING UP/);
+  assert.match(markup, /<summary>Details<\/summary>[\s\S]*Stale · UP 72\.0% · DOWN 28\.0%/);
+  assert.doesNotMatch(markup.slice(0, markup.indexOf("<details")), /72\.0%/);
+});
+
+test("a saved immutable choice remains prominent during a probability outage", () => {
+  const { round, envelope } = snapshot(15, {
+    market: null,
+    canonical: { side: "DOWN", probabilityUp: .39, decisionAtMs: now - 2_000, committedAtMs: null },
+    persistence: { status: "COMMITTED", updatedAtMs: now - 1_000, errorClass: null },
+    readiness: {
+      state: "WATCHING", score: 0, side: null, probability: null, evaluatedAtMs: now,
+      secondsRemaining: 880, sameSideMs: 0, earliestPossibleAtMs: null,
+      reason: "Waiting for current probability input.", health: "PROBABILITIES STALE",
+      components: {
+        strength: .7, requiredStrength: .6, persistenceMs: 0, requiredPersistenceMs: 10_000,
+        range: .02, reversals: 0, observationCount: 0, ageMs: 15_000, gapReset: false,
+        velocity: 0, acceleration: 0, sourceHealthy: false, withinWindow: true, fresh: false, stable: false,
+      },
+    },
+  });
+  const outage = health("PROBABILITIES_STALE", { up: .72, down: .28, receivedAtMs: now - 15_000, ageMs: 15_000 });
+  const withHealth = { ...envelope, dataHealth: outage, decision: { ...envelope.decision!, dataHealth: outage } };
+  const view = getAtomicDecisionView(withHealth, 15, round, now);
+  const markup = render(15, view);
+  assert.match(markup, /LOCKED DOWN/);
+  assert.match(markup, /saved and remains unchanged/);
+  assert.doesNotMatch(markup, /LOCKED UP/);
+  assert.match(markup, /DOWN · immutable/);
+});
+
+test("initial loading is neutral; request failure gets one functional retry control", () => {
+  const empty = { decision: null, fresh: false, sourceAgeMs: null, lean: null, stage: "WATCHING", score: null, reason: "Waiting for a valid active-round snapshot.", projectionVersion: "waterx-exact-round-client-v1", intervalMinutes: null, roundIdentity: null, strategyVersion: null, snapshotVersion: null, componentTimestamps: {}, provisionalLean: null, lastGate: null, nextGateAtMs: null, savedDecision: null, persistenceState: null } as const;
+  const loading = render(5, empty, { pending: true });
+  assert.match(loading, /desk-skeleton/);
+  assert.doesNotMatch(loading, /role="status">WATCHING|DATA DELAYED|Legacy schedule/);
+  const failed = render(5, empty, { error: "NETWORK_ERROR" });
+  assert.match(failed, /Live snapshot could not refresh/);
+  assert.match(failed, /Retry/);
+});
+
+test("rollover withholds old round state; visual lock fixture is marked development-only", () => {
+  const { round, envelope } = snapshot();
+  const view = getAtomicDecisionView(envelope, 5, round, now);
+  const nextRound = { ...round, id: "new-round", startMs: now, expiryMs: now + 300_000 };
+  const rollover = render(5, view, { round: nextRound });
+  assert.doesNotMatch(rollover, /LEANING UP|LOCKED UP/);
+  assert.match(rollover, /Waiting for an exact active-round snapshot/);
+  const visualLock = render(5, getAtomicDecisionView(null, 5, null, now), { fixtureName: "locked" });
+  assert.match(visualLock, /LOCKED UP/);
+  assert.match(visualLock, /Synthetic visual state only/);
+  assert.match(visualLock, /Development visual fixture/);
+});
+
+test("chart is the next live-desk area, archive coverage stays explicitly rolling, and layout is compact on mobile", () => {
+  assert.ok(app.indexOf("<ManualOpportunity") < app.indexOf("<section className=\"chart-panel\">"));
+  assert.match(app, /does not describe complete coverage of the current round/);
+  assert.match(app, /active-round window; archive coverage is separate/);
+  assert.match(css, /@media \(max-width: 600px\)/);
+  assert.match(css, /@media \(max-width: 350px\)/);
+  assert.match(source, /Qualification conditions/);
+  assert.doesNotMatch(source, /economics|expected return|NO EXECUTION/);
+  assert.match(app, /import\.meta\.env\.DEV && fixtureNames\.includes/);
 });

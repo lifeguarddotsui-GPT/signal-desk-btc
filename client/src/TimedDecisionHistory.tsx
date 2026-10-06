@@ -5,13 +5,17 @@ type Interval = "all" | 5 | 15;
 type Strategy = "all" | "waterx-qualification-gates-v3" | "waterx-early-baseline-v2" | "waterx-timed-baseline-v1";
 type CohortWindow = "lifetime" | "24h" | "7d" | "20" | "50" | "100";
 type ResultStatus = "CORRECT" | "INCORRECT" | "PENDING" | "DISPUTED" | "NO_VALID_INPUT" | "MISSED_DEADLINE" | "ABSTENTION" | "DATA_FAILURE";
-type HistoryEntry = TimedDecision & { result?: ResultStatus; verifiedOutcome?: "UP" | "DOWN" | null };
+type HistoryEntry = TimedDecision & { result?: ResultStatus; verifiedOutcome?: "UP" | "DOWN" | null; operationalReasons?: string[] };
 type HistoryMetrics = {
   n: number; onTimeLocks: number; deadlineLocks: number; missed: number; noValidInput: number; settledN: number;
   correct?: number; incorrect?: number; pending?: number; disputed?: number; hitRate?: number | null;
   ratio?: number | string | null; choiceCoverage?: number | null; onTimeCoverage?: number | null; medianElapsedMs?: number | null;
   abstentionRate?: number | null; operationalFailureRate?: number | null;
   deadlineMisses?: number; operationalFailures?: number; operationalCoverage?: number | null;
+  operationalBreakdown?: {
+    sourceUnavailable?: number; noQualifiedSignal?: number; schedulerMissedGate?: number; persistenceFailure?: number;
+    gates?: { sourceUnavailable?: number; noQualifiedSignal?: number; schedulerMissedGate?: number };
+  };
 };
 export type TimedHistoryResponse = {
   strategyVersion: string;
@@ -67,6 +71,20 @@ export function TimedDecisionHistoryRecords({ interval, data, visibleEntries }: 
       <div><span>Operational failure rate</span><b>{rate(metrics.operationalFailureRate)}</b></div>
       <div><span>Legacy settled count</span><b>{metrics.settledN}</b></div>
     </div>
+    {metrics.operationalBreakdown && <section className="timed-operational-breakdown" aria-label="Operational outcome reasons">
+      <h4>Operational outcomes</h4>
+      <div className="timed-history-metrics">
+        <div><span>Source unavailable</span><b>{metrics.operationalBreakdown.sourceUnavailable ?? "Not reported"}</b></div>
+        <div><span>No qualified signal</span><b>{metrics.operationalBreakdown.noQualifiedSignal ?? "Not reported"}</b></div>
+        <div><span>Scheduler missed gate</span><b>{metrics.operationalBreakdown.schedulerMissedGate ?? "Not reported"}</b></div>
+        <div><span>Persistence failure</span><b>{metrics.operationalBreakdown.persistenceFailure ?? "Not reported"}</b></div>
+      </div>
+      {metrics.operationalBreakdown.gates && <div className="timed-history-metrics" aria-label="Gate-level operational outcomes">
+        <div><span>Gate source unavailable</span><b>{metrics.operationalBreakdown.gates.sourceUnavailable ?? "Not reported"}</b></div>
+        <div><span>Gate no qualified signal</span><b>{metrics.operationalBreakdown.gates.noQualifiedSignal ?? "Not reported"}</b></div>
+        <div><span>Gate scheduler missed</span><b>{metrics.operationalBreakdown.gates.schedulerMissedGate ?? "Not reported"}</b></div>
+      </div>}
+    </section>}
     <p className="timed-history-note">Scoring metrics cover the full selected cohort; row limit only controls visible records. Correctness is not trading P/L. Deadline misses include missed gates or late locks; DATA_FAILURE is an operational failure, not a missed deadline. Older reports expose only “missed,” shown here as operational failures rather than inferred deadline misses.</p>
     {!("correct" in metrics) && <p className="timed-history-api-note">The history API has not returned outcome-scoring metrics yet.</p>}
     {rows.length === 0 ? <div className="timed-history-empty">No early-strategy records returned for these filters.</div>
@@ -113,6 +131,7 @@ export function TimedDecisionHistoryRecords({ interval, data, visibleEntries }: 
                 <div><span>Ambiguous</span><b>{entry.ambiguous ? "Yes · not eligible for automatic execution" : "No"}</b></div>
                 <div><span>Automatic execution</span><b>Disabled · adapter unverified</b></div>
                 {entry.operationalFailure && <div><span>Operational failure</span><b>{entry.operationalFailure}</b></div>}
+                {entry.operationalReasons && <div><span>Operational reasons</span><b>{entry.operationalReasons.length ? entry.operationalReasons.map(reason => reason.replaceAll("_", " ")).join(" · ") : "None reported"}</b></div>}
               </div>
               <details className="timed-history-evidence"><summary>Frozen evidence</summary><pre>{JSON.stringify(entry.evidence, null, 2)}</pre></details>
             </details>

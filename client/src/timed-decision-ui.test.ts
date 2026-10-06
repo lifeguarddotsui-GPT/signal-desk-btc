@@ -120,95 +120,46 @@ function history(interval: 5 | 15, record: TimedDecision): TimedHistoryResponse 
   return { strategyVersion, entries: [record], metrics: { n: 1, onTimeLocks: 0, deadlineLocks: 1, missed: 0, noValidInput: 0, settledN: 0 } };
 }
 
-test("v3 gates show the next evaluation without a mandatory hard-deadline countdown", () => {
+test("one compact live decision retains only the next server evaluation, not the legacy round timer", () => {
   for (const interval of [5, 15] as const) {
     const state = gateTimed(interval, 45_000);
     const html = renderDesk(roundDecision(interval, state));
-    assert.match(html, /NEXT SERVER-SCHEDULED GATE<\/span><b>00:15/);
-    assert.match(html, /A check, not a forced choice/);
-    assert.doesNotMatch(html, /MANDATORY DECISION|HARD DEADLINE/);
+    assert.match(html, /Next evaluation<\/span><strong>00:15/);
+    assert.match(html, /LEANING UP/);
+    assert.doesNotMatch(html, /MANDATORY DECISION|HARD DEADLINE|readinessPercent|02:20 \/ 05:00/);
   }
 });
 
-test("primary gate timing shows elapsed time and saved gate identity without a forced choice timer", () => {
-  const observing = gateTimed(5, 31_000);
-  const pendingHtml = renderDesk(roundDecision(5, observing));
-  assert.match(pendingHtml, /00:31 \/ 05:00/);
-  assert.match(pendingHtml, /Qualification objective <b>01:00/);
-  assert.match(pendingHtml, /NEXT SERVER-SCHEDULED GATE<\/span><b>00:29/);
-  assert.match(pendingHtml, /aria-label="Round elapsed progress"/);
-  assert.doesNotMatch(pendingHtml, /Hard deadline|Mandatory decision|Latest decision/);
-
-  const saved = savedRecord(5);
-  const locked = timed(5, saved.elapsedMs, "DEADLINE");
-  locked.targetAtMs = saved.targetAtMs;
-  locked.hardDeadlineAtMs = saved.hardDeadlineAtMs;
-  locked.saved = saved;
-  const savedHtml = renderDesk(roundDecision(5, locked));
-  assert.match(savedHtml, /Saved elapsed <b>02:20/);
-  assert.match(savedHtml, /02:20 \/ 05:00/);
-  assert.doesNotMatch(savedHtml, /Latest decision/);
+test("qualification indicators are exact-snapshot conditions and no readiness percentage is shown", () => {
+  const markup = renderDesk(roundDecision(5, gateTimed(5, 48_000)));
+  assert.match(markup, /Qualification conditions/);
+  assert.match(markup, /aria-label="Stable: not met"/);
+  assert.doesNotMatch(markup, /readinessPercent|50%|strength|probability range/i);
 });
 
-test("elapsed display uses the exact round clock rather than a stale timed projection", () => {
-  const fiveMinute = gateTimed(5, 31_000);
-  const fiveMinuteDecision = roundDecision(5, fiveMinute);
-  fiveMinuteDecision.timedDecision!.elapsedMs = 5_000;
-  const fiveMinuteHtml = renderDesk(fiveMinuteDecision);
-  assert.match(fiveMinuteHtml, /00:31 \/ 05:00/);
-
-  const fifteenMinute = gateTimed(15, 75_000);
-  const fifteenMinuteDecision = roundDecision(15, fifteenMinute);
-  fifteenMinuteDecision.timedDecision!.elapsedMs = 8_000;
-  const fifteenMinuteHtml = renderDesk(fifteenMinuteDecision);
-  assert.match(fifteenMinuteHtml, /01:15 \/ 15:00/);
-});
-
-test("gate policy uses a four-item qualification checklist and one wait reason, not a readiness percentage", () => {
-  const state = gateTimed(5, 48_000);
-  state.components = {
-    sameSideMs: 54_000, requiredSameSideMs: 60_000, validCount: 4, requiredCount: 3,
-    probabilityRange: .018, maximumRange: .045, strength: .64, requiredStrength: .72,
-  };
-  state.requirementsMet = 2;
-  const markup = renderDesk(roundDecision(5, state));
-  assert.match(markup, /00:48 \/ 05:00/);
-  assert.match(markup, /Qualification objective <b>01:00/);
-  assert.match(markup, /Needs 6 seconds more same-side stability/);
-  assert.match(markup, /2 of 4 requirements/);
-  const primary = markup.split('<details class="mo-benchmark-details">')[0];
-  assert.doesNotMatch(primary, /EVIDENCE READINESS|READINESS|readinessPercent/);
-  assert.match(markup, /uncalibrated/i);
-});
-
-test("saved DOWN remains frozen through quote outage and never swaps to current UP lean", () => {
+test("saved DOWN remains frozen in compact primary state without legacy evidence diagnostics", () => {
   const state = timed(5, 140_000, "EVALUATING");
   state.saved = savedRecord(5);
   state.persistence = "COMMITTED";
   const markup = renderDesk(roundDecision(5, state), false);
   assert.match(markup, /LOCKED DOWN/);
-  assert.doesNotMatch(markup,/50% conditions reported/);
-  assert.match(markup, /FROZEN WATERX PUBLIC MARKET PROBABILITY/);
-  assert.match(markup, /Choice is frozen\. Trading authority remains disabled/);
-  assert.match(markup, /saved choice retained/i);
-  assert.match(markup, /Decision lifecycle, policy and raw evidence/);
-  assert.match(markup, /observation-immutable-7/);
+  assert.match(markup, /saved and remains unchanged/);
+  assert.match(markup, /Saved round choice/);
   assert.doesNotMatch(markup, /LOCKED UP/);
-  assert.match(markup, /timed-decision-5-shared/);
+  assert.doesNotMatch(markup, /observation-immutable-7|timed-decision-5-shared/);
 });
 
-test("late saved choice is visibly a missed deadline, never a green on-time lock",()=>{
+test("saved late choice is immutable and does not imply a current opposite lean",()=>{
   const state=timed(5,151000,"DEADLINE");
   state.saved={...savedRecord(5),onTime:false,operationalFailure:"COMMIT_AFTER_HARD_DEADLINE"};
   state.persistence="COMMITTED";
   const markup=renderDesk(roundDecision(5,state));
   assert.match(markup,/LOCKED DOWN/);
-  assert.match(markup,/deadline missed/);
-  assert.match(markup,/COMMIT ACKNOWLEDGEMENT<\/span><strong>LATE/);
-  assert.match(markup,/Operational failure: COMMIT_AFTER_HARD_DEADLINE/);
+  assert.match(markup,/saved and remains unchanged/);
+  assert.doesNotMatch(markup,/LOCKED UP/);
 });
 
-test("no-input and missed-deadline outcomes are explicit recorded failures without a side", () => {
+test("non-choice timed outcomes do not fabricate a side or a deadline countdown", () => {
   const noInput = timed(15, 450_000, "DEADLINE");
   noInput.persistence = "COMMITTED";
   noInput.saved = savedRecord(15, "NO_VALID_INPUT");
@@ -217,11 +168,11 @@ test("no-input and missed-deadline outcomes are explicit recorded failures witho
   missed.saved = savedRecord(5, "MISSED_DEADLINE");
   const noInputMarkup = renderDesk(roundDecision(15, noInput), false);
   const missedMarkup = renderDesk(roundDecision(5, missed), false);
-  assert.match(noInputMarkup, /NO VALID INPUT/);
-  assert.match(noInputMarkup, /NO VALID PROBABILITY INPUT/);
+  assert.match(noInputMarkup, /WATCHING/);
+  assert.match(noInputMarkup, /Current round evidence is not fresh enough/);
   assert.doesNotMatch(noInputMarkup, /UP LOCKED|DOWN LOCKED/);
-  assert.match(missedMarkup, /MISSED GATE/);
-  assert.match(missedMarkup, /no late choice substituted|MISSED_DEADLINE/);
+  assert.match(missedMarkup, /WATCHING/);
+  assert.doesNotMatch(missedMarkup, /MISSED GATE|MISSED_DEADLINE/);
 });
 
 test("history renders both intervals and repeats the exact authoritative desk decision ID", () => {
@@ -232,7 +183,7 @@ test("history renders both intervals and repeats the exact authoritative desk de
     state.persistence = "COMMITTED";
     const desk = renderDesk(roundDecision(interval, state));
     const rows = renderToStaticMarkup(React.createElement(TimedDecisionHistoryRecords, { interval, data: history(interval, record) }));
-    assert.match(desk, new RegExp(record.id));
+    assert.doesNotMatch(desk, new RegExp(record.id));
     assert.match(rows, new RegExp(record.id));
     assert.match(rows, /Early strategy records/);
     assert.match(rows, /DOWN locked/);
@@ -274,6 +225,30 @@ test("older history reports label legacy missed as operational failures, not gue
   assert.match(markup, /shown here as operational failures rather than inferred deadline misses/);
   const source = readFileSync(new URL("./TimedDecisionHistory.tsx", import.meta.url), "utf8");
   assert.match(source, /useState<Strategy>\("waterx-qualification-gates-v3"\)/);
+});
+
+test("history separates source, qualification, scheduler and persistence operational outcomes", () => {
+  const record = {
+    ...savedRecord(5),
+    operationalReasons: ["source-unavailable", "persistence-failure"],
+  };
+  const markup = renderToStaticMarkup(React.createElement(TimedDecisionHistoryRecords, {
+    interval: 5,
+    data: {
+      strategyVersion: gateStrategyVersion, entries: [record],
+      metrics: {
+        n: 1, onTimeLocks: 0, deadlineLocks: 0, missed: 1, noValidInput: 0, settledN: 0,
+        operationalBreakdown: {
+          sourceUnavailable: 1, noQualifiedSignal: 2, schedulerMissedGate: 3, persistenceFailure: 4,
+          gates: { sourceUnavailable: 5, noQualifiedSignal: 6, schedulerMissedGate: 7 },
+        },
+      },
+    },
+  }));
+  for (const reason of ["Source unavailable", "No qualified signal", "Scheduler missed gate", "Persistence failure",
+    "Gate source unavailable", "Gate no qualified signal", "Gate scheduler missed"]) assert.match(markup, new RegExp(reason));
+  assert.match(markup, /Operational reasons<\/span><b>source-unavailable · persistence-failure/);
+  assert.match(markup, /<span>Persistence failure<\/span><b>4/);
 });
 
 test("Agent uses the same ManualOpportunity and corrected server clock; history endpoint is interval scoped", () => {

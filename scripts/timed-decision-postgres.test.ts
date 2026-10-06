@@ -9,6 +9,7 @@ import {TIMED_STRATEGY} from "../shared/timed-decision";
 import {scoredTimedHistory} from "../server/waterx/timed-history";
 import {buildTimedDecision,evaluateQualificationGate} from "../server/waterx/timed-decision-builder";
 import {captureEarlyHorizons} from "../server/waterx/early-horizons";
+import {drainGateResearch} from "../server/waterx/gate-research-queue";
 import {runEarlyDailyTraining,earlyLearningReport} from "../server/waterx/early-training";
 test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollback, receipt and restart recovery",
   {skip:process.env.RUN_TIMED_POSTGRES_TESTS!=="1",timeout:30000},async()=>{
@@ -127,13 +128,17 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     await assert.rejects(pool.query("UPDATE waterx_gate_journals SET result='QUALIFIED'"),(e:{code:string})=>e.code==="23514");
     const failedStart=Date.now()-301000;
     const failedRound={...round,roundId:randomUUID(),startMs:failedStart,expiryMs:failedStart+300000};
+    // Recovery has a four-gate transaction budget. Previous immutable misses
+    // stay committed if a later final/outbox transaction fails.
+    const failedInput={...input,...failedRound,receivedAtMs:failedStart+270000};
+    await captureTimedDecision(failedInput,pool);
+    await captureTimedDecision(failedInput,pool);
     await pool.query(`CREATE FUNCTION fail_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'Injected event storage failure'; END $$;
       CREATE TRIGGER fail_outbox BEFORE INSERT ON waterx_timed_outbox FOR EACH ROW EXECUTE FUNCTION fail_outbox()`);
     await assert.rejects(captureTimedDecision({...input,...failedRound,receivedAtMs:failedStart+270000},pool),/Injected event storage failure/);
     assert.equal(await loadTimedDecision(failedRound,pool),null);
-    assert.equal((await pool.query("SELECT count(*)::int AS n FROM waterx_gate_journals WHERE round_id=$1",[failedRound.roundId])).rows[0].n,0);
-    assert.equal((await pool.query("SELECT count(*)::int AS n FROM waterx_early_horizons WHERE round_id=$1",[failedRound.roundId])).rows[0].n,0);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM waterx_gate_journals WHERE round_id=$1",[failedRound.roundId])).rows[0].n,8);
     await pool.query("DROP TRIGGER fail_outbox ON waterx_timed_outbox");
     const recovered=await captureTimedDecision({...input,...failedRound,receivedAtMs:failedStart+270000},pool);
     assert.equal(recovered!.status,"DATA_FAILURE");assert.equal(recovered!.side,null);
@@ -153,6 +158,7 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     assert.equal(abstained!.status,"ABSTAINED_NO_QUALIFIED_SIGNAL");assert.equal(abstained!.side,null);
     assert.equal(abstained!.onTime,null);
   }finally{
+    await drainGateResearch();
     await pool.end();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();await lockPool.end();
   }
 });

@@ -24,6 +24,7 @@ export type RoundDecision = {
   opportunity?:OpportunityContext|null;
   componentHealth?:{priceFeed:"AVAILABLE"|"UNAVAILABLE";decisionService:"AVAILABLE"|"STALE"|"UNAVAILABLE";
     storage:"UNKNOWN"|"FAILED"|"COMMITTED";orderAdapter:"UNVERIFIED"};
+  dataHealth?:import("./waterx-data-health").WaterxDataHealth;
   latestSafeOrderAtMs:null; executionWindowRemainingMs:null;
   executionBlocker:string; tradeAllowed:false;
   timestampSemantics:"Application receipt/evaluation/publication clocks; provider odds time unknown; commit is application acknowledgement";

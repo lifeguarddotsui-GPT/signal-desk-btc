@@ -99,6 +99,23 @@ test("missing or explicitly unavailable odds suppress every probability and gros
   assert.equal(unavailable.up.grossAvailable, false);
 });
 
+test("a one-sided probability response stays partial and never fabricates its missing opposite", () => {
+  const input = activeOddsInput();
+  const selected = selectWaterxOddsDisplay({
+    ...input,
+    odds: { ...input.odds, up: null },
+    availability: {
+      ...input.availability,
+      status: "partial",
+      up: { ...input.availability.up, probability: "unavailable" },
+    },
+  });
+  assert.equal(selected.status, "partial");
+  assert.equal(selected.up.probability, null);
+  assert.equal(selected.down.probability, input.odds.down);
+  assert.equal(selected.up.grossAvailable, true);
+});
+
 test("locked and zero-cent sides never receive indicative gross", () => {
   const input = activeOddsInput();
   const selected = selectWaterxOddsDisplay({

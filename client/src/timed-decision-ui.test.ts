@@ -190,7 +190,7 @@ test("saved DOWN remains frozen through quote outage and never swaps to current 
   assert.doesNotMatch(markup,/50% conditions reported/);
   assert.match(markup, /FROZEN WATERX PUBLIC MARKET PROBABILITY/);
   assert.match(markup, /Choice is frozen\. Trading authority remains disabled/);
-  assert.match(markup, /Quote delayed · frozen choice retained/);
+  assert.match(markup, /saved choice retained/i);
   assert.match(markup, /Decision lifecycle, policy and raw evidence/);
   assert.match(markup, /observation-immutable-7/);
   assert.doesNotMatch(markup, /LOCKED UP/);

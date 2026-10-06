@@ -10,7 +10,7 @@ import {evaluateTimedDecision,type TimedDecision,type GateJournal} from "../../s
 type Identity={intervalMinutes:5|15;roundId:string;startMs:number;expiryMs:number};
 type Entry={identity:Identity;observations:LockObservation[];updatedAtMs:number;
   canonical:RoundDecision["canonical"];persistence:RoundDecision["persistence"];
-  early:EarlyDecision|null;earlyError:string|null;opportunity:OpportunityContext|null};
+  early:EarlyDecision|null;earlyError:string|null;opportunity:OpportunityContext|null;sourceUnavailable?:boolean};
 type TimedResult={saved:TimedDecision|null;error:string|null;saving:boolean;lastGate?:GateJournal|null};
 const key=(r:Identity)=>`${r.intervalMinutes}:${r.roundId}:${r.startMs}:${r.expiryMs}`;
 const validIdentity=(r:Identity)=>!!r.roundId&&(r.intervalMinutes===5||r.intervalMinutes===15)&&
@@ -87,6 +87,16 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
       entry.earlyError=null;
     },
     discovered(identity:Identity,now:number){discover(identity,now);},
+    lastValid(identity:Identity){
+      const entry=entries.get(identity.intervalMinutes);
+      if(!entry||key(entry.identity)!==key(identity))return null;
+      const last=entry.observations.at(-1);
+      return last?{up:last.probabilityUp,down:last.probabilityDown,receivedAtMs:last.receivedAtMs}:null;
+    },
+    sourceUnavailable(identity:Identity){
+      const entry=entries.get(identity.intervalMinutes);
+      if(entry&&key(entry.identity)===key(identity))entry.sourceUnavailable=true;
+    },
     observe(identity:Identity,observation:LockObservation){
       if(!Number.isSafeInteger(observation.atMs)||!Number.isSafeInteger(observation.receivedAtMs)||
         observation.receivedAtMs<identity.startMs||observation.receivedAtMs>observation.atMs||
@@ -95,6 +105,7 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
       if(!entry)return;
       const last=entry.observations.at(-1);
       if(last&&(last.atMs>=observation.atMs||last.receivedAtMs>=observation.receivedAtMs))return;
+       entry.sourceUnavailable=false;
       entry.observations.push({...observation});
       entry.observations=entry.observations.filter(o=>o.atMs>=observation.atMs-120000).slice(-180);
       entry.updatedAtMs=observation.atMs;
@@ -130,14 +141,16 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
       // Age is based on actual HTTP receipt, not replay of a cached response.
       const observations=entry.observations.map(o=>({...o,atMs:o.receivedAtMs}));
       const last=entry.observations.at(-1);
-      const readiness=evaluateLockReadiness(policy,identity.startMs,identity.expiryMs,observations,now);
+       const inputUnavailable=entry.sourceUnavailable||!!entry.opportunity&&entry.opportunity.probabilityEvidence!=="available"&&
+         entry.opportunity.receivedAtMs>=(last?.receivedAtMs??0);
+       const readiness=evaluateLockReadiness(policy,identity.startMs,identity.expiryMs,inputUnavailable?[]:observations,now);
       const timing=evaluateTimedDecision(identity,observations,now),saved=timed.get(key(identity));
       timing.lastGate=saved?.lastGate??null;
-      if(entry.opportunity&&entry.opportunity.probabilityEvidence!=="available"&&
-        entry.opportunity.receivedAtMs>=(last?.receivedAtMs??0)){
+      if(inputUnavailable){
         timing.qualified=false;timing.readinessPercent=0;timing.liveSide=null;timing.liveProbabilityUp=null;
         timing.requirementsMet=0;
-        timing.blocker=entry.opportunity.probabilityEvidence==="invalid"?"INVALID_PROBABILITY_PAIR":"NO_VALID_PROBABILITY_INPUT";
+        timing.blocker=entry.sourceUnavailable?"SOURCE_UNAVAILABLE":
+          entry.opportunity?.probabilityEvidence==="invalid"?"INVALID_PROBABILITY_PAIR":"NO_VALID_PROBABILITY_INPUT";
         timing.lifecycle="OBSERVING";timing.remainingRequirement="Needs valid current WaterX probabilities";
       }
       timing.saved=saved?.saved??null;timing.errorClass=saved?.error??null;
@@ -147,7 +160,7 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
       else if(timing.persistence==="SAVING")timing.lifecycle="SAVING";
       return {...identity,format:"waterx-live-decision-v2",streamId,network:"sui:mainnet",
         policyVersion:policy.version,stateVersion:++version,updatedAtMs:entry.updatedAtMs,publishedAtMs:now,
-        readiness,market:last?{probabilityUp:last.probabilityUp,probabilityDown:last.probabilityDown,
+        readiness,market:last&&!inputUnavailable?{probabilityUp:last.probabilityUp,probabilityDown:last.probabilityDown,
           observedAtMs:last.atMs,receivedAtMs:last.receivedAtMs,providerOddsAtMs:null}:null,
         persistence:{...entry.persistence},canonical:entry.canonical?{...entry.canonical}:null,
         earlyDecision:entry.early?{...entry.early}:null,

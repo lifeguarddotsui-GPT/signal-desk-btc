@@ -8,8 +8,9 @@ import { roundDecisions } from "./round-decision";
 import {refreshHealth,refreshErrorClass} from "./refresh-health";
 import {boundedDatabaseRetry} from "./bounded-retry";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
+import {probabilityState,type WaterxDataHealth} from "../../shared/waterx-data-health";
 import {observationId} from "./observation-provenance";
-import {observeTimedStrategy,stopTimedStrategy,startTimedRecovery,timedStrategyQueueMetrics} from "./timed-decision-coordinator";
+import {observeTimedStrategy,timedSourceUnavailable,stopTimedStrategy,startTimedRecovery,timedStrategyQueueMetrics} from "./timed-decision-coordinator";
 import {timedPoolHealth} from "./timed-db";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
@@ -40,6 +41,8 @@ const timers = new Map<WaterxInterval, NodeJS.Timeout>();
 const running = new Set<WaterxInterval>();
 const failures = new Map<WaterxInterval, number>();
 const retryDelays = new Map<WaterxInterval, number>();
+const probabilityFailures = new Map<WaterxInterval, number>();
+const nextPollAt = new Map<WaterxInterval, number>();
 const refreshes = new Map<WaterxInterval, Promise<void>>();
 const latestRoundStarts = new Map<WaterxInterval, number>();
 const latestRoundIds = new Map<WaterxInterval, string>();
@@ -225,7 +228,7 @@ function queueSettlement(interval: WaterxInterval, now = Date.now()): void {
 export function calculateWaterxRetryDelay(
   interval: WaterxInterval, error: unknown, failureCount: number, random = Math.random(),
 ): number {
-  const rateLimited = error instanceof WaterxProviderError && error.status === 429;
+  const rateLimited = error instanceof WaterxProviderError && error.retryAfterMs !== null;
   const base = rateLimited
     ? Math.max(5_000, error.retryAfterMs ?? Math.min(5 * 60_000, 5_000 * 2 ** (failureCount - 1)))
     : Math.min(60_000, (interval === 5 ? 5_000 : 10_000) * 2 ** Math.min(failureCount - 1, 3));
@@ -267,6 +270,8 @@ export function buildWaterxLivePayload(
   comparisonTick: ReturnType<typeof latestComparison>,
 ) {
   const snapshotMs = snapshot.observedAt ? Date.parse(snapshot.observedAt) : NaN;
+  const receiptIso=Number.isFinite(snapshot.receivedAtMs)?
+    new Date(snapshot.receivedAtMs!).toISOString():snapshot.observedAt;
   const stale = !Number.isFinite(snapshotMs) || now - snapshotMs > (interval === 5 ? 16_000 : 31_000);
   // A source outage does not erase already verified, still-current round identity.
   // It cannot refresh observations or make quotes executable.
@@ -304,6 +309,29 @@ export function buildWaterxLivePayload(
   const evaluationStarted=performance.now();
   const decision=round?roundDecisions.read({intervalMinutes:interval,roundId:round.id,
     startMs:round.startsAt*1000,expiryMs:round.endsAt*1000},now):null;
+  const identity=round?{intervalMinutes:interval,roundId:round.id,startMs:round.startsAt*1000,expiryMs:round.endsAt*1000}:null;
+  const last=identity?roundDecisions.lastValid(identity):null;
+  const invalidReported=!![upSide,downSide].find(side=>side?.reason&&/invalid .*probabilityCents|duplicate .* sides/i.test(side.reason));
+  const probabilityStatus=invalidReported?"PROBABILITY_PAIR_INVALID":probabilityState(
+    upSide?.availability==="reported"?upProbability===null?null:upProbability/100:null,
+    downSide?.availability==="reported"?downProbability===null?null:downProbability/100:null,
+    snapshot.receivedAtMs??(Number.isFinite(snapshotMs)?snapshotMs:null),now);
+  const storageError=decision?.timedDecision?.errorClass??decision?.earlyPersistence?.errorClass??
+    (decision?.persistence.status==="FAILED"?decision.persistence.errorClass??"UNKNOWN":null);
+  const transportStatus:WaterxDataHealth["transport"]["status"]=snapshot.sourceError?
+    /timeout|timed out|exceeded \d+ms/i.test(snapshot.sourceError)?"PROVIDER_TIMEOUT":"REQUEST_FAILURE":"HEALTHY";
+  const dataHealth:WaterxDataHealth={
+    transport:{status:transportStatus,lastReceivedAtMs:snapshot.receivedAtMs??null,errorClass:snapshot.sourceError},
+    round:{status:round?"KNOWN":"ROUND_UNAVAILABLE"},
+    reference:{status:round?.anchorPrice==null?"UNAVAILABLE":round.anchorPriceConfirmed?"CONFIRMED":"PROVISIONAL"},
+    probabilities:{status:probabilityStatus,lastValid:last&&last.receivedAtMs<=now?
+      {...last,ageMs:now-last.receivedAtMs}:null},
+    storage:{status:storageError?"FAILED":decision?.componentHealth?.storage??"UNKNOWN",errorClass:storageError},
+    execution:{eligible:false,reason:"Read-only research; no verified execution authority."},
+    primaryReason:transportStatus!=="HEALTHY"?transportStatus:!round?"ROUND_UNAVAILABLE":
+      probabilityStatus!=="CURRENT"?probabilityStatus:storageError?"STORAGE_FAILURE":"CURRENT",
+  };
+  if(decision)decision.dataHealth=dataHealth;
   if(decision)refreshHealth.record({interval,roundId:decision.roundId,stage:"READINESS_EVALUATION",
     outcome:decision.market&&!decision.readiness.components.fresh?"error":"ok",
     errorClass:decision.market&&!decision.readiness.components.fresh?"SOURCE_STALE":null,
@@ -324,6 +352,7 @@ export function buildWaterxLivePayload(
       timed:{...timedStrategyQueueMetrics(now),database:timedPoolHealth()},optional:observationQueue.metrics(now)},
     refreshHealth:refreshHealth.read(interval),
     decision,
+    dataHealth,
     status: liveStatus,
     intervalMinutes: interval,
     round: round ? {
@@ -344,7 +373,9 @@ export function buildWaterxLivePayload(
       down: downProbability === null ? null : downProbability / 100,
       upPriceCents: upSide?.oddsCents ?? null,
       downPriceCents: downSide?.oddsCents ?? null,
-      asOf: snapshot.observedAt,
+        asOf: probabilityStatus==="CURRENT"&&transportStatus==="HEALTHY"?receiptIso:null,
+       // Indicative asks are a separate receipt, not a probability timestamp.
+        ...(pricesPresent?{priceAsOf:!stale&&transportStatus==="HEALTHY"?receiptIso:null}:{}),
       source: "WaterX public market probabilities and odds",
       sourceId:"waterx.public.crypto.v1",
       observationId:snapshot.receivedAtMs?observationId(interval,round!.id,snapshot.receivedAtMs):null,
@@ -357,7 +388,8 @@ export function buildWaterxLivePayload(
       roundMetadata: roundAvailability,
       referencePrice: referenceAvailability,
       odds: {
-        status: oddsStatus,
+       status: probabilityStatus==="CURRENT"&&transportStatus==="HEALTHY"?oddsStatus:
+         oddsStatus==="locked"?"locked":probabilitiesPresent===1?"partial":"unavailable",
         reason: oddsReason,
         up: {
           probability: stateForValue(upProbability),
@@ -460,7 +492,15 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
   let snapshot: WaterxSnapshot;
   if (result.status === "LIVE") {
     const round = result.detail.round;
-    const probabilityUp = round.sides.up.probabilityCents;
+   const probabilityUp = round.sides.up.availability==="reported"?round.sides.up.probabilityCents:null;
+   const probabilityDown = round.sides.down.availability==="reported"?round.sides.down.probabilityCents:null;
+   const inputState=probabilityState(probabilityUp===null?null:probabilityUp/100,
+     probabilityDown===null?null:probabilityDown/100,Date.parse(result.requestReceivedAt),now);
+   if(inputState!=="CURRENT"){
+     const count=Math.min(8,(probabilityFailures.get(interval)??0)+1);
+     probabilityFailures.set(interval,count);
+     retryDelays.set(interval,Math.min(60000,5000*2**Math.min(count-1,4)));
+   }else probabilityFailures.delete(interval);
     snapshot = {
       observedAt,receivedAtMs:Date.parse(result.requestReceivedAt), status: "LIVE", round,
       reason: round.anchorPrice === null
@@ -474,8 +514,7 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
       intervalMinutes: interval, roundId: round.id, startMs, expiryMs,
       anchorPrice: round.anchorPrice, anchorConfirmed: round.anchorPriceConfirmed,
       probabilityUp: probabilityUp === null ? null : probabilityUp / 100,
-      probabilityDown: round.sides.down.probabilityCents === null
-        ? null : round.sides.down.probabilityCents / 100,
+      probabilityDown: probabilityDown === null ? null : probabilityDown / 100,
       observedAt, source: "WaterX",receivedAtMs:Date.parse(result.requestReceivedAt),
       // Provider header timing is not a timestamp for the individual market-odds tick.
       // Do not substitute it into odds provenance.
@@ -502,7 +541,8 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
       atMs:Date.parse(input.observedAt),receivedAtMs:input.receivedAtMs??Date.parse(input.observedAt),
       providerSourceAtMs:null,probabilityUp:input.probabilityUp,probabilityDown:input.probabilityDown,
       sourceHealthy:true});
-    refreshHealth.record({interval,roundId:round.id,stage:"READINESS_INPUT",outcome:"ok",
+    refreshHealth.record({interval,roundId:round.id,stage:"READINESS_INPUT",outcome:inputState==="CURRENT"?"ok":"rejected",
+      errorClass:inputState==="CURRENT"?null:inputState,
       elapsedMs:performance.now()-evaluatedAt,sourceAgeMs:Date.now()-input.receivedAtMs!});
     earlyLockTimers.arm({intervalMinutes:interval,roundId:round.id,startMs,expiryMs});
     const comparison=latestComparison();
@@ -512,8 +552,11 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
       comparison:comparison?{price:comparison.price,source:comparison.source,asOf:comparison.asOf}:null,
       executableQuote:null,settlementRule:"UNVERIFIED_COMPARISON_IS_NOT_SETTLEMENT",
       marketId:round.marketId,providerUrl:providerUrl(interval,round.endsAt)}});
-    roundDecisions.queued(input,Date.now());
-    canonicalLockQueue.enqueue(input);
+    if(inputState==="CURRENT"){
+      roundDecisions.queued(input,Date.now());
+      canonicalLockQueue.enqueue(input);
+    }else refreshHealth.record({interval,roundId:round.id,stage:"CAPTURE_RESULT",
+      outcome:"rejected",errorClass:inputState});
     const queued=canonicalLockQueue.metrics();
     refreshHealth.record({interval,roundId:round.id,stage:"DATABASE_QUEUE",outcome:"ok",
       queueDepth:queued.depth,queueAgeMs:queued.oldestActiveAgeMs});
@@ -545,6 +588,7 @@ function recordPollFailure(interval: WaterxInterval, error: unknown): void {
   failures.set(interval, failureCount);
   const delay = calculateWaterxRetryDelay(interval, error, failureCount);
   retryDelays.set(interval, delay);
+  nextPollAt.set(interval,Date.now()+delay);
   const stage = error instanceof WaterxProviderError ? error.stage
     : /invalid|malformed|mismatch|cadence|unknown waterx|incomplete/i.test(message)
       ? "parse" : "provider";
@@ -556,17 +600,20 @@ function recordPollFailure(interval: WaterxInterval, error: unknown): void {
     invalidResponse ? "INVALID_RESPONSE" : "DISCONNECTED", stage);
   const previous=snapshots.get(interval),at=Date.now();
   // Keep known same-round data during a transient read failure; never refresh its observation clock.
-  if(!invalidResponse&&previous?.round&&previous.status==="LIVE"&&
+  if(previous?.round&&previous.status==="LIVE"&&
     previous.round.startsAt*1000<=at&&at<previous.round.endsAt*1000){
+    roundDecisions.sourceUnavailable({intervalMinutes:interval,roundId:previous.round.id,
+      startMs:previous.round.startsAt*1000,expiryMs:previous.round.endsAt*1000});
+    timedSourceUnavailable(interval,at,stage==="timeout"?"PROVIDER_TIMEOUT":"REQUEST_FAILURE");
     snapshots.set(interval,{...previous,reason:"Provider refresh failed; last same-round observation retained while retrying.",
-      sourceError:refreshErrorClass(error)});
+      sourceError:stage==="timeout"?"PROVIDER_TIMEOUT":refreshErrorClass(error)});
     return;
   }
   snapshots.set(interval, {
     observedAt: new Date().toISOString(), status: "UNAVAILABLE", round: null,
     reason: message.includes("429") ? "WaterX rate limited the public read; retrying independently."
       : `WaterX public read unavailable: ${message.slice(0, 180)}`,
-    sourceError: message.slice(0, 180),
+    sourceError: stage==="timeout"?"PROVIDER_TIMEOUT":refreshErrorClass(error),
   });
 }
 
@@ -601,7 +648,7 @@ function pollWaterx(
     .then(() => {
       if (!timedOut) {
         failures.delete(interval);
-        retryDelays.delete(interval);
+        if(!probabilityFailures.has(interval))retryDelays.delete(interval);
       }
     }, error => {
       if (refreshControllers.get(interval) === controller && !controller.signal.aborted)
@@ -658,8 +705,12 @@ export function startWaterxCapture(options: {
           const round=snapshots.get(interval)?.round;
           const inEarlyWindow=round&&
             round.endsAt*1000-Date.now()<=(interval===5?120_000:360_000);
-          const nextAt = Date.now() + (options.retryDelayMs ?? retryDelays.get(interval) ??
+          let nextAt = Date.now() + (options.retryDelayMs ?? retryDelays.get(interval) ??
             (inEarlyWindow?Math.min(periodMs,3000):periodMs));
+          // Discover the next identity promptly even when the old round has no odds.
+          if(round&&!failures.has(interval)&&probabilityFailures.has(interval)&&round.endsAt*1000>Date.now())
+            nextAt=Math.min(nextAt,round.endsAt*1000+250);
+          nextPollAt.set(interval,nextAt);
           const timer = setTimeout(tick, nextAt - Date.now());
           timer.unref?.();
           timers.set(interval, timer);
@@ -683,6 +734,7 @@ export function startWaterxCapture(options: {
         return;
       }
       if (refreshes.has(interval)) return;
+      if(retryDelays.has(interval)&&(nextPollAt.get(interval)??0)>Date.now())return;
       notifiedStalls.delete(interval);
       if (shouldWatchdogPollWaterx(health.lastFetchAttemptAt, health.fetchInFlight,
         Date.now(), periodMs, health.retryAt)) {
@@ -726,6 +778,7 @@ function snapshotNeedsRefresh(interval: WaterxInterval): boolean {
   const snapshot = snapshots.get(interval)!;
   const observedMs = snapshot.observedAt ? Date.parse(snapshot.observedAt) : NaN;
   const now = Date.now();
+  if((nextPollAt.get(interval)??0)>now)return false;
   const maxAgeMs = interval === 5 ? 16_000 : 31_000;
   const lastAttempt = getWaterxDiagnostics(interval).lastFetchAttemptAt;
   // During a round transition, a freshly received but expired provider round

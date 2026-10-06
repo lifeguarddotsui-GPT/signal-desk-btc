@@ -149,7 +149,7 @@ test("missing or malformed side collections affect only odds availability", () =
   assert.equal(live.round?.expiryMs, (start + 300) * 1000);
   assert.deepEqual(live.odds, {
     up: null, down: null, upPriceCents: null, downPriceCents: null,
-    asOf: new Date(now).toISOString(),
+      asOf: null,
     source: "WaterX public market probabilities and odds",
     sourceId:"waterx.public.crypto.v1",observationId:null,receivedAtMs:null,
     interpretation:{probabilityCents:"provider-reported probability; validate explicit pair",

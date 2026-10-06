@@ -1,4 +1,6 @@
+import * as React from "react";
 import { ArrowDownRight, ArrowUpRight, ShieldAlert, ShieldCheck } from "lucide-react";
+import type { WaterxDataHealth } from "../../shared/waterx-data-health";
 import { assessAdvisoryCard, type AdvisoryPayload, type AdvisoryRoundIdentity } from "./advisory-contract";
 
 type Props = {
@@ -9,6 +11,7 @@ type Props = {
   locked: { up: boolean; down: boolean };
   nowMs: number;
   fixtureName?: string | null;
+  dataHealth?: WaterxDataHealth;
   marketOdds: {
     up: string; down: string; current: boolean; source: string; asOf?: string;
     upPrice?: string; downPrice?: string;
@@ -77,7 +80,7 @@ const observedAge = (stamp: string | undefined, now: number) => {
 const percent = (value: unknown) => validNumber(value) && value >= 0 && value <= 1
   ? `${(value * 100).toFixed(1)}%` : "Withheld";
 
-export function AdvisoryCards({ advisory, expectedIdentity, roundCurrent, quoteCurrent, locked, nowMs, fixtureName, marketOdds }: Props) {
+export function AdvisoryCards({ advisory, expectedIdentity, roundCurrent, quoteCurrent, locked, nowMs, fixtureName, dataHealth, marketOdds }: Props) {
   return <section className="advisory-desk" aria-label="UP and DOWN opportunity assessments">
     <div className="advisory-heading">
       <div><span className="eyebrow">READ-ONLY ASSESSMENT</span><h2>Side assessments</h2></div>
@@ -88,7 +91,7 @@ export function AdvisoryCards({ advisory, expectedIdentity, roundCurrent, quoteC
     <div className="advisory-card-list">
       {(["up", "down"] as const).map(side => {
         const assessment = assessAdvisoryCard({
-          side, advisory, expectedIdentity, roundCurrent, quoteCurrent,
+          side, advisory, expectedIdentity, roundCurrent, quoteCurrent, dataHealth,
           sideLocked: locked[side], nowMs, fixtureMode: !!fixtureName,
         });
         const ui = assessment as typeof assessment & AssessmentUi;

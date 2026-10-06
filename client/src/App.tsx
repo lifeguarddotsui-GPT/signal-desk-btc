@@ -251,9 +251,24 @@ function LivePage() {
   const decisionRound = fixtureMode && roundCurrent && round
     ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs }
     : activeMetadataRound ?? retainedDecisionRound;
-  const atomicDecisionView = fixtureMode
+  const rootHealthMatchesIdentity = !!payload?.dataHealth &&
+    (roundCurrent && !!round && !!decisionRound &&
+      round.id === decisionRound.id && round.startMs === decisionRound.startMs && round.expiryMs === decisionRound.expiryMs ||
+      !round && !decisionRound && payload.dataHealth.round.status === "ROUND_UNAVAILABLE");
+  const rootHealthMatchesAtomicRound = !!rootHealthMatchesIdentity && !!decisionRound && !!atomicEnvelope?.round &&
+    atomicEnvelope.round.id === decisionRound.id &&
+    atomicEnvelope.round.startMs === decisionRound.startMs &&
+    atomicEnvelope.round.expiryMs === decisionRound.expiryMs;
+  const projectionEnvelope = !fixtureMode && rootHealthMatchesAtomicRound && payload?.dataHealth && atomicEnvelope
+    ? { ...atomicEnvelope, dataHealth: payload.dataHealth } : atomicEnvelope;
+  const decisionProjection = fixtureMode
     ? getAtomicDecisionView(null, interval, null, serverNow)
-    : getAtomicDecisionView(atomicEnvelope, interval, decisionRound, serverNow);
+    : getAtomicDecisionView(projectionEnvelope, interval, decisionRound, serverNow);
+  const atomicDecisionView = {
+    ...decisionProjection,
+    dataHealth: decisionProjection.dataHealth ??
+      (rootHealthMatchesIdentity ? payload?.dataHealth : undefined),
+  };
   const snapshotRefreshState = {
     pending: !fixtureMode && live.loading,
     error: !fixtureMode && live.errorUrl === liveUrl ? live.error : "",
@@ -309,17 +324,23 @@ function LivePage() {
   const lockedPair = oddsDisplay.lockedPair;
   const upProbabilityCurrent = oddsDisplay.up.probability !== null;
   const downProbabilityCurrent = oddsDisplay.down.probability !== null;
-  const atomicAdvisory = !fixtureMode && atomicDecisionView.fresh && atomicQuoteMatchesDecision
-    ? atomicEnvelope?.advisory : null;
+  const atomicEnvelopeRoundMatches = !!decisionRound && !!atomicEnvelope?.round &&
+    atomicEnvelope.round.id === decisionRound.id &&
+    atomicEnvelope.round.startMs === decisionRound.startMs &&
+    atomicEnvelope.round.expiryMs === decisionRound.expiryMs;
+  const advisoryMarketId = atomicEnvelopeRoundMatches ? atomicEnvelope?.round?.marketId
+    : roundCurrent && round && decisionRound && round.id === decisionRound.id ? round.marketId : undefined;
   const expectedAdvisoryIdentity = fixtureMode && round?.marketId ? {
     marketId: round.marketId, roundId: round.id, intervalMinutes: interval,
     startMs: round.startMs, expiryMs: round.expiryMs,
-  } : !fixtureMode && decisionRound && atomicEnvelope?.round?.marketId ? {
-    marketId: atomicEnvelope.round.marketId, roundId: decisionRound.id, intervalMinutes: interval,
+  } : !fixtureMode && decisionRound && advisoryMarketId ? {
+    marketId: advisoryMarketId, roundId: decisionRound.id, intervalMinutes: interval,
     startMs: decisionRound.startMs, expiryMs: decisionRound.expiryMs,
   } : null;
-  const matchedAdvisory = !fixtureMode && atomicDecisionView.fresh && atomicQuoteMatchesDecision &&
-    !!expectedAdvisoryIdentity &&
+  const atomicAdvisory = !fixtureMode && atomicEnvelopeRoundMatches
+    ? atomicEnvelope?.advisory : null;
+  const matchedAdvisory = !fixtureMode && !!expectedAdvisoryIdentity &&
+    atomicEnvelopeRoundMatches &&
     atomicAdvisory?.identity?.marketId === expectedAdvisoryIdentity.marketId &&
     atomicAdvisory?.identity?.roundId === expectedAdvisoryIdentity.roundId &&
     atomicAdvisory?.identity?.intervalMinutes === expectedAdvisoryIdentity.intervalMinutes &&
@@ -594,8 +615,10 @@ function LivePage() {
       </section>
         <AdvisoryCards advisory={fixtureMode ? fixtureAdvisory : matchedAdvisory}
           expectedIdentity={expectedAdvisoryIdentity}
-          roundCurrent={fixtureMode ? roundCurrent : atomicDecisionView.fresh}
+          roundCurrent={fixtureMode ? roundCurrent : !!roundCurrent && !!expectedAdvisoryIdentity &&
+            serverNow >= expectedAdvisoryIdentity.startMs && serverNow < expectedAdvisoryIdentity.expiryMs}
           quoteCurrent={fixtureMode ? oddsFresh : atomicDecisionView.fresh && atomicQuoteMatchesDecision && oddsFresh}
+          dataHealth={fixtureMode ? undefined : atomicDecisionView.dataHealth ?? payload?.dataHealth}
           locked={{ up: upLocked || lockedPair, down: downLocked || lockedPair }}
           nowMs={now} fixtureName={fixtureMode}
           marketOdds={{

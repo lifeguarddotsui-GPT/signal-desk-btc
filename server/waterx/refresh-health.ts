@@ -4,7 +4,7 @@ export type RefreshStage="PROVIDER_REQUEST"|"PROVIDER_RESPONSE"|"PARSE_VALIDATIO
   "REQUEST_START"|"BROWSER_RECEIPT"|"BROWSER_RENDER"|"CAPTURE_RESULT"|"READINESS_INPUT"|
   "EARLY_DATABASE_WRITE"|"OBSERVATION_DATABASE_WRITE"|"EARLY_INPUT_VALIDATION";
 export type RefreshEvent={interval:WaterxInterval;stage:RefreshStage;roundId?:string|null;
-  outcome:"started"|"ok"|"error";elapsedMs?:number;retryCount?:number;sourceAgeMs?:number|null;
+  outcome:"started"|"ok"|"error"|"rejected";elapsedMs?:number;retryCount?:number;sourceAgeMs?:number|null;
   queueDepth?:number;queueAgeMs?:number|null;errorClass?:string|null;clock?:"server"|"browser-untrusted"};
 export function refreshErrorClass(error:unknown):string {
   const code=(error as {code?:unknown})?.code;
@@ -31,12 +31,16 @@ export function createRefreshHealth(clock=Date.now){
       const key=`${event.interval}:${event.stage}`,old=states.get(key);
       if(event.outcome==="error")states.set(key,{stage:event.stage,failures:(old?.failures??0)+1,
         lastErrorClass:event.errorClass??"OPERATION_FAILED",atMs});
+      // A subsequently observed rejection is data availability, not a failed
+      // operation at this stage. Real database errors in other stages remain.
+      if(event.outcome==="rejected")states.delete(key);
       if(event.outcome==="ok")states.delete(key);
     },
     read(interval:WaterxInterval){
       const errors=Array.from(states.entries()).filter(([key])=>key.startsWith(`${interval}:`)).map(([,state])=>({...state}));
       return {scope:"process-memory; resets on restart",browserTiming:"untrusted browser-relative diagnostics, not execution evidence",
         errors,alerts:errors.filter(e=>e.failures>=2).map(e=>`${e.stage}: ${e.failures} repeated failures (${e.lastErrorClass})`),
+        rejections:(events.get(interval)??[]).filter(e=>e.outcome==="rejected").map(e=>({...e})),
         events:(events.get(interval)??[]).map(e=>({...e}))};
     },
   };

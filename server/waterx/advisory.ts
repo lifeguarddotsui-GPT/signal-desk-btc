@@ -1,3 +1,4 @@
+import {dataHealthReason} from "../../shared/waterx-data-health";
 import type { buildWaterxLivePayload } from "./service";
 import type { WaterxInterval } from "./types";
 import { WATERX_VALUE_POLICY, type WaterxSideState } from "../../shared/waterx-value-policy";
@@ -313,7 +314,8 @@ export function buildWaterxAdvisory(live: Live, interval: WaterxInterval, amount
   const validRound = live.status === "LIVE" && !!round && !!identity?.marketId &&
     Number.isSafeInteger(round.startMs) && Number.isSafeInteger(round.expiryMs) &&
     round.expiryMs - round.startMs === interval * 60_000 && round.startMs <= now && now < round.expiryMs;
-  const quoteAtMs = live.odds?.asOf ? Date.parse(live.odds.asOf) : NaN;
+  const priceReceipt=live.odds?.priceAsOf??live.odds?.asOf;
+  const quoteAtMs = priceReceipt ? Date.parse(priceReceipt) : NaN;
   const quoteAgeMs = Number.isFinite(quoteAtMs) ? Math.max(0, now - quoteAtMs) : null;
   const quoteFresh = validRound && quoteAgeMs !== null && quoteAtMs >= round!.startMs &&
     quoteAtMs <= now + 1_000 && quoteAgeMs <= (interval === 5 ? 16_000 : 31_000) &&
@@ -327,6 +329,7 @@ export function buildWaterxAdvisory(live: Live, interval: WaterxInterval, amount
       availability.pricePositive && finite(cents) && cents > 0 && cents <= 100;
     const gross = priceAvailable ? 5 / (cents! / 100) : null;
     const reason = !validRound ? "No verified active WaterX round."
+      : live.dataHealth && live.dataHealth.primaryReason!=="CURRENT" ? dataHealthReason(live.dataHealth)
       : locked ? "WaterX reports this side locked."
         : !quoteFresh ? "Indicative WaterX side price is stale or mismatched."
           : !priceAvailable ? availability.side === "locked" ? "WaterX reports this side locked."

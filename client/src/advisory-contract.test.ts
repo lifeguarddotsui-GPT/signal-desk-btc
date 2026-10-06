@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { assessAdvisoryCard, type AdvisoryPayload } from "./advisory-contract";
+import type { WaterxDataHealth } from "../../shared/waterx-data-health";
 import { assessWaterxEvidenceWithHysteresis, type WaterxEvidence } from "../../server/waterx/advisory";
 
 const nowMs = 200_000;
@@ -80,6 +81,23 @@ describe("advisory proof qualification gates", () => {
     assert.equal(result.qualified, true, result.reason);
     assert.equal(assessAdvisoryCard(input({ side: "down" })).qualified, false);
     assert.equal(assessAdvisoryCard(input({ advisory: payload("OBSERVE") })).state, "OBSERVE");
+  });
+
+  it("uses authoritative WaterX outage status when exact active-round identity is known", () => {
+    const health: WaterxDataHealth = {
+      transport: { status: "PROVIDER_TIMEOUT", lastReceivedAtMs: nowMs - 1_000, errorClass: "ETIMEDOUT" },
+      round: { status: "KNOWN" }, reference: { status: "CONFIRMED" },
+      probabilities: { status: "PROBABILITIES_STALE", lastValid: null },
+      storage: { status: "UNKNOWN", errorClass: null },
+      execution: { eligible: false, reason: "No current market input." },
+      primaryReason: "PROVIDER_TIMEOUT",
+    };
+    const assessment = assessAdvisoryCard(input({ dataHealth: health, roundCurrent: true, quoteCurrent: false }));
+    assert.equal(assessment.qualified, false);
+    assert.equal(assessment.reason, "WaterX provider request timed out; current probabilities unavailable.");
+    assert.doesNotMatch(assessment.reason, /No verified active round/);
+    const unavailableRound = assessAdvisoryCard(input({ dataHealth: undefined, roundCurrent: false, quoteCurrent: false }));
+    assert.match(unavailableRound.reason, /No verified active round/);
   });
 
   it("keeps independently valid model and $5 quote details visible without a glow", () => {

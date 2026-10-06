@@ -5,6 +5,7 @@ import type { RoundDecision } from "../../shared/round-decision";
 import type { TimedDecision, TimedState } from "../../shared/timed-decision";
 import { TIMED_STRATEGY } from "../../shared/timed-decision";
 import { indicativeFiveDollar } from "../../shared/manual-opportunity";
+import { dataHealthReason } from "../../shared/waterx-data-health";
 import type { AtomicDecisionView } from "./live-decision-contract";
 
 type Props = {
@@ -47,9 +48,10 @@ function sideLabel(side: "UP" | "DOWN" | null | undefined) {
 }
 
 type TimedDisplay = TimedState & { lifecycle?: string; remainingRequirement?: string | null };
-function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, marketReference, comparison }: {
+function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, marketReference, comparison, dataHealth }: {
   timed: TimedState | null; decision: RoundDecision | null; now: number; liveFresh: boolean;
   marketReference?: Props["marketReference"]; comparison?: Props["comparison"];
+  dataHealth?: AtomicDecisionView["dataHealth"];
 }) {
   const timed = timedState as TimedDisplay | null;
   const saved: TimedDecision | null = timed?.saved ?? null;
@@ -111,13 +113,29 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
   const comparePrice = comparison?.price ?? null;
   const comparisonSource = comparison?.source?.trim() || "Not reported";
   const comparisonAge = comparison?.receivedAtMs == null ? null : Math.max(0, now - comparison.receivedAtMs);
-  const compactHealth = !liveFresh ? "Quote delayed · frozen choice retained"
+  const hasSavedChoice = !!(decision?.canonical || decision?.earlyDecision || saved);
+  const compactHealth = dataHealth && dataHealth.primaryReason !== "CURRENT"
+    ? `${dataHealthReason(dataHealth)}${hasSavedChoice ? " · saved choice retained" : ""}`
+    : !liveFresh ? `Quote delayed${hasSavedChoice ? " · saved choice retained" : ""}`
     : decision?.componentHealth?.storage === "FAILED" ? "Storage issue · no new saved choice asserted"
       : decision?.componentHealth?.priceFeed !== "AVAILABLE" ? "Price feed delayed · research only"
         : "Data current · read-only research";
   const currentOdds = liveFresh && decision?.market
     ? `UP ${percent(decision.market.probabilityUp)} · DOWN ${percent(decision.market.probabilityDown)}`
     : "Unavailable · current same-round snapshot not fresh";
+  const observed = dataHealth?.probabilities.lastValid ??
+    (!liveFresh && decision?.market ? {
+      up: decision.market.probabilityUp, down: decision.market.probabilityDown,
+      receivedAtMs: decision.market.receivedAtMs,
+    } : null);
+  const observedIsSameRound = !!decision && !!observed &&
+    observed.receivedAtMs >= decision.startMs && observed.receivedAtMs < decision.expiryMs &&
+    observed.receivedAtMs <= now;
+  const observedOdds = observedIsSameRound && observed
+    ? `UP ${percent(observed.up)} · DOWN ${percent(observed.down)}`
+    : null;
+  const observedAge = observedIsSameRound && observed
+    ? `${duration(Math.max(0, now - observed.receivedAtMs))} ago — not current` : null;
   const requirementsMet = timed?.requirementsMet ?? (components
     ? Number((timed?.sourceAgeMs ?? Infinity) <= 10_000) + Number(components.strength >= components.requiredStrength) +
       Number(components.sameSideMs >= components.requiredSameSideMs) + Number(components.validCount >= components.requiredCount)
@@ -136,7 +154,8 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
               saved?.status === "DATA_FAILURE" ? "DATA FAILURE" :
                 saved?.status === "NO_VALID_INPUT" ? "NO VALID INPUT" :
                   saved?.status === "MISSED_DEADLINE" ? "MISSED GATE" :
-                    liveFresh && liveSide ? `LEANING ${liveSide}` : liveFresh ? "OBSERVING" : "DATA DELAYED"}
+                    liveFresh && liveSide ? `LEANING ${liveSide}` : liveFresh ? "OBSERVING"
+                      : dataHealth && dataHealth.primaryReason !== "CURRENT" ? dataHealth.primaryReason.replaceAll("_", " ") : "DATA DELAYED"}
         </strong>
         <span className="mo-primary-probability">{percent(isLocked ? sideProbability : probability)}
           <small>{isLocked ? "FROZEN WATERX PUBLIC MARKET PROBABILITY · UNCALIBRATED" : "CURRENT WATERX PUBLIC MARKET PROBABILITY · UNCALIBRATED"}</small>
@@ -148,7 +167,8 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
     </div>
     <div className="mo-market-pair" aria-label="Round reference, current odds and comparison price">
       <div><span className="mo-primary-eyebrow">PRICE TO BEAT · {referenceQuality.toUpperCase()}</span><strong>{usd(referencePrice, 2)}</strong><small>{referenceSource}{!liveFresh && referencePrice != null ? " · retained same-round reference" : ""}</small></div>
-      <div><span className="mo-primary-eyebrow">{isLocked ? "CURRENT MARKET ODDS · NOT FROZEN" : "MARKET ODDS · CURRENT ONLY"}</span><strong className="mo-odds-value">{currentOdds}</strong><small>{liveFresh ? "Same-round live snapshot" : "Delayed · withheld as live"}</small></div>
+       <div><span className="mo-primary-eyebrow">{isLocked ? "CURRENT MARKET ODDS · NOT FROZEN" : "MARKET ODDS · CURRENT ONLY"}</span><strong className="mo-odds-value">{currentOdds}</strong><small>{liveFresh ? "Same-round live snapshot" : dataHealth && dataHealth.primaryReason !== "CURRENT" ? dataHealthReason(dataHealth) : "Withheld as live"}</small>
+         {!liveFresh && observedOdds && <small>{observedOdds} · Last observed — {observedAge}</small>}</div>
       <div><span className="mo-primary-eyebrow">BTC COMPARISON · {comparisonSource}</span><strong>{usd(comparePrice, 2)}</strong><small>{comparisonAge == null ? "Current comparison unavailable" : `${duration(comparisonAge)} source age`}</small></div>
     </div>
     <div className="mo-primary-metrics">
@@ -238,6 +258,9 @@ function DecisionContent({
   onMinimumWinningProfitChange: (amount: 1 | 2) => void;
 }) {
   const early = decision?.earlyDecision ?? null;
+  const dataHealth = view.dataHealth ?? decision?.dataHealth;
+  const healthReason = dataHealth && dataHealth.primaryReason !== "CURRENT"
+    ? dataHealthReason(dataHealth) : view.reason;
   const canonical = decision?.canonical ?? null;
   const opportunity = decision?.opportunity ?? null;
   const sourceValid = !!decision && !!opportunity &&
@@ -272,7 +295,7 @@ function DecisionContent({
       : persistenceStatus === "SAVING" ? "Saving decision"
         : persistenceStatus === "SAVED" ? "Saved record unavailable"
           : view.fresh && decision?.readiness.score === 100 ? "No saved early choice"
-        : view.fresh ? "Developing" : "Data delayed";
+    : view.fresh ? "Developing" : dataHealth ? dataHealth.primaryReason.replaceAll("_", " ") : "Data delayed";
   const statusKind = early ? "locked" : persistenceStatus === "FAILED" ? "failed"
     : persistenceStatus === "SAVING" ? "saving"
       : persistenceStatus === "SAVED" ? "delayed"
@@ -301,7 +324,7 @@ function DecisionContent({
         <b className={`mo-status ${statusKind}`} role="status">{status}</b>
         {early ? <small>Locked at {stamp(early.committedAtMs)}</small>
           : persistenceStatus === "FAILED" ? <small>{decision?.earlyPersistence?.errorClass ?? "Commit acknowledgement unavailable"}</small>
-            : <small>{view.fresh ? "Readiness is decision progress, not win probability." : view.reason}</small>}
+            : <small>{view.fresh ? "Readiness is decision progress, not win probability." : healthReason}</small>}
       </div>
       <div className="mo-market-time">
         <span className="mo-label">TIME UNTIL VERIFIED ORDER CUTOFF</span>
@@ -397,6 +420,17 @@ export function ManualOpportunity({ view, now, onRetry, refresh, browserReceived
   const decision = view.decision;
   const pending = refresh?.pending ?? false;
   const error = refresh?.error ?? "";
+  const dataHealth = view.dataHealth ?? decision?.dataHealth;
+  const healthReason = dataHealth && dataHealth.primaryReason !== "CURRENT"
+    ? dataHealthReason(dataHealth) : view.reason;
+  const savedChoiceExists = !!(decision?.canonical || decision?.earlyDecision || decision?.timedDecision?.saved);
+  const lastValid = dataHealth?.probabilities.lastValid;
+  const sameRoundLastValid = !!decision && !!lastValid &&
+    lastValid.receivedAtMs >= decision.startMs && lastValid.receivedAtMs < decision.expiryMs &&
+    lastValid.receivedAtMs <= now;
+  const lastObservedLabel = sameRoundLastValid
+    ? `Last observed — ${duration(Math.max(0, now - lastValid.receivedAtMs))} ago — not current`
+    : null;
   return <section className="manual-opportunity" aria-label="Manual round opportunity" aria-busy={pending}>
     <header className="mo-header">
       <div>
@@ -408,16 +442,17 @@ export function ManualOpportunity({ view, now, onRetry, refresh, browserReceived
         {onRetry && <button className="mo-retry" type="button" onClick={onRetry} aria-label="Retry live snapshot"><RefreshCw size={14} /> Retry</button>}
       </div>
     </header>
-    {error && <div className="mo-refresh-error" role="status">Snapshot refresh failed · same-round decision retained only while valid. {error}</div>}
+    {error && <div className="mo-refresh-error" role="status">Snapshot refresh failed · {savedChoiceExists ? "saved choice retained only for its exact round. " : "no frozen choice is retained. "}{error}</div>}
     {!decision && pending && <div className="mo-loading" role="status" aria-label="Loading exact-round snapshot">
       <div className="mo-skeleton-lines" aria-hidden="true"><i /><i /><i /></div>
       <strong>Waiting for exact-round snapshot</strong>
     </div>}
     {!decision && !pending && <div className="mo-missing-state" role="status">
       <span className="mo-missing-mark" aria-hidden="true">—</span>
-      <div><strong>Data delayed · no exact-round decision snapshot</strong><p>{view.reason} Quotes and decisions are withheld until a matching snapshot arrives.</p></div>
+      <div><strong>{dataHealth?.primaryReason !== "CURRENT" && dataHealth ? dataHealth.primaryReason.replaceAll("_", " ") : "Data delayed · no exact-round decision snapshot"}</strong><p>{healthReason} Quotes and decisions are withheld until a matching snapshot arrives.</p></div>
     </div>}
-    <TimedDecisionCard timed={decision?.timedDecision ?? null} decision={decision} now={now} liveFresh={view.fresh} marketReference={marketReference} comparison={comparison} />
+    {lastObservedLabel && <p className="mo-receipt-note">{percent(lastValid!.up)} UP · {percent(lastValid!.down)} DOWN · {lastObservedLabel}</p>}
+    <TimedDecisionCard timed={decision?.timedDecision ?? null} decision={decision} now={now} liveFresh={view.fresh} marketReference={marketReference} comparison={comparison} dataHealth={dataHealth} />
     <details className="mo-benchmark-details">
       <summary>BENCHMARK DISCLOSURE · legacy canonical readiness, reference provenance &amp; diagnostics</summary>
       {(!pending || decision) && <DecisionContent decision={decision} view={view} now={now} browserReceivedAtMs={browserReceivedAtMs}

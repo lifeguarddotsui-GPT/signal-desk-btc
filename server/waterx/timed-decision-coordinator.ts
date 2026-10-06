@@ -69,6 +69,17 @@ export function observeTimedStrategy(input:TimedInput){
   }
    enqueue(active.get(input.intervalMinutes)!.input);
 }
+/** This is an application-observed failure event, not a new provider quote.
+ * It can only veto a gate; it carries no probabilities and never updates a
+ * last-valid probability clock. Persistence records its explicit provenance. */
+export function timedSourceUnavailable(interval:5|15,atMs:number,reason:string){
+  const entry=active.get(interval);
+  if(!entry||atMs<entry.input.startMs||atMs>=entry.input.expiryMs)return;
+  entry.input={...entry.input,probabilityUp:null,probabilityDown:null,receivedAtMs:atMs,
+    observedAt:new Date(atMs).toISOString(),features:{...entry.input.features,
+      sourceFailure:{reason,failureObservedAtMs:atMs,providerQuoteReceivedAtMs:null}}};
+  enqueue(entry.input);
+}
 /** Schedule identity/start/discovery and accepted evidence already live in
  * waterx_timed_rounds/observations. Deadlines derive from the pinned strategy.
  * Recovery cannot wake a sleeping Autoscale service; that still needs edge delivery. */

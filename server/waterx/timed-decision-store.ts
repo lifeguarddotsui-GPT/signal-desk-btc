@@ -51,7 +51,11 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
  if(!Number.isSafeInteger(received)||received!<input.startMs||received!>=input.expiryMs||received!>now)
    throw new Error("Invalid timed source receipt");
  if(input.expiryMs-input.startMs!==input.intervalMinutes*60000)throw new Error("Invalid timed exact round");
- const acquire=performance.now(),c=await db.connect();let committed=false,inserted:TimedDecision|null=null;
+ const acquire=performance.now();
+ const c=await db.connect().catch(error=>{
+   recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_ACQUISITION",performance.now()-acquire,"error");
+   throw error;
+ });let committed=false,inserted:TimedDecision|null=null;
  const emitted:GateJournal[]=[];let saved:TimedDecision|null=null;
  recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_ACQUISITION",performance.now()-acquire,"ok");
  try{

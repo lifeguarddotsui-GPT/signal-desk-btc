@@ -1,5 +1,6 @@
 import type {RoundDecision} from "../../shared/round-decision";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
+import {dataHealthReason, type WaterxDataHealth} from "../../shared/waterx-data-health";
 import {lockPolicy} from "../../shared/lock-readiness";
 import {GATE_GRACE_MS,GATE_MS,isTimedStrategy,TIMED_STRATEGY,timedWindow,type GateJournal,type TimedDecision,type TimedState} from "../../shared/timed-decision";
 
@@ -7,6 +8,7 @@ export type LiveSnapshotEnvelope={
   serverTime?:string;intervalMinutes?:number;status?:string;reason?:string;
   round?:{id:string;startMs:number;expiryMs:number}|null;
   decision?:RoundDecision|null;
+  dataHealth?:WaterxDataHealth;
 };
 export const DECISION_FRESH_MS=10_000;
 /** React's one-second display tick can precede a newly received response. */
@@ -249,22 +251,51 @@ export function validateDecisionSnapshot(p:LiveSnapshotEnvelope,interval:5|15,pr
 export type AtomicDecisionView={
   decision:RoundDecision|null;fresh:boolean;sourceAgeMs:number|null;
   lean:"UP"|"DOWN"|null;stage:string;score:number|null;reason:string;
+  dataHealth?:WaterxDataHealth;
 };
 /** Both current-round cards consume this projection; database reports cannot supply a live lean. */
 export function getAtomicDecisionView(p:LiveSnapshotEnvelope|null,interval:5|15,activeRound:LiveSnapshotEnvelope["round"],now:number):AtomicDecisionView{
-  const empty=(reason:string):AtomicDecisionView=>({decision:null,fresh:false,sourceAgeMs:null,lean:null,stage:"WATCHING",score:null,reason});
+  const empty=(reason:string,dataHealth?:WaterxDataHealth):AtomicDecisionView=>({
+    decision:null,fresh:false,sourceAgeMs:null,lean:null,stage:"WATCHING",score:null,reason,dataHealth,
+  });
   if(!Number.isFinite(now))return empty("Current clock unavailable; live state withheld.");
-  if(!p||!activeRound)return empty("Waiting for a valid active-round snapshot.");
+  if(!p)return empty("Waiting for a valid active-round snapshot.");
+  if(!activeRound){
+    const health=p.dataHealth?.round.status==="ROUND_UNAVAILABLE"?p.dataHealth:undefined;
+    return empty(health?dataHealthReason(health):"Waiting for a valid active-round snapshot.",health);
+  }
   if(p.round?.id!==activeRound.id||p.round.startMs!==activeRound.startMs||p.round.expiryMs!==activeRound.expiryMs)
-    return empty("Round identity mismatch: old-round state withheld.");
+    return p.dataHealth?.round.status==="ROUND_UNAVAILABLE"
+      ?empty(dataHealthReason(p.dataHealth),p.dataHealth)
+      :empty("Round identity mismatch: old-round state withheld.");
   const error=validateDecisionSnapshot(p,interval);
-  if(error)return empty(error.replaceAll("_"," ").toLowerCase());
+  const exactEnvelopeHealth=p.intervalMinutes===interval&&p.round?.id===activeRound.id&&
+    p.round.startMs===activeRound.startMs&&p.round.expiryMs===activeRound.expiryMs?p.dataHealth:undefined;
+  if(error)return empty(error.replaceAll("_"," ").toLowerCase(),exactEnvelopeHealth);
   const d=p.decision!;
   if(now>=d.expiryMs||now<d.startMs)return empty("Round expired or not started; previous state withheld.");
+  const receivedHealth=p.dataHealth??d.dataHealth;
+  const dataHealth:WaterxDataHealth|undefined=receivedHealth?{
+    ...receivedHealth,
+    probabilities:{
+      ...receivedHealth.probabilities,
+      lastValid:receivedHealth.probabilities.lastValid?{
+        ...receivedHealth.probabilities.lastValid,
+        ageMs:Math.max(0,now-receivedHealth.probabilities.lastValid.receivedAtMs),
+      }:null,
+    },
+  }:undefined;
+  if(dataHealth?.probabilities.status==="CURRENT"&&dataHealth.probabilities.lastValid&&
+    dataHealth.probabilities.lastValid.ageMs>DECISION_FRESH_MS){
+    dataHealth.probabilities.status="PROBABILITIES_STALE";
+    if(dataHealth.primaryReason==="CURRENT")dataHealth.primaryReason="PROBABILITIES_STALE";
+  }
   const age=d.market?Math.max(now-d.market.receivedAtMs,now-d.market.observedAtMs):null;
-  const fresh=age!==null&&age>=0&&age<=DECISION_FRESH_MS&&now-d.publishedAtMs>=0&&
+  const healthAllowsFresh=!dataHealth||(dataHealth.transport.status==="HEALTHY"&&dataHealth.probabilities.status==="CURRENT");
+  const fresh=healthAllowsFresh&&age!==null&&age>=0&&age<=DECISION_FRESH_MS&&now-d.publishedAtMs>=0&&
     now-d.publishedAtMs<=DECISION_FRESH_MS&&d.readiness.components.fresh;
-  const reason=d.persistence.status==="FAILED"?`Database write failed (${d.persistence.errorClass??"UNKNOWN"}); research choice not committed.`:
+  const reason=dataHealth&&dataHealth.primaryReason!=="CURRENT"?dataHealthReason(dataHealth):
+    d.persistence.status==="FAILED"?`Database write failed (${d.persistence.errorClass??"UNKNOWN"}); research choice not committed.`:
      d.persistence.status==="AWAITING_CHOICE"?
        d.persistence.errorClass==="CANONICAL_INPUT_REJECTED"?
          "Canonical checkpoint evidence rejected; awaiting valid exact-round input, not a database failure.":
@@ -274,5 +305,5 @@ export function getAtomicDecisionView(p:LiveSnapshotEnvelope|null,interval:5|15,
     d.persistence.status==="WRITING"?"Database write pending; no committed choice is asserted.":
     d.persistence.status==="QUEUED"?"Checkpoint capture queued; waiting for database persistence.":d.readiness.reason;
   return {decision:d,fresh,sourceAgeMs:age,lean:fresh?d.readiness.side:null,
-    stage:fresh?d.readiness.state:"WATCHING",score:fresh?Math.round(d.readiness.score):null,reason};
+    stage:fresh?d.readiness.state:"WATCHING",score:fresh?Math.round(d.readiness.score):null,reason,dataHealth};
 }

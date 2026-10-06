@@ -5,6 +5,7 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { RoundDecision } from "../../shared/round-decision";
 import { lockPolicy } from "../../shared/lock-readiness";
+import type { WaterxDataHealth } from "../../shared/waterx-data-health";
 import { ManualOpportunity } from "./ManualOpportunity";
 import type { AtomicDecisionView } from "./live-decision-contract";
 
@@ -68,10 +69,23 @@ function decision(overrides: Partial<RoundDecision> = {}): RoundDecision {
   };
 }
 
-function render(view: AtomicDecisionView, receipt = now, pending = false) {
+function render(view: AtomicDecisionView, receipt = now, pending = false, error = "") {
   return renderToStaticMarkup(React.createElement(ManualOpportunity, {
-    view, now, browserReceivedAtMs: receipt, refresh: { pending, error: "" },
+    view, now, browserReceivedAtMs: receipt, refresh: { pending, error },
   }));
+}
+
+function outageHealth(primaryReason: WaterxDataHealth["primaryReason"]): WaterxDataHealth {
+  return {
+    transport: { status: "PROVIDER_TIMEOUT", lastReceivedAtMs: now - 2_000, errorClass: "ETIMEDOUT" },
+    round: { status: "KNOWN" }, reference: { status: "CONFIRMED" },
+    probabilities: {
+      status: "PROBABILITIES_STALE",
+      lastValid: { up: .72, down: .28, receivedAtMs: now - 15_000, ageMs: 15_000 },
+    },
+    storage: { status: "UNKNOWN", errorClass: null },
+    execution: { eligible: false, reason: "No verified live input." }, primaryReason,
+  };
 }
 
 test("initial snapshot loading uses a quiet skeleton instead of an invented quote or spinner", () => {
@@ -161,6 +175,30 @@ test("one unavailable selected side preserves round data without substituting th
   assert.doesNotMatch(markup, /41¢ \/ share/);
   assert.match(markup, /28\.0%/);
   assert.match(markup, /Round reference \$83,500\.00 · confirmed/);
+});
+
+test("WaterX outage distinguishes an existing immutable choice from no saved choice", () => {
+  const outage = outageHealth("PROVIDER_TIMEOUT");
+  const savedDecision = decision({ dataHealth: outage });
+  const savedMarkup = render({
+    decision: savedDecision, fresh: false, sourceAgeMs: 20_000, lean: null, stage: "WATCHING",
+    score: null, reason: "WaterX provider request timed out; current probabilities unavailable.", dataHealth: outage,
+  }, now, false, "request timeout");
+  assert.match(savedMarkup, /PROVIDER TIMEOUT/);
+  assert.match(savedMarkup, /Adaptive benchmark saved/);
+  assert.match(savedMarkup, /saved choice retained only for its exact round/);
+  assert.match(savedMarkup, /Last observed/);
+  assert.match(savedMarkup, /not current/);
+
+  const noChoice = decision({ earlyDecision: null, canonical: null, market: null, dataHealth: outage });
+  const noChoiceMarkup = render({
+    decision: noChoice, fresh: false, sourceAgeMs: null, lean: null, stage: "WATCHING",
+    score: null, reason: "WaterX provider request timed out; current probabilities unavailable.", dataHealth: outage,
+  }, now, false, "request timeout");
+  assert.match(noChoiceMarkup, /PROVIDER TIMEOUT/);
+  assert.match(noChoiceMarkup, /no frozen choice is retained/);
+  assert.doesNotMatch(noChoiceMarkup, /saved choice retained/);
+  assert.match(noChoiceMarkup, /WaterX provider request timed out/);
 });
 
 test("manual card is above the chart; audit readiness is collapsed and mobile layout has dedicated breakpoints", () => {

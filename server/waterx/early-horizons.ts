@@ -4,6 +4,8 @@ import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import type {TimedInput} from "./timed-decision-store";
 import type {LockDb} from "./lock-store";
 import {researchPool} from "./research-store";
+import {observationId} from "./observation-provenance";
+import {forecastEarlyShadow} from "./early-shadow-runtime";
 const ordered=(value:unknown):unknown=>Array.isArray(value)?value.map(ordered):
   value!==null&&typeof value==="object"?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b))
     .map(([k,v])=>[k,ordered(v)])):value;
@@ -30,29 +32,46 @@ export function freezeEarlyHorizon(input:TimedInput,horizon:number,history:Timed
   const snapshot={
     schema:"bluewater-early-horizon-v1",strategyVersion:TIMED_STRATEGY,intervalMinutes:input.intervalMinutes,
     roundId:input.roundId,startMs:input.startMs,expiryMs:input.expiryMs,horizonSeconds:horizon,
-    scheduledAtMs,frozenAtMs:now,status,primaryDecisionAlreadyLocked:primaryLocked,
+    scheduledAtMs,frozenAtMs:now,status,primaryDecisionAlreadyLocked:primaryLocked,captureVersion:"atomic-gate-capture-v1",
+    observationIds:prior.map(v=>observationId(input.intervalMinutes,input.roundId,v.receivedAtMs!)),
     probabilityUp:status==="FROZEN"?latest!.probabilityUp:null,
     probabilityDown:status==="FROZEN"?latest!.probabilityDown:null,
-    modelProbabilityUp:null,modelVersion:null,calibrationVersion:null,
+    modelProbabilityUp:null,modelVersion:null,calibrationVersion:null,featureSchemaVersion:"early-past-only-context-v1",
     receivedAtMs:latest?.receivedAtMs??null,providerOddsAtMs:null,
     reference:{price:reference,quality:referenceValid?"confirmed":"missing-or-provisional"},
     features:status==="FROZEN"?{
       marketProbabilityUp:latest!.probabilityUp,
       probabilityChange:rows.length>1?rows.at(-1)!.probabilityUp-rows[0].probabilityUp:null,
       sameSideMs:evaluated.components?.sameSideMs??null,
+       recentReversals:evaluated.components?.recentReversals??null,
+       sourceAgeMs:evaluated.sourceAgeMs,
       probabilityRange:evaluated.components?.probabilityRange??null,
       referenceDistance:referenceValid&&comparisonValid?(comparison!.price!-reference!)/reference!:null,
       comparisonSource:comparisonValid?comparison!.source??null:null,
       secondsRemaining:(input.expiryMs-scheduledAtMs)/1000,
       missingReference:!referenceValid,missingComparison:!comparisonValid,
       spread:null,liquidity:null,
+       crossInterval:latest?.features?.crossInterval??null,
     }:null,
     coverage:{accepted:rows.length,ageMs:evaluated.sourceAgeMs,windowMs:75000},
     executableQuote:null,quoteStatus:"MISSING",
-    provenance:prior.map(v=>({receivedAtMs:v.receivedAtMs,probabilityUp:v.probabilityUp,probabilityDown:v.probabilityDown})),
+    provenance:prior.map(v=>({receivedAtMs:v.receivedAtMs,availableAtMs:v.features?.contextAvailableAtMs??null,
+      providerSourceAtMs:null,probabilityUp:v.probabilityUp,probabilityDown:v.probabilityDown})),
     semantics:"Prospective elapsed horizon; no post-horizon observations. Late capture is MISSED, never reconstructed.",
   };
-  return {snapshot,status,scheduledAtMs,digest:digestEarlySnapshot(snapshot)};
+  const forecast=status==="FROZEN"?forecastEarlyShadow(input.intervalMinutes,horizon,latest!.probabilityUp!,
+    snapshot.features as Record<string,unknown>,scheduledAtMs):null;
+  const frozen={...snapshot,modelProbabilityUp:forecast?.probabilityUp??null,modelVersion:forecast?.modelVersion??null,
+    calibrationVersion:forecast?.calibrationVersion??null,crossModelProbabilityUp:forecast?.crossProbabilityUp??null,
+    modelDisposition:forecast?"PROSPECTIVE_SHADOW_ONLY":"NO_MODEL_RAN"};
+  return {snapshot:frozen,status,scheduledAtMs,digest:digestEarlySnapshot(frozen)};
+}
+export async function persistFrozenHorizon(input:TimedInput,horizon:number,freeze:ReturnType<typeof freezeEarlyHorizon>,db:LockDb){
+  await db.query(`INSERT INTO waterx_early_horizons(network,strategy_version,interval_minutes,round_id,
+    start_ms,expiry_ms,horizon_seconds,scheduled_at_ms,frozen_at_ms,status,snapshot,snapshot_sha256)
+    VALUES('sui:mainnet',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
+    [TIMED_STRATEGY,input.intervalMinutes,input.roundId,input.startMs,input.expiryMs,horizon,
+      freeze.scheduledAtMs,freeze.snapshot.frozenAtMs,freeze.status,JSON.stringify(freeze.snapshot),freeze.digest]);
 }
 /** Called outside the critical decision transaction; idempotent immutable freezes. */
 export async function captureEarlyHorizons(input:TimedInput,now=Date.now(),db:LockDb=researchPool){

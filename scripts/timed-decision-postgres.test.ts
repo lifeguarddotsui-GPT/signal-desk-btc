@@ -95,6 +95,20 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     assert.equal(learning.affectedArtifacts.length,0);
     await runEarlyDailyTraining(Date.now(),pool);
     assert.equal((await earlyLearningReport(pool)).jobs.length,2);
+    // A same-day insufficient job retries when actual label eligibility changes.
+    // These are isolated synthetic labels, not live settlement evidence.
+    await pool.query(`INSERT INTO waterx_learning_rounds VALUES(5,$1,$2,$3,'UP','verified',false,NULL,
+      $4,to_timestamp($5::bigint::float8/1000),101,100)`,
+      [round.roundId,round.startMs,round.expiryMs,round.expiryMs+1000,round.expiryMs+2000]);
+    const laterCutoff=Date.now()+600000;
+    await runEarlyDailyTraining(laterCutoff,pool);
+    const retried=await earlyLearningReport(pool);
+    assert.equal(retried.jobs.length,3);
+    const changed=retried.jobs.find(j=>Number(j.interval_minutes)===5&&Number(j.attempt)===2)!;
+    assert.equal((changed.report as any).newEligibleSincePreviousAttempt,1);
+    assert.equal((changed.report as any).funnel.selected,1);
+    await runEarlyDailyTraining(laterCutoff,pool);
+    assert.equal((await earlyLearningReport(pool)).jobs.length,3);
     // Weak evidence cannot freeze just because the former forced deadline passes.
     const fallbackNow=Date.now(),fallbackStart=fallbackNow-90000;
     const fallbackRound={...round,roundId:randomUUID(),startMs:fallbackStart,expiryMs:fallbackStart+300000};
@@ -103,6 +117,10 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
       discoveredAtMs:fallbackStart+1000,observedAt:new Date(fallbackNow).toISOString(),
       probabilityUp:.56,probabilityDown:.44},pool,()=>{selected++;});
     assert.equal(fallback,null);assert.equal(selected,0);
+    // The current gate commits without waiting for older missed-gate recovery.
+    // Outside grace, a subsequent capture records the old miss honestly.
+    const clock=Date.now;
+    try{Date.now=()=>now+3000;await captureTimedDecision(input,pool);}finally{Date.now=clock;}
     const journals=await pool.query("SELECT journal FROM waterx_gate_journals WHERE round_id=$1 ORDER BY gate_index",[round.roundId]);
     assert.equal(journals.rows.length,2);
     assert.equal(journals.rows[1].journal.decisionId,a.id);
@@ -115,6 +133,7 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     await assert.rejects(captureTimedDecision({...input,...failedRound,receivedAtMs:failedStart+270000},pool),/Injected event storage failure/);
     assert.equal(await loadTimedDecision(failedRound,pool),null);
     assert.equal((await pool.query("SELECT count(*)::int AS n FROM waterx_gate_journals WHERE round_id=$1",[failedRound.roundId])).rows[0].n,0);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM waterx_early_horizons WHERE round_id=$1",[failedRound.roundId])).rows[0].n,0);
     await pool.query("DROP TRIGGER fail_outbox ON waterx_timed_outbox");
     const recovered=await captureTimedDecision({...input,...failedRound,receivedAtMs:failedStart+270000},pool);
     assert.equal(recovered!.status,"DATA_FAILURE");assert.equal(recovered!.side,null);

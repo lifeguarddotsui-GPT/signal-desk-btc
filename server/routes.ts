@@ -7,6 +7,8 @@ import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { healthResponse, historyResponse, live, modelResponse, predictionsResponse } from "./btc/service";
 import { buildInfo } from "./btc/build-info";
+import {earlyOperationalReport} from "./waterx/early-operations";
+import {committedFinalEvents} from "./waterx/final-events";
 import { accuracyExport, accuracyReport, type ExportCollection } from "./btc/reporting";
 import {
   chartEventsAfter, chartReplayPlan, chartSeries, checkChartFreshness, GAP_AFTER_MS, latestChartEventId,
@@ -211,6 +213,18 @@ export function registerRoutes(app: Express) {
   app.get("/api/waterx/early-learning",async(_req,res)=>{
     try{res.set("Cache-Control","no-store").json(await earlyLearningReport());}
     catch{res.status(503).json({error:"Early-horizon learning data unavailable; no training status is fabricated."});}
+  });
+  app.get("/api/waterx/early-operations",async(_req,res)=>{
+    try{res.set("Cache-Control","no-store").json(await earlyOperationalReport());}
+    catch{res.status(503).json({error:"Early operational diagnostics unavailable; no cohort or cause fabricated."});}
+  });
+  app.get("/api/waterx/final-events",async(req,res)=>{
+    const q=z.object({interval:z.enum(["5","15"]).default("5"),
+      afterMs:z.coerce.number().int().nonnegative().default(0)}).strict().safeParse(req.query);
+    if(!q.success){res.status(400).json({error:"Invalid committed-event filters"});return;}
+    try{res.set("Cache-Control","no-store").json({events:await committedFinalEvents([Number(q.data.interval) as 5|15],q.data.afterMs),
+      semantics:"At-least-once immutable selected-strategy research events; deduplicate eventId. Not trading authority."});}
+    catch{res.status(503).json({error:"Committed-event outbox unavailable; no event fabricated."});}
   });
   app.get("/api/waterx/funding-preview",async(_req,res)=>{
     try{res.set("Cache-Control","no-store").json(await usdcFundingPreview());}

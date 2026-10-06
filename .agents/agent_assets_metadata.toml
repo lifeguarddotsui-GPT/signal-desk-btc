@@ -714,3 +714,17 @@ mtime_ms = 1791300566326
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/446d402a-1876-4be8-958d-3dfc004c67fc/88e78e24-006d-4d8d-8fa6-48d4c5070639"
 storage_version_token = "1791300696885849"
 content_type = "text/markdown"
+
+[[outputs]]
+id = "dT2j-1Akp9s3BHBr7zZGM"
+uri = "file://reports/reliable-early/release-review.md"
+type = "text"
+title = "Reliable early-decision release review"
+description = "Exact identities, source parity, supporting job/round IDs, tests, measured timing, unresolved release gates and rollback guidance."
+logical_id = "07c2508c-316a-43d6-a69c-6243a85db0c0"
+content_hash = "sha256:610a6c27332e2f35d802f27d3dfeb22110cc49da84b7507142a1289605901cf2"
+size = 11429
+mtime_ms = 1791307561209
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/07c2508c-316a-43d6-a69c-6243a85db0c0/13de1612-3286-4666-8907-d3d872a970aa"
+storage_version_token = "1791307562285952"
+content_type = "text/markdown"

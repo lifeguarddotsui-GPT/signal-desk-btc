@@ -67,6 +67,10 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
       (status='LOCKED' AND committed_ack_at_ms>(decision->>'hardDeadlineAtMs')::bigint))::int AS missed,
     count(*) FILTER(WHERE status='ABSTAINED_NO_QUALIFIED_SIGNAL')::int AS abstained,
     count(*) FILTER(WHERE status='DATA_FAILURE')::int AS data_failures,
+     count(*) FILTER(WHERE status='MISSED_DEADLINE' OR
+       (status='LOCKED' AND committed_ack_at_ms>(decision->>'hardDeadlineAtMs')::bigint))::int AS deadline_misses,
+     count(*) FILTER(WHERE result='MISSING_RECORD' OR status IN('NO_VALID_INPUT','DATA_FAILURE','MISSED_DEADLINE') OR
+       (status='LOCKED' AND (committed_ack_at_ms IS NULL OR committed_ack_at_ms>(decision->>'hardDeadlineAtMs')::bigint)))::int AS operational_failures,
     count(*) FILTER(WHERE result='MISSING_RECORD')::int AS missing_records,
     count(*) FILTER(WHERE result='NO_VALID_INPUT')::int AS no_valid_input,
     count(*) FILTER(WHERE result='CORRECT')::int AS correct,
@@ -95,11 +99,13 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
   return {strategyVersion:q.strategy,asOfMs:now,cohort:q,entries,metrics:{
     n:Number(s.n),cohortN:n,onTimeLocks:Number(s.on_time_locks),deadlineLocks:Number(s.deadline_locks),
     missed:Number(s.missed),missingRecords:Number(s.missing_records),noValidInput:Number(s.no_valid_input),
+    deadlineMisses:Number(s.deadline_misses),operationalFailures:Number(s.operational_failures),
+    operationalCoverage:n?1-Number(s.operational_failures)/n:null,
     settledN,correct,incorrect,pending:Number(s.pending),disputed:Number(s.disputed),
     ratio:`${correct}:${incorrect}`,hitRate:settledN?correct/settledN:null,
     choiceCoverage:n?Number(s.locks)/n:null,onTimeCoverage:n?Number(s.on_time_locks)/n:null,
     abstained:Number(s.abstained),dataFailures:Number(s.data_failures),
-    abstentionRate:n?Number(s.abstained)/n:null,operationalFailureRate:n?Number(s.missed)/n:null,
+    abstentionRate:n?Number(s.abstained)/n:null,operationalFailureRate:n?Number(s.operational_failures)/n:null,
     medianElapsedMs:s.median_elapsed_ms===null?null:Number(s.median_elapsed_ms)},
     rowsTruncated:Number(s.n)>entries.length,
     qualification:"Verified exact-round settlements only. All-policy totals count policy-round decisions, not independent training outcomes. Coverage denominator is discovered strategy-rounds; unobserved rounds are not claimed. Trading and actual P/L remain separate."};

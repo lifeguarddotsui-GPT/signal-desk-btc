@@ -10,7 +10,7 @@ import {digestEarlySnapshot} from "./early-horizons";
  * A predeclared hash, never an outcome/probability, selects ONE gate per training round.
  * This is a shadow challenger, not the production qualification policy. */
 export function trainPooledGates(rows:EarlyTrainingRow[],interval:5|15,now:number){
- const day=86400000,cutoff=Math.floor(now/day)*day,trainEnd=cutoff-4*day,calEnd=cutoff-2*day;
+  const day=86400000,cutoff=Math.floor(now/day)*day,trainEnd=cutoff-4*day,calEnd=cutoff-3*day,policyEnd=cutoff-2*day;
  const groups=new Map<string,EarlyTrainingRow[]>(),allowed=new Set(earlyHorizons(interval));
  for(const r of rows){
    if(r.interval!==interval||!allowed.has(r.horizon)||r.startMs<cutoff-14*day||r.expiryMs>cutoff||
@@ -30,7 +30,7 @@ export function trainPooledGates(rows:EarlyTrainingRow[],interval:5|15,now:numbe
  selected.sort((a,b)=>a.startMs-b.startMs||a.roundId.localeCompare(b.roundId));
  const training=selected.filter(r=>r.expiryMs<=trainEnd&&r.labelAvailableAtMs<=trainEnd);
  const calibration=selected.filter(r=>r.startMs>=trainEnd&&r.expiryMs<=calEnd&&r.labelAvailableAtMs<=calEnd);
- const test=selected.filter(r=>r.startMs>=calEnd&&r.expiryMs<=cutoff);
+  const test=selected.filter(r=>r.startMs>=policyEnd&&r.expiryMs<=cutoff);
  const base={interval,protocol:"elapsed-pooled-one-hash-selected-gate-per-round-v1",strategyVersion:TIMED_STRATEGY,
    statisticalUnit:"distinct exact round; one outcome per partition",
    features:["market_logit","elapsed_fraction"],counts:{eligible:selected.length,training:training.length,

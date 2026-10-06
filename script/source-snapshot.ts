@@ -5,7 +5,7 @@ import {createHash} from "node:crypto";
 import {execFileSync} from "node:child_process";
 
 // Source-only export, never Git history, uploads, runtime data, reports or env files.
-const roots=["server","shared","client/src","script","scripts","migrations","edge"];
+const roots=["server","shared","client/src","script","scripts","migrations","edge","infrastructure"];
 const configs=["package.json","package-lock.json","tsconfig.json","vite.config.ts",
   "client/index.html","client/public/favicon.svg","client/public/favicon-mono.svg"];
 export function allowedSourcePath(file:string){

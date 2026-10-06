@@ -257,3 +257,37 @@
   .mo-primary-metrics .mo-indicator .mo-progress-label { grid-column: 1/-1; }
   .mo-market-pair strong { font-size: 12px; }
 }
+
+/* Keep the live projection legible as three separate facts at narrow desk widths. */
+.manual-opportunity, .manual-opportunity * { box-sizing: border-box; }
+.manual-opportunity { width: 100%; max-width: 100%; }
+.mo-primary-card, .mo-primary-main, .mo-market-pair, .mo-primary-metrics,
+.mo-indicator, .mo-last-gate, .mo-requirement { min-width: 0; }
+.mo-last-gate {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 9px;
+  border-left: 2px solid #718984;
+  background: rgba(4, 14, 18, .28);
+}
+.mo-last-gate b {
+  color: #d7e0d7;
+  font: 9px/1.45 var(--mono, monospace);
+  overflow-wrap: anywhere;
+}
+.mo-last-gate small { color: var(--mo-muted); font-size: 8px; line-height: 1.45; overflow-wrap: anywhere; }
+.mo-last-gate.qualified { border-left-color: var(--mo-accent); }
+.mo-last-gate.missed-gate, .mo-last-gate.execution-window-closed { border-left-color: var(--mo-rose); }
+.mo-requirement { min-width: 0; overflow-wrap: anywhere; }
+.mo-benchmark-details > summary { line-height: 1.5; overflow-wrap: anywhere; }
+@media (max-width: 360px) {
+  .manual-opportunity { padding-right: 9px; padding-left: 9px; }
+  .mo-header { gap: 8px; }
+  .mo-header-tools { gap: 6px; }
+  .mo-primary-call { gap: 7px; }
+  .mo-primary-metrics .mo-indicator { grid-template-columns: minmax(0,1fr); }
+  .mo-primary-metrics .qualification { grid-column: 1 / -1; }
+  .mo-primary-save { gap: 5px 9px; }
+}

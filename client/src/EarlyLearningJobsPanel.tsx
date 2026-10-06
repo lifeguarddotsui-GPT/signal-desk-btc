@@ -13,12 +13,35 @@ type HorizonEvaluation = {
   challenger?: Record<string, unknown>;
   promotion?: string;
 };
+type FunnelRow = {
+  roundId?: string;
+  startMs?: number;
+  horizon?: number;
+  primaryReason?: string;
+  details?: unknown;
+};
+type EligibilityFunnel = {
+  captured?: number;
+  validIdentity?: number;
+  timelyFeatures?: number;
+  verifiedOutcome?: number;
+  correctStrategySchema?: number;
+  eligibleHorizon?: number;
+  selected?: number;
+  excluded?: number | Record<string, unknown>;
+  byReason?: Record<string, unknown>;
+  rows?: FunnelRow[];
+};
 type JobReport = {
   reports?: HorizonEvaluation[];
   digestRejected?: number;
   selected?: number;
   promotion?: string;
   stoppingPolicy?: string;
+  funnel?: EligibilityFunnel;
+  datasetDigest?: string;
+  newEligibleSincePreviousAttempt?: number;
+  retainedBaselineStatus?: string;
 };
 type EarlyLearningJob = {
   id: string;
@@ -46,6 +69,12 @@ const count = (value: unknown) => typeof value === "number" && Number.isFinite(v
 const stamp = (value: number | null | undefined) => value == null || !Number.isFinite(value)
   ? "Not reported" : new Date(value).toLocaleString();
 const pretty = (value: string | undefined | null) => value ? value.replaceAll("_", " ") : "Not reported";
+const stageLabel = (value: string) => value.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()
+  .replace(/^./, character => character.toUpperCase());
+const horizonLabel = (seconds: number | undefined) => seconds == null || !Number.isFinite(seconds)
+  ? "Not reported" : seconds >= 60 ? `${seconds / 60} min` : `${seconds} sec`;
+const diagnosticText = (value: unknown) => typeof value === "string" ? value
+  : value == null ? "Not reported" : JSON.stringify(value);
 const keys = ["eligible", "training", "calibration", "test"] as const;
 
 function HorizonDetails({ horizon }: { horizon: HorizonEvaluation }) {
@@ -102,7 +131,7 @@ export function EarlyLearningJobsView({ data, loading, error, onRetry }: {
         <div><span>AUTOMATIC PROMOTION</span><b>{data.automaticPromotion ? "Enabled by API" : "Disabled"}</b></div>
       </div>
       <div className="early-jobs-boundary"><b>{data.modelStatus === "BASELINE_ONLY" && !data.automaticPromotion
-        ? "SHADOW ONLY · BASELINE RETAINED" : `${pretty(data.modelStatus)} · PROMOTION STATUS`}</b>
+        ? "SHADOW ONLY · BASELINE RETAINED · CANDIDATE ONLY" : `${pretty(data.modelStatus)} · PROMOTION STATUS`}</b>
         <span>{data.automaticPromotion ? "Automatic promotion is enabled by the API contract." : "No early-horizon challenger or learned stopping rule is promoted."}</span>
       </div>
       <div className="early-horizon-capture">
@@ -127,10 +156,35 @@ export function EarlyLearningJobsView({ data, loading, error, onRetry }: {
               <span>Dataset cutoff <b>{stamp(job.dataset_cutoff_ms)}</b></span>
               <span>Selected rows <b>{count(report?.selected)}</b></span>
               <span>Digest rejected <b>{count(report?.digestRejected)}</b></span>
+              <span>Newly eligible since prior attempt <b>{count(report?.newEligibleSincePreviousAttempt)}</b></span>
+              {report?.datasetDigest && <span>Dataset digest <b>{report.datasetDigest}</b></span>}
               <span>Disposition <b>{pretty(report?.promotion)}</b></span>
               <span>Stopping qualification <b>{pretty(report?.stoppingPolicy)}</b></span>
+              {report?.retainedBaselineStatus && <span>Retained baseline · candidate only <b>{pretty(report.retainedBaselineStatus)}</b></span>}
               {job.error_class && <span className="early-job-error">Error class <b>{job.error_class}</b></span>}
             </div>
+            {report?.funnel && <details className="early-job-funnel">
+              <summary>Eligibility funnel &amp; exclusions · diagnostics</summary>
+              <div className="early-job-funnel-stages">
+                {(["captured", "validIdentity", "timelyFeatures", "verifiedOutcome", "correctStrategySchema", "eligibleHorizon", "selected"] as const)
+                  .map(stage => <span key={stage}>{stageLabel(stage)}<b>{count(report.funnel?.[stage])}</b></span>)}
+                <span>Excluded<b>{count(report.funnel.excluded)}</b></span>
+              </div>
+              {report.funnel.byReason && <div className="early-job-funnel-reasons">
+                <b>Exclusions by reason</b>
+                {Object.entries(report.funnel.byReason).map(([reason, value]) =>
+                  <span key={reason}>{pretty(reason)}<b>{diagnosticText(value)}</b></span>)}
+              </div>}
+              {report.funnel.rows?.length ? <div className="early-job-funnel-rows">
+                <b>Excluded round diagnostics · {report.funnel.rows.length} returned</b>
+                {report.funnel.rows.map((row, index) => <div key={`${row.roundId ?? "round"}:${row.startMs ?? index}:${index}`}>
+                  <span>{row.roundId ?? "Round ID not reported"}</span>
+                  <span>{row.startMs == null ? "Start not reported" : stamp(row.startMs)} · {horizonLabel(row.horizon)}</span>
+                  <b>{pretty(row.primaryReason)}</b>
+                  {row.details != null && <small>{diagnosticText(row.details)}</small>}
+                </div>)}
+              </div> : <p className="early-job-funnel-empty">No row-level exclusion diagnostics reported.</p>}
+            </details>}
             {evaluations.length > 0 ? <div className="early-job-horizons">{evaluations.map((horizon, index) =>
               <HorizonDetails key={`${horizon.horizon_seconds ?? horizon.horizon ?? index}:${index}`} horizon={horizon} />)}</div>
               : <p className="early-job-reason">{job.error_class || "No per-horizon report was recorded for this attempt."}</p>}

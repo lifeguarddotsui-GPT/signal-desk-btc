@@ -13,7 +13,7 @@ function rows(n:number,days:number){
  })).flat();
 }
 test("pooled challenger counts independent rounds, fits elapsed and never promotes itself",()=>{
- const data=[...rows(210,8),...rows(60,3),...rows(60,1)];
+ const data=[...rows(210,8),...rows(60,4),...rows(60,1)];
  const fit=trainPooledGates(data,5,now);
  assert.equal(fit.counts.training,210);assert.equal(fit.counts.calibration,60);assert.equal(fit.counts.test,60);
  assert.equal(fit.promotion,"RETAIN_BASELINE");assert.equal(fit.status,"EVALUATED");

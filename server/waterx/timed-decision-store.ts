@@ -8,7 +8,7 @@ import {buildTimedDecision,evaluateQualificationGate} from "./timed-decision-bui
 import {scoredTimedHistory} from "./timed-history";
 import {journalTimedAcknowledgement,retryTimedAcknowledgements} from "./timed-acknowledgement";
 import {recordEarlyDelivery} from "./early-delivery-metrics";
-import {digestEarlySnapshot} from "./early-horizons";
+import {digestEarlySnapshot,freezeEarlyHorizon,persistFrozenHorizon} from "./early-horizons";
 export type TimedInput=TimedRound&{receivedAtMs?:number;observedAt:string;probabilityUp:number|null;
  probabilityDown:number|null;discoveredAtMs?:number;anchorPrice?:number|null;anchorConfirmed?:boolean;features?:Record<string,unknown>};
 const values=(r:TimedRound)=>["sui:mainnet",TIMED_STRATEGY,r.intervalMinutes,r.roundId];
@@ -70,7 +70,14 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
  saved=await loadTimedDecision(input,c);
  const existing=await loadGateJournals(input,c),seen=new Set(existing.map(g=>g.gateIndex));
  const due=Math.min(input.intervalMinutes*2-1,Math.floor((Date.now()-input.startMs)/GATE_MS));
- for(let index=1;index<=due;index++){
+  // Evaluate the only possibly on-time gate before recording older recovery
+  // misses. Old misses cannot be prospective choices; serializing their writes
+  // first used up the current gate's unchanged two-second grace.
+  const liveDue=due>0&&Date.now()<=input.startMs+due*GATE_MS+GATE_GRACE_MS;
+  // On-time gate/lock/outbox ACK must not wait for earlier recovery misses.
+  // The next ordinary capture (outside a grace window) durably records them.
+  const dueIndices=liveDue?[due]:Array.from({length:due},(_,i)=>i+1).reverse();
+  for(const index of dueIndices){
    if(seen.has(index))continue;
    const at=input.startMs+index*GATE_MS;
    const data:{rows:Record<string,unknown>[]}=Date.now()>at+GATE_GRACE_MS?{rows:[]}:
@@ -95,7 +102,7 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
      await c.query("SELECT pg_notify('bluewater_timed_decision',$1)",[candidate.id]);saved=inserted=candidate;
    }
    const {snapshotDigest:_digest,...body}=gate;
-   const frozen={...body,decisionId:candidate?.id??null,evidenceSnapshot:{
+    const frozen={...body,captureVersion:"atomic-gate-capture-v1",decisionId:candidate?.id??null,evidenceSnapshot:{
      schema:"waterx-gate-evidence-v1",availableByMs:at,observations:inputs,
      reference:latest?.anchorPrice??null,referenceConfirmed:latest?.anchorConfirmed??false,
      features:latest?.features??{},missingInput:!latest,latestInputValid:valid,
@@ -105,9 +112,14 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
      scheduled_at_ms,evaluated_at_ms,evidence_cutoff_ms,result,decision_id,journal) VALUES($1,$2,$3,$4,$5,$6,$7,$6,$8,$9,$10)`,
      [...values(input),index,at,evaluatedAt,gate.result,gate.decisionId,JSON.stringify(gate)]);
    existing.push(gate);emitted.push(gate);
+    // Freeze the research dataset from the SAME prospective, availability-filtered
+    // input as the gate. Do not wait for an optional queue after the lock commits.
+    // Failure rolls back gate/decision/outbox together; no false committed lock.
+    const horizon=freezeEarlyHorizon(input,index*30,inputs,evaluatedAt,saved?.status==="LOCKED");
+    await persistFrozenHorizon(input,index*30,horizon,c);
  }
  if(!saved&&Date.now()>=input.expiryMs){
-   const final=finalRecord(input,existing,Date.now());
+    const final=finalRecord(input,existing.sort((a,b)=>a.gateIndex-b.gateIndex),Date.now());
    await c.query(`INSERT INTO waterx_timed_decisions(id,network,strategy_version,interval_minutes,round_id,decision_at_ms,status,decision)
    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[final.id,...values(input),final.decisionAtMs,final.status,JSON.stringify(final)]);
    await c.query("INSERT INTO waterx_timed_outbox(decision_id) VALUES($1)",[final.id]);saved=inserted=final;
@@ -120,7 +132,8 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
      onTime:inserted.status==="LOCKED"?ack<=inserted.hardDeadlineAtMs:null,
      operationalFailure:inserted.status==="LOCKED"&&ack>inserted.hardDeadlineAtMs?"COMMIT_AFTER_GATE_GRACE":null};
  }
- emitted.forEach(g=>onGate?.(g));if(!emitted.length&&existing.length)onGate?.(existing.at(-1)!);return saved;
+  emitted.sort((a,b)=>a.gateIndex-b.gateIndex).forEach(g=>onGate?.(g));
+  if(!emitted.length&&existing.length)onGate?.(existing.at(-1)!);return saved;
  }catch(error){recordEarlyDelivery(input.intervalMinutes,input.roundId,"CAPTURE_ATTEMPT",performance.now()-acquire,"error");throw error;}
  finally{if(!committed)await c.query("ROLLBACK").catch(()=>{});c.release();}
 }

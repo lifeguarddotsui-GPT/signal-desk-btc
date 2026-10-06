@@ -11,6 +11,7 @@ type HistoryMetrics = {
   correct?: number; incorrect?: number; pending?: number; disputed?: number; hitRate?: number | null;
   ratio?: number | string | null; choiceCoverage?: number | null; onTimeCoverage?: number | null; medianElapsedMs?: number | null;
   abstentionRate?: number | null; operationalFailureRate?: number | null;
+  deadlineMisses?: number; operationalFailures?: number; operationalCoverage?: number | null;
 };
 export type TimedHistoryResponse = {
   strategyVersion: string;
@@ -42,6 +43,7 @@ export function TimedDecisionHistoryRecords({ interval, data, visibleEntries }: 
   const metrics = data.metrics;
   const scoredCount = typeof metrics.correct === "number" && typeof metrics.incorrect === "number"
     ? metrics.correct + metrics.incorrect : metrics.settledN;
+  const operationalFailures = metrics.operationalFailures ?? metrics.missed;
   return <div className="timed-history-content">
     <div className="timed-history-metrics" aria-label="Selected cohort scoring metrics">
       <div className="score-correct"><span>Correct</span><b>{metrics.correct ?? "Not reported"}</b></div>
@@ -57,13 +59,15 @@ export function TimedDecisionHistoryRecords({ interval, data, visibleEntries }: 
       <div><span>Recorded decisions</span><b>{metrics.n}</b></div>
       <div><span>On-time locks</span><b>{metrics.onTimeLocks}</b></div>
       <div><span>Deadline locks</span><b>{metrics.deadlineLocks}</b></div>
-      <div><span>Missed deadlines</span><b>{metrics.missed}</b></div>
+      <div><span>{metrics.deadlineMisses == null ? "Deadline misses · not reported" : "Missed deadlines / late locks"}</span><b>{metrics.deadlineMisses ?? "Not reported"}</b></div>
       <div><span>No valid input</span><b>{metrics.noValidInput}</b></div>
       <div><span>Abstention rate</span><b>{rate(metrics.abstentionRate)}</b></div>
+      <div><span>{metrics.operationalFailures == null ? "Operational failures · legacy missed" : "Operational failures"}</span><b>{operationalFailures}</b></div>
+      <div><span>Operational coverage</span><b>{rate(metrics.operationalCoverage)}</b></div>
       <div><span>Operational failure rate</span><b>{rate(metrics.operationalFailureRate)}</b></div>
       <div><span>Legacy settled count</span><b>{metrics.settledN}</b></div>
     </div>
-    <p className="timed-history-note">Scoring metrics cover the full selected cohort; row limit only controls visible records. Correctness is not trading P/L. A late correct prediction remains an operational miss.</p>
+    <p className="timed-history-note">Scoring metrics cover the full selected cohort; row limit only controls visible records. Correctness is not trading P/L. Deadline misses include missed gates or late locks; DATA_FAILURE is an operational failure, not a missed deadline. Older reports expose only “missed,” shown here as operational failures rather than inferred deadline misses.</p>
     {!("correct" in metrics) && <p className="timed-history-api-note">The history API has not returned outcome-scoring metrics yet.</p>}
     {rows.length === 0 ? <div className="timed-history-empty">No early-strategy records returned for these filters.</div>
       : <div className="timed-history-rows" aria-label="Early strategy records">
@@ -176,7 +180,7 @@ function GateJournalSection({ interval, reloadKey, onRetry }: { interval: Interv
 
 export default function TimedDecisionHistory() {
   const [interval, setInterval] = useState<Interval>(5);
-  const [strategy, setStrategy] = useState<Strategy>("all");
+  const [strategy, setStrategy] = useState<Strategy>("waterx-qualification-gates-v3");
   const [window, setWindow] = useState<CohortWindow>("lifetime");
   const [limit, setLimit] = useState(50);
   const [resultFilter, setResultFilter] = useState<"all" | ResultStatus>("all");

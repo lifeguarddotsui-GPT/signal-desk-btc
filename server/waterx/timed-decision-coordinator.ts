@@ -7,28 +7,40 @@ import {TIMED_STRATEGY} from "../../shared/timed-decision";
 import {timedPool} from "./timed-db";
 import type {LockDb} from "./lock-store";
 import {retryTimedAcknowledgements,timedAcknowledgementHealth} from "./timed-acknowledgement";
-import {captureEarlyHorizons} from "./early-horizons";
 import {earlyHorizons} from "../../shared/timed-decision";
 import {spawn} from "node:child_process";
 import {existsSync} from "node:fs";
 import {recordEarlyDelivery,earlyDeliveryMetrics} from "./early-delivery-metrics";
+import {crossIntervalContext,type IntervalObservation} from "../../shared/early-features";
+import {refreshEarlyShadowModels,earlyShadowStatus} from "./early-shadow-runtime";
 const enqueuedAt=new WeakMap<TimedInput,number>();
 const active=new Map<number,{input:TimedInput;timers:ReturnType<typeof setTimeout>[]}>();
 let recoveryTimer:ReturnType<typeof setInterval>|null=null,recovering=false;
 let recovered=0,recoveryFailures=0,lastRecoveryAtMs:number|null=null;
 let dailyDay="",dailyRunning=false;
-const researchQueue=createWaterxBackgroundQueue<TimedInput>(async input=>captureEarlyHorizons(input),
-  (interval,error)=>console.error(`[waterx-${interval}m] early horizon capture failed`,refreshErrorClass(error)));
+let shadowRefreshAt=0;
 const queue=createWaterxBackgroundQueue<TimedInput>(async input=>{
    recordEarlyDelivery(input.intervalMinutes,input.roundId,"QUEUE_DELAY",
      enqueuedAt.has(input)?performance.now()-enqueuedAt.get(input)!:null,"ok");
     try{roundDecisions.timedSaved(input,await captureTimedDecision(input,undefined,()=>roundDecisions.timedSaving(input),
       gate=>roundDecisions.timedGate(input,gate)));
-     researchQueue.enqueue(input);}
+      }
   catch(error){roundDecisions.timedFailed(input,refreshErrorClass(error));throw error;}
 },(interval,error)=>console.error(`[waterx-${interval}m] timed decision storage failure: ${refreshErrorClass(error)}`));
 const enqueue=(input:TimedInput)=>{enqueuedAt.set(input,performance.now());queue.enqueue(input);};
 export function observeTimedStrategy(input:TimedInput){
+   const acceptedAt=Date.now();
+   const toObservation=(v:TimedInput):IntervalObservation=>{
+     const cmp=v.features?.comparison as {price?:number;asOf?:string}|undefined;
+     return {interval:v.intervalMinutes,roundId:v.roundId,startMs:v.startMs,expiryMs:v.expiryMs,
+       probabilityUp:v.probabilityUp??NaN,receivedAtMs:v.receivedAtMs??acceptedAt,
+       availableAtMs:Number(v.features?.contextAvailableAtMs??acceptedAt),providerSourceAtMs:null,
+       reference:v.anchorPrice??null,referenceQuality:v.anchorPrice==null?"missing":v.anchorConfirmed?"confirmed":"provisional",
+       comparison:cmp?.price??null,comparisonAtMs:cmp?.asOf?Date.parse(cmp.asOf):null};
+   };
+   const other=active.get(input.intervalMinutes===5?15:5)?.input;
+   input={...input,features:{...input.features,contextAvailableAtMs:acceptedAt,
+     crossInterval:crossIntervalContext(toObservation(input),other?toObservation(other):undefined,acceptedAt)}};
   const previous=active.get(input.intervalMinutes);
   if(previous&&previous.input.startMs>input.startMs)return;
   if(previous?.input.roundId===input.roundId&&previous.input.startMs===input.startMs&&previous.input.expiryMs===input.expiryMs){
@@ -89,12 +101,16 @@ export function startTimedRecovery(){
     try{await retryTimedAcknowledgements();await recoverTimedSchedules();}
     catch(error){recoveryFailures++;console.error("[waterx-timed] durable schedule recovery failed",refreshErrorClass(error));}
     finally{recovering=false;}
-    const today=new Date().toISOString().slice(0,10);
+    // Bounded retry slots, independent of daily-day identity; insufficient jobs
+    // can retry on a changed dataset, and stale/failed attempts remain visible.
+    const today=`${new Date().toISOString().slice(0,10)}:${Math.floor(Date.now()/21600000)}`;
+    if(Date.now()-shadowRefreshAt>=300000){shadowRefreshAt=Date.now();void refreshEarlyShadowModels();}
     if(!dailyRunning&&dailyDay!==today){
       dailyDay=today;dailyRunning=true;
       // Training CPU and optional DB reads never run in the deadline process.
-      const args=existsSync("dist/early-training.mjs")?["dist/early-training.mjs"]:
+      const args=process.env.NODE_ENV==="production"&&existsSync("dist/early-training.mjs")?["dist/early-training.mjs"]:
         ["--import","tsx","scripts/train-early-horizons.ts"];
+      args.push("--retry-failed");
       const child=spawn(process.execPath,args,{stdio:["ignore","inherit","inherit"]});
       const timeout=setTimeout(()=>child.kill("SIGTERM"),600000);timeout.unref?.();
       child.once("error",()=>{
@@ -116,7 +132,8 @@ export function stopTimedStrategy(){
 }
 export const timedStrategyQueueMetrics=(now=Date.now())=>({...queue.metrics(now),
   recovered,recoveryFailures,lastRecoveryAtMs,acknowledgements:timedAcknowledgementHealth(),
-  shadowHorizonQueue:researchQueue.metrics(now),
+   shadowHorizonQueue:{mode:"ATOMIC_PROSPECTIVE_GATE_SNAPSHOT",postLockCapture:true,optionalQueueRemoved:true},
   delivery:earlyDeliveryMetrics(),
+   shadowModels:earlyShadowStatus(),
   schedulePersistence:"Exact strategy/round and observations in PostgreSQL; startup and periodic recovery",
   autoscaleIndependent:false});

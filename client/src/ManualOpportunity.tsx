@@ -25,7 +25,7 @@ const usd = (value: number | null | undefined, digits = 2) => value == null || !
 const percent = (value: number | null | undefined) => value == null || !Number.isFinite(value) || value < 0 || value > 1
   ? "Unavailable" : `${(value * 100).toFixed(1)}%`;
 const duration = (value: number | null | undefined) => value == null || !Number.isFinite(value) || value < 0
-  ? "Unknown" : value < 1000 ? `${Math.floor(value)} ms` : `${(value / 1000).toFixed(1)} sec`;
+  ? "Unknown" : `${value < 10_000 ? (value / 1000).toFixed(1) : Math.floor(value / 1000)} sec`;
 const mmss = (value: number | null | undefined) => {
   if (value == null || !Number.isFinite(value)) return "—:—";
   const seconds = Math.max(0, Math.ceil(value / 1000));
@@ -79,9 +79,12 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
     : liveSide === "DOWN" && liveProbability != null ? decision?.market?.probabilityDown ?? null : null;
   const targetSeconds = decision && timed ? Math.max(1, Math.round((timed.targetAtMs - decision.startMs) / 1000))
     : decision?.intervalMinutes === 15 ? 180 : 60;
-  const elapsed = timed?.elapsedMs ?? saved?.elapsedMs ?? 0;
+  const roundDurationMs = decision ? Math.max(0, decision.expiryMs - decision.startMs) : targetSeconds * 1000;
+  const elapsed = decision
+    ? Math.max(0, Math.min(roundDurationMs, now - decision.startMs))
+    : timed?.elapsedMs ?? saved?.elapsedMs ?? 0;
   const observationProgress = Math.max(0, Math.min(100, elapsed /
-    (decision ? decision.expiryMs-decision.startMs : targetSeconds*1000) * 100));
+    roundDurationMs * 100));
   const probability = liveFresh ? displayedLiveProbability : null;
   const components = timed?.components;
   const sourceAge=decision?.market?.receivedAtMs!=null?Math.max(0,now-decision.market.receivedAtMs):timed?.sourceAgeMs;
@@ -89,6 +92,8 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
     ? "Choice is frozen. Trading authority remains disabled."
     : saved?.status === "ABSTAINED_NO_QUALIFIED_SIGNAL" ? "Round ended without a qualifying signal; no prediction was forced."
       : saved?.status === "DATA_FAILURE" ? "Round ended with insufficient valid data to evaluate a prediction."
+        : saved?.status === "MISSED_DEADLINE" ? "The scheduled deadline was missed; no late choice was substituted."
+          : saved?.status === "NO_VALID_INPUT" ? "No valid probability input was recorded for this round."
     : timed?.remainingRequirement || (components
       ? components.sameSideMs < components.requiredSameSideMs
         ? `Needs ${requirementDuration(components.requiredSameSideMs - components.sameSideMs)} more same-side stability`
@@ -119,12 +124,7 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
     : 0);
   const nextGateLabel = countdown == null ? timed?.phase === "EXPIRED" ? "Round complete" : "No further gate scheduled"
     : mmss(countdown);
-  const gateReason = isLocked ? "Prediction frozen at its qualifying gate."
-    : saved?.status === "ABSTAINED_NO_QUALIFIED_SIGNAL" ? "Round ended without a qualifying signal; no prediction was forced."
-      : saved?.status === "DATA_FAILURE" ? "Round ended with insufficient valid data to evaluate a prediction."
-    : timed?.lastGate ? `Last gate ${timed.lastGate.result.replaceAll("_", " ").toLowerCase()}: ${timed.lastGate.reason.replaceAll("_", " ").toLowerCase()}`
-      : timed?.remainingRequirement || unmetRequirement;
-  const elapsedTarget = `${elapsedLabel(elapsed)} / ${String(Math.floor(targetSeconds / 60)).padStart(2, "0")}:${String(targetSeconds % 60).padStart(2, "0")}`;
+  const elapsedTarget = `${elapsedLabel(elapsed)} / ${mmss(roundDurationMs)}`;
 
   return <section className="mo-primary-card" aria-label="Authoritative round research state">
     <div className="mo-primary-main">
@@ -139,10 +139,12 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
                     liveFresh && liveSide ? `LEANING ${liveSide}` : liveFresh ? "OBSERVING" : "DATA DELAYED"}
         </strong>
         <span className="mo-primary-probability">{percent(isLocked ? sideProbability : probability)}
-          <small>{isLocked ? "FROZEN MARKET PROBABILITY · UNCALIBRATED" : "CURRENT MARKET PROBABILITY · UNCALIBRATED"}</small>
+          <small>{isLocked ? "FROZEN WATERX PUBLIC MARKET PROBABILITY · UNCALIBRATED" : "CURRENT WATERX PUBLIC MARKET PROBABILITY · UNCALIBRATED"}</small>
         </span>
       </div>
-      <span className="mo-primary-round">{decision ? `${decision.intervalMinutes}m · exact active round` : "Awaiting exact-round decision snapshot"}</span>
+      <span className="mo-primary-round">{decision
+        ? `${decision.intervalMinutes}m · exact active round${isLocked ? " · immutable public prediction" : ""}`
+        : "Awaiting exact-round decision snapshot"}</span>
     </div>
     <div className="mo-market-pair" aria-label="Round reference, current odds and comparison price">
       <div><span className="mo-primary-eyebrow">PRICE TO BEAT · {referenceQuality.toUpperCase()}</span><strong>{usd(referencePrice, 2)}</strong><small>{referenceSource}{!liveFresh && referencePrice != null ? " · retained same-round reference" : ""}</small></div>
@@ -151,15 +153,15 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
     </div>
     <div className="mo-primary-metrics">
       <div className="mo-indicator observation">
-        <div><span className="mo-indicator-label">ELAPSED ROUND TIME</span><b>{elapsedTarget}</b></div>
-        <div className="mo-progress-track" role="progressbar" aria-label="Observation time toward preferred target" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(observationProgress)}><i style={{ transform: `scaleX(${observationProgress / 100})` }} /></div>
+        <div><span className="mo-indicator-label">CURRENT CONDITIONS · ROUND ELAPSED</span><b>{elapsedTarget}</b></div>
+        <div className="mo-progress-track" role="progressbar" aria-label="Round elapsed progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(observationProgress)}><i style={{ transform: `scaleX(${observationProgress / 100})` }} /></div>
       </div>
       <div className="mo-indicator gate-countdown">
-        <div><span className="mo-indicator-label">{gatePolicy ? "NEXT QUALIFICATION GATE" : "NEXT EVALUATION"}</span><b>{gatePolicy ? nextGateLabel : "Legacy schedule"}</b></div>
+        <div><span className="mo-indicator-label">{gatePolicy ? "NEXT SERVER-SCHEDULED GATE" : "NEXT EVALUATION"}</span><b>{gatePolicy ? nextGateLabel : "Legacy schedule"}</b></div>
         <small>{gatePolicy ? timed?.nextGateAtMs == null ? "No further gate before round expiry" : "A check, not a forced choice" : "Historical policy · no gate countdown available"}</small>
       </div>
       <div className="mo-indicator qualification">
-        <div><span className="mo-indicator-label">{isLocked ? "QUALIFICATION AT LOCK" : "QUALIFICATION CHECKLIST"}</span><b>{gatePolicy ? `${isLocked ? 4 : requirementsMet} of 4 requirements` : "Legacy criteria"}</b></div>
+        <div><span className="mo-indicator-label">{isLocked ? "QUALIFICATION AT LOCK" : "CURRENT CONDITIONS CHECKLIST"}</span><b>{gatePolicy ? `${isLocked ? 4 : requirementsMet} of 4 requirements` : "Legacy criteria"}</b></div>
         {gatePolicy && <div className="mo-checklist" aria-label={isLocked ? "4 of 4 requirements met at the frozen lock" : `${requirementsMet} of 4 requirements currently met`}>
           <i className={isLocked || requirementsMet>0 && (timed?.sourceAgeMs ?? Infinity) <= 10_000 ? "met" : ""} title="Fresh source" />
           <i className={isLocked || requirementsMet>0 && !!components && components.strength >= components.requiredStrength ? "met" : ""} title="Directional separation" />
@@ -169,7 +171,14 @@ function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, market
         </div>}
       </div>
     </div>
-    <p className="mo-requirement"><b>{isLocked ? "FROZEN" : saved ? "ROUND RESULT" : "WAITING"}:</b> {gatePolicy ? gateReason : unmetRequirement}</p>
+    {gatePolicy && <div className={`mo-last-gate ${timed?.lastGate ? timed.lastGate.result.toLowerCase().replaceAll("_", "-") : "not-recorded"}`}>
+      <span className="mo-indicator-label">LAST GATE · SERVER-RECORDED</span>
+      <b>{timed?.lastGate
+        ? `${timed.lastGate.result.replaceAll("_", " ")} · ${stamp(timed.lastGate.scheduledAtMs)}`
+        : "No gate result reported for this exact round"}</b>
+      <small>{timed?.lastGate ? timed.lastGate.reason.replaceAll("_", " ").toLowerCase() : "Current conditions are not a substitute for a recorded gate result."}</small>
+    </div>}
+    <p className="mo-requirement"><b>{isLocked ? "FROZEN" : saved ? "ROUND RESULT" : "NEXT REQUIREMENT"}:</b> {unmetRequirement}</p>
     <div className="mo-primary-save">
       <span>{gatePolicy ? "Qualification objective" : "Historical target"} <b>{String(Math.floor(targetSeconds / 60)).padStart(2, "0")}:{String(targetSeconds % 60).padStart(2, "0")}</b></span>
       <span>Until settlement <b>{decision ? mmss(decision.expiryMs - now) : "—:—"}</b></span>
@@ -410,7 +419,7 @@ export function ManualOpportunity({ view, now, onRetry, refresh, browserReceived
     </div>}
     <TimedDecisionCard timed={decision?.timedDecision ?? null} decision={decision} now={now} liveFresh={view.fresh} marketReference={marketReference} comparison={comparison} />
     <details className="mo-benchmark-details">
-      <summary>Reference provenance, canonical benchmarks, economics &amp; diagnostics</summary>
+      <summary>BENCHMARK DISCLOSURE · legacy canonical readiness, reference provenance &amp; diagnostics</summary>
       {(!pending || decision) && <DecisionContent decision={decision} view={view} now={now} browserReceivedAtMs={browserReceivedAtMs}
         minimumWinningProfit={minimumWinningProfit} onMinimumWinningProfitChange={setMinimumWinningProfit} />}
     </details>

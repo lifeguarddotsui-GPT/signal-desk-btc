@@ -186,14 +186,19 @@ test("primary card consolidates source prices, gate timing and an explicit quali
   assert.match(markup, /BTC COMPARISON · Coinbase SSE/);
   assert.match(markup, /\$83,517\.25/);
   assert.match(markup, /MARKET ODDS · CURRENT ONLY/);
-  assert.match(markup, /QUALIFICATION CHECKLIST/);
+  assert.match(markup, /CURRENT CONDITIONS CHECKLIST/);
   assert.match(app, /comparisonFresh \? comparison\?\.source/);
   assert.match(app, /source: coinbaseDisplaySource \|\| "Not reported"/);
   assert.doesNotMatch(app, /HTTP comparison|streamCoinbaseFresh \? "Coinbase SSE"/);
-  assert.match(source, /ELAPSED ROUND TIME/);
+  assert.match(source, /CURRENT CONDITIONS · ROUND ELAPSED/);
   assert.doesNotMatch(source, /EVIDENCE READINESS/);
   assert.doesNotMatch(source, /readinessPercent/);
   assert.match(markup, /market probability · uncalibrated/i);
+  assert.match(markup, /CURRENT CONDITIONS · ROUND ELAPSED/);
+  assert.match(markup, /BENCHMARK DISCLOSURE · legacy canonical readiness/);
+  assert.match(markup, /CURRENT WATERX PUBLIC MARKET PROBABILITY/);
+  assert.match(source, /LAST GATE · SERVER-RECORDED/);
+  assert.match(source, /NEXT SERVER-SCHEDULED GATE/);
 });
 
 test("unknown comparison provenance is withheld rather than defaulted to Coinbase", () => {

@@ -18,10 +18,11 @@ export function evaluateEarlyStopping(rows:EarlyTrainingRow[],interval:5|15,fore
     r.startMs>=cutoff-14*day&&r.expiryMs<=cutoff&&r.labelAvailableAtMs<=now)){
     const key=r.roundId+":"+r.startMs+":"+r.expiryMs;
     const list=groups.get(key)??[];
-    if(!list.some(v=>v.horizon===r.horizon))list.push(r);
+    list.push(r);
     groups.set(key,list);
   }
-  const sequences=Array.from(groups.values()).map(s=>s.sort((a,b)=>a.horizon-b.horizon));
+  const sequences=Array.from(groups.values()).filter(s=>new Set(s.map(r=>r.horizon)).size===s.length&&
+    new Set(s.map(r=>r.outcome)).size===1).map(s=>s.sort((a,b)=>a.horizon-b.horizon));
   const probability=(r:EarlyTrainingRow)=>{
     const a=artifacts.get(r.horizon)!;
     const raw=sigmoid(a.parameters.intercept+a.parameters.coefficients[0]*logit(r.probability)+
@@ -32,20 +33,24 @@ export function evaluateEarlyStopping(rows:EarlyTrainingRow[],interval:5|15,fore
   const select=(s:EarlyTrainingRow[],threshold:number)=>s.find(r=>valid(r)&&earlyHorizons(interval).includes(r.horizon)&&
     r.horizon<interval*60&&Math.max(probability(r),1-probability(r))>=threshold);
   const evaluate=(part:EarlyTrainingRow[][],threshold:number)=>{
-    const picked=part.flatMap(s=>{const r=select(s,threshold);return r?[r]:[];});
+    const complete=part.filter(s=>s.length===earlyHorizons(interval).length);
+    const picked=complete.flatMap(s=>{const r=select(s,threshold);return r?[r]:[];});
     const forecast=metrics(picked.map(r=>({probability:probability(r),outcome:r.outcome})));
     const sameTimeMarket=metrics(picked.map(r=>({probability:r.probability,outcome:r.outcome})));
     const fixed=part.flatMap(s=>{const r=s.find(r=>r.horizon===target&&valid(r));return r?[r]:[];});
     const fixedTargetMarket=metrics(fixed.map(r=>({probability:r.probability,outcome:r.outcome})));
     return {roundN:part.length,decisionN:picked.length,coverage:part.length?picked.length/part.length:null,
-      missingHorizonDecisions:part.length-picked.length,forecast,sameTimeMarket,fixedTargetMarket,
+      missingHorizonDecisions:part.length-picked.length,
+      incompletePaths:part.filter(s=>s.length!==earlyHorizons(interval).length).length,
+      incompletePathPolicy:"Incomplete paths stay in the denominator as operational gaps and never generate stopped choices.",
+      forecast,sameTimeMarket,fixedTargetMarket,
       fixedTargetCoverage:part.length?fixed.length/part.length:null,
       meanElapsedSeconds:picked.length?picked.reduce((a,r)=>a+r.horizon,0)/picked.length:null,
       meanSecondsBeforeExpiry:picked.length?picked.reduce((a,r)=>a+(r.expiryMs-r.startMs)/1000-r.horizon,0)/picked.length:null,
       quoteAdjustedEconomics:null,durableDeadlineMisses:null,
       limitation:"Capture gaps counted; replay of frozen prospective sequences is not actual commit/submission latency or fill evidence."};
   };
-  const calibration=sequences.filter(s=>s[0].startMs>=trainEnd&&s[0].expiryMs<=calEnd&&s.every(r=>r.labelAvailableAtMs<=calEnd));
+  const calibration=sequences.filter(s=>s[0].startMs>=cutoff-3*day&&s[0].expiryMs<=calEnd&&s.every(r=>r.labelAvailableAtMs<=calEnd));
   const test=sequences.filter(s=>s[0].startMs>=calEnd&&s[0].expiryMs<=cutoff);
   if(calibration.length<60||test.length<60)return {status:"INSUFFICIENT",reason:"Requires 60 distinct calibration and untouched test rounds for the full sequence.",promotion:"RETAIN_BASELINE"};
   const candidates=[.70,.74,.78].map(threshold=>({threshold,...evaluate(calibration,threshold)}));

@@ -17,6 +17,15 @@ const report: EarlyLearningPayload = {
       error_class: null,
       report: {
         selected: 37, digestRejected: 2, promotion: "RETAIN_BASELINE", stoppingPolicy: "NOT_YET_QUALIFIED",
+        datasetDigest: "sha256:round-set-a", newEligibleSincePreviousAttempt: 4,
+        retainedBaselineStatus: "CANDIDATE_ONLY",
+        funnel: {
+          captured: 80, validIdentity: 72, timelyFeatures: 68, verifiedOutcome: 54,
+          correctStrategySchema: 50, eligibleHorizon: 42, selected: 37, excluded: 43,
+          byReason: { IDENTITY_MISMATCH: 8, OUTCOME_UNVERIFIED: 14 },
+          rows: [{ roundId: "btc-round-17", startMs: 1741600000000, horizon: 60,
+            primaryReason: "OUTCOME_UNVERIFIED", details: { outcome: "pending" } }],
+        },
         reports: [{
           horizon_seconds: 60, status: "INSUFFICIENT",
           counts: { eligible: 35, training: 8, calibration: 10, test: 17 },
@@ -46,6 +55,14 @@ test("early-horizon panel renders actual insufficient and failed job facts witho
   assert.match(html, /EARLY_QUERY_TIMEOUT/);
   assert.match(html, /Dataset cutoff/);
   assert.match(html, /No early-horizon challenger or learned stopping rule is promoted/);
+  assert.match(html, /Eligibility funnel &amp; exclusions/);
+  assert.match(html, /Valid identity.*72/);
+  assert.match(html, /OUTCOME UNVERIFIED.*14/);
+  assert.match(html, /btc-round-17/);
+  assert.match(html, /1 min/);
+  assert.match(html, /CANDIDATE ONLY/);
+  assert.match(html, /sha256:round-set-a/);
+  assert.match(html, /Newly eligible since prior attempt.*4/);
   assert.doesNotMatch(html, /Learning is active|Training succeeded|Model promoted/);
 });
 

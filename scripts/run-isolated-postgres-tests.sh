@@ -20,5 +20,7 @@ export RUN_TIMED_POSTGRES_TESTS=1
 if [ "$#" -gt 0 ]; then
   node --import tsx --test --test-concurrency=1 "$@"
 else
-  node --import tsx --test --test-concurrency=1 scripts/*.test.ts client/src/*.test.ts
+  mapfile -t tests < <(find scripts client/src -maxdepth 1 -type f \
+    \( -name '*.test.ts' -o -name '*.test.tsx' \) | sort)
+  node --import tsx --test --test-concurrency=1 "${tests[@]}"
 fi

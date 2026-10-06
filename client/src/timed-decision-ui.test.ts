@@ -202,9 +202,9 @@ test("non-choice timed outcomes remain watching and do not fabricate a lock side
   const missedMarkup = renderDesk(roundDecision(5, missed), false);
   assert.match(noInputMarkup, /WATCHING/);
   assert.match(noInputMarkup, /SAME SIDE PERSISTENCE INCOMPLETE/);
-  assert.doesNotMatch(noInputMarkup, /LOCKED (?:UP|DOWN)|Saved lock/);
+  assert.doesNotMatch(noInputMarkup, /LOCKED (?:UP|DOWN)|Frozen lock/);
   assert.match(missedMarkup, /WATCHING/);
-  assert.doesNotMatch(missedMarkup, /LOCKED (?:UP|DOWN)|Saved lock/);
+  assert.doesNotMatch(missedMarkup, /LOCKED (?:UP|DOWN)|Frozen lock/);
 });
 
 test("a legacy canonical choice cannot override the current strategy's timed saved lock", () => {
@@ -235,7 +235,7 @@ test("a legacy canonical choice cannot override the current strategy's timed sav
     provisionalLean: "UP",
   });
   assert.match(markup, /LOCKED DOWN/);
-  assert.match(markup, /Saved lock · DOWN/);
+  assert.match(markup, /Frozen lock · DOWN/);
   assert.match(markup, /UP 38\.0%/);
   assert.match(markup, /DOWN 62\.0%/);
   assert.match(markup, /WaterX market/);

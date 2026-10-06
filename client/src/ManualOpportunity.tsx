@@ -2,6 +2,7 @@ import * as React from "react";
 import { RefreshCw } from "lucide-react";
 import type { RoundDecision } from "../../shared/round-decision";
 import type { AtomicDecisionView } from "./live-decision-contract";
+import type { AdvisoryPayload } from "./advisory-contract";
 
 type Interval = 5 | 15;
 type RoundIdentity = { id: string; startMs: number; expiryMs: number };
@@ -17,6 +18,7 @@ type Props = {
   comparison?: { price: number | null; source: string; receivedAtMs: number | null };
   fixtureName?: string | null;
   children?: React.ReactNode;
+  economics?: AdvisoryPayload | null;
 };
 
 const usd = (value: number | null | undefined) => value == null || !Number.isFinite(value)
@@ -35,14 +37,22 @@ const identityMatches = (decision: RoundDecision | null, round: RoundIdentity | 
 
 export function ManualOpportunity({
   view, now, interval = view.decision?.intervalMinutes ?? 5, round, onIntervalChange, onRetry, refresh,
-  marketReference, comparison, fixtureName, children,
+  marketReference, comparison, fixtureName, children, economics,
 }: Props) {
+  const [compactPrices,setCompactPrices]=React.useState(()=>typeof window!=="undefined"&&window.matchMedia("(max-width: 900px)").matches);
+  const [pricesExpanded,setPricesExpanded]=React.useState(false);
+  React.useEffect(()=>{
+    const media=window.matchMedia("(max-width: 900px)");
+    const update=()=>setCompactPrices(media.matches);
+    update();media.addEventListener("change",update);
+    return ()=>media.removeEventListener("change",update);
+  },[]);
   const decision = view.decision;
   const exactRound = round !== undefined ? round : (decision ? { id: decision.roundId, startMs: decision.startMs, expiryMs: decision.expiryMs } : null);
   const exactDecision = identityMatches(decision, exactRound) && decision?.intervalMinutes === interval ? decision : null;
   const exactFresh = !!exactDecision && view.fresh;
   const timed = exactDecision?.timedDecision ?? null;
-  const health = exactDecision ? view.dataHealth ?? exactDecision.dataHealth : undefined;
+  const health = view.dataHealth ?? exactDecision?.dataHealth;
   // The shared projection owns the saved choice. Do not fall back to legacy canonical data here.
   const savedProjection = exactDecision ? view.savedDecision : null;
   const saved = savedProjection && "status" in savedProjection ? savedProjection : null;
@@ -69,7 +79,8 @@ export function ManualOpportunity({
       : saving ? "SAVING"
         : roundComplete ? "ROUND COMPLETE"
           : currentSide ? `LEANING ${currentSide}` : "WATCHING";
-  const blocker = !exactDecision ? "Waiting for an exact active-round snapshot."
+  const blocker = waitingForOdds ? "Waiting for WaterX odds."
+    : !exactDecision ? "Waiting for an exact active-round snapshot."
     : timed?.remainingRequirement && timed.remainingRequirement !== "Evidence qualifies; evaluated only at a scheduled gate"
     ? timed.remainingRequirement
     : timed?.blocker && timed.blocker !== "CONDITIONS_SATISFIED"
@@ -93,7 +104,21 @@ export function ManualOpportunity({
     ? priceDifference / referencePrice * 100 : null;
   const confirmed = marketReference?.quality === "confirmed" || exactDecision?.opportunity?.reference.status === "confirmed";
   const frozenUp = saved?.probabilityUp ?? null;
-  const frozenDown = saved?.probabilityDown ?? (frozenUp == null ? null : 1 - frozenUp);
+  const frozenDown = saved?.probabilityDown ?? null;
+  const opportunity=exactDecision?.opportunity;
+  const purchase=exactFresh&&odds&&opportunity?.receivedAtMs===odds.receivedAtMs?opportunity.purchase:null;
+  const cents=(value:number|null|undefined)=>value!=null&&Number.isFinite(value)&&value>0&&value<=100?`${value.toFixed(2).replace(/\.00$/,"")}¢`:null;
+  const upAsk=purchase?.up.status==="reported"?cents(purchase.up.askCents):null;
+  const downAsk=purchase?.down.status==="reported"?cents(purchase.down.askCents):null;
+  const economicsMatch=!!economics&&economics.amountEnteredUsd===5&&!!exactRound&&
+    economics.identity?.roundId===exactRound.id&&economics.identity.startMs===exactRound.startMs&&
+    economics.identity.expiryMs===exactRound.expiryMs&&economics.identity.intervalMinutes===interval&&exactFresh;
+  const indicative=economicsMatch?(["up","down"] as const).flatMap(side=>{
+    const quote=economics!.sides[side]?.quote;
+    const receipt=quote?.grossReceiptIfWinIndicative;
+    return typeof receipt==="number"&&Number.isFinite(receipt)&&receipt>0?
+      [{side,receipt}]:[];
+  }):[];
   const requirementMet = timed?.requirementsMet ?? null;
   const requirementsTotal = timed?.requirementsTotal ?? 4;
   const components = timed?.components;
@@ -112,7 +137,8 @@ export function ManualOpportunity({
     stale.receivedAtMs >= exactRound.startMs && stale.receivedAtMs < exactRound.expiryMs &&
     stale.receivedAtMs <= now;
 
-  return <section className={`manual-opportunity compact-decision${locked ? " is-locked" : ""}`} aria-label="Exact-round research state" aria-busy={loading}>
+  return <section className={`manual-opportunity compact-decision${children ? " has-chart" : ""}${locked ? " is-locked" : ""}`} aria-label="Exact-round research state" aria-busy={loading}>
+    <div className="desk-primary-card">
     <header className="desk-round-header">
       <div className="desk-round-identity">
         <span className="desk-round-symbol">BTC</span><span>· {interval}m</span>
@@ -124,20 +150,22 @@ export function ManualOpportunity({
     </header>
 
     <div className="desk-percentage-board" aria-label="WaterX market odds">
+      <h3 className="desk-section-title">WaterX market</h3>
       <div className="desk-probability probability-up"><span>UP</span><strong>{odds ? percent(odds.probabilityUp) : "—"}</strong></div>
       <div className="desk-probability probability-down"><span>DOWN</span><strong>{odds ? percent(odds.probabilityDown) : "—"}</strong></div>
       <div className="desk-probability-source">
-        <span>WaterX market</span>
-        <small>{odds ? `Observed ${time(odds.receivedAtMs)}` : waitingForOdds ? "Odds unavailable · awaiting recovery" : "Waiting for current-round odds"}</small>
+        <small>{odds ? `WaterX · ${Math.max(0,Math.floor((now-odds.receivedAtMs)/1000))}s ago · app observed` : "WaterX · no current probability receipt"}</small>
       </div>
+      {purchase&&(upAsk||downAsk)&&<div className="desk-purchase-prices"><span>Purchase price (not probability)</span><b>UP {upAsk??"Not reported"} · DOWN {downAsk??"Not reported"}</b></div>}
       {locked && <div className="desk-frozen-evidence">
-        <span>Saved lock · {savedSide}</span>
+        <span>Frozen lock · {savedSide}</span>
         <strong>UP {percent(frozenUp)} <i>·</i> DOWN {percent(frozenDown)}</strong>
-        <small>{savedSource} · saved {time(saved?.committedAtMs ?? saved?.decisionAtMs)}</small>
+        <small>{savedSource} · saved {time(saved?.committedAtMs ?? saved?.decisionAtMs)} · {clock(exactRound!.expiryMs-(saved?.committedAtMs??saved?.decisionAtMs??exactRound!.expiryMs))} before close</small>
       </div>}
     </div>
 
     <div className={`desk-decision-card${locked ? " locked" : ""}`}>
+      <h3 className="desk-section-title">Bluewater decision</h3>
       <div className="desk-decision-main">
         <div className="desk-state-line">
           {!loading && <span className={`desk-state-tag${locked ? " locked" : currentSide ? " leaning" : ""}`} role="status">{state}</span>}
@@ -149,18 +177,26 @@ export function ManualOpportunity({
       </div>
       <div className="desk-decision-side">
         <div className="desk-next-evaluation"><span>{locked ? "Saved choice" : "Next gate"}</span><strong>{fixtureLocked ? "Preview only" : locked ? time(saved?.committedAtMs ?? saved?.decisionAtMs) : nextGate ?? "Not scheduled"}</strong></div>
-        {!locked && <div className="desk-checklist" aria-label={`Qualification progress: ${requirementMet ?? "—"} of ${requirementsTotal} conditions met`}>
-          {qualified.map((met, index) => <span key={index} className={met ? "met" : ""} title={["Fresh input", "Directional strength", "Same-side persistence", "Stable evidence"][index]} />)}
-          <small>{requirementMet == null ? "Qualification" : `${requirementMet} of ${requirementsTotal} conditions`}</small>
+        {!locked && <div className="desk-checklist" aria-label={waitingForOdds?"Not evaluated: missing odds":`Qualification progress: ${requirementMet ?? "—"} of ${requirementsTotal} conditions met`}>
+          {!waitingForOdds&&qualified.map((met, index) => <span key={index} className={met ? "met" : ""} title={["Fresh input", "Directional strength", "Same-side persistence", "Stable evidence"][index]} />)}
+          <small>{waitingForOdds?"Not evaluated: missing odds":requirementMet == null ? "Qualification" : `${requirementMet} of ${requirementsTotal} conditions`}</small>
         </div>}
       </div>
       <div className={`desk-data-health${exactFresh ? " current" : ""}`}>
         <span>MARKET DATA</span><b>{health?.probabilities.status?.replaceAll("_", " ") ?? (exactFresh ? "CURRENT" : "UNAVAILABLE")}</b>
       </div>
-      {waitingForOdds && <p className="desk-odds-notice" role="status">WaterX market odds unavailable. UP and DOWN positions remain visible; no model substitutes for market input.</p>}
+      {waitingForOdds&&locked&&<p className="desk-odds-notice" role="status">Waiting for WaterX odds.</p>}
       {fixtureName && <span className="desk-fixture-indicator">Development visual fixture · {fixtureName.replaceAll("-", " ")}</span>}
     </div>
+    {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>
+      <p>Before fees, minimums and price impact. Not an executable quote or expected profit.</p>
+      {indicative.map(row=><p key={row.side}>{row.side.toUpperCase()} · indicative gross winning receipt {usd(row.receipt)}</p>)}
+    </details>}
+    </div>
 
+    <details className="desk-price-details" open={!compactPrices||pricesExpanded}
+      onToggle={event=>{if(compactPrices)setPricesExpanded(event.currentTarget.open);}}>
+    <summary>BTC, reference and price difference</summary>
     <div className="desk-price-strip" aria-label="BTC comparison and WaterX reference prices">
       <div className="desk-price-item">
         <span>BTC comparison</span><strong>{usd(comparisonPrice)}</strong>
@@ -176,7 +212,8 @@ export function ManualOpportunity({
         <small>{differencePercent == null ? "Both prices required" : `${differencePercent >= 0 ? "+" : "−"}${Math.abs(differencePercent).toFixed(2)}% from reference`}</small>
       </div>
     </div>
-    {children}
+    </details>
+    {children&&<div className="desk-chart-slot">{children}</div>}
     <details className="desk-details">
       <summary>Details</summary>
       <div className="desk-details-grid">

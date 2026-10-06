@@ -21,6 +21,7 @@ import { projectExactRoundDecision, projectServerClock, type LiveSnapshotEnvelop
 import { useLiveSnapshot } from "./useLiveSnapshot";
 import AgentPage from "./AgentPage";
 import EarlyLearningSummary from "./EarlyLearningSummary";
+import {chartTimeAxis} from "./chart-axis";
 
 type Interval = 5 | 15;
 type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
@@ -205,7 +206,10 @@ function LivePage() {
   const bluewater = useApi<BluewaterReport>(bluewaterUrl, 5000, !fixtureMode);
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const fixtureNow = now;
-  const fixtureStart = useMemo(() => Date.now() - 60_000, [interval, fixtureMode]);
+  const fixturePhase=fixtureMode?new URLSearchParams(window.location.search).get("phase"):null;
+  const fixtureStart = useMemo(() => Date.now() - (fixturePhase==="start"?2000:
+    fixturePhase==="middle"?interval*30000:fixturePhase==="close"?interval*60000-5000:60000),
+    [interval,fixtureMode,fixturePhase]);
   const fixtureRound = fixtureMode === "rollover" || fixtureMode === "collector-stalled" || fixtureMode === "loading" || fixtureMode === "request-failure" ? null : {
     id: `DEV-FIXTURE-${interval}-${fixtureStart}`,
     marketId: `DEV-MARKET-${interval}`,
@@ -590,6 +594,7 @@ function LivePage() {
             ? typeof coinbaseDisplayAt === "number" ? coinbaseDisplayAt : Date.parse(coinbaseDisplayAt) : null,
         }}
         refresh={{ pending: snapshotRefreshState.pending, error: snapshotRefreshState.error }}
+        economics={matchedAdvisory}
         onRetry={fixtureMode ? () => { window.location.href = window.location.pathname; } : live.reload}
       >
       <div className="chart-market-layout">
@@ -613,18 +618,24 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
   const measureRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(720);
+  const [chartHeight,setChartHeight]=useState(460);
+  const [textScale,setTextScale]=useState(1);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   useEffect(() => {
     const element = measureRef.current;
     if (!element) return;
-    const update = () => setWidth(Math.max(240, Math.round(element.getBoundingClientRect().width)));
+    const update = () => {
+      setWidth(Math.max(180, Math.round(element.getBoundingClientRect().width)));
+      if(svgRef.current)setChartHeight(Math.max(180,Math.round(svgRef.current.getBoundingClientRect().height)));
+      setTextScale(Math.max(1,parseFloat(getComputedStyle(document.documentElement).fontSize)/16));
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
   const compact = width < 390;
-  const H = 460, left = compact ? 51 : 74, right = compact ? 82 : Math.min(145, Math.max(116, width * .12)), top = 36, bottom = 48;
+  const H = chartHeight, left = compact ? 51 : 74, right = compact ? 20 : 30, top = 36, bottom = 20;
   const plotRight = width - right;
   const nowAt = Date.now();
   const pointTimes = points.map(p => Number(p.at)).filter(at => Number.isFinite(at) && at <= nowAt);
@@ -668,40 +679,46 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
   const endInside = !!round && round.expiryMs >= start && round.expiryMs <= end;
   const nowInside = nowAt >= start && nowAt <= end;
   const nowX = x(nowAt);
-  const nowLabelRightAligned = nowX > plotRight - 116;
+  const nowLabelRightAligned = nowX > plotRight - 36;
   const nowLabelX = nowLabelRightAligned ? Math.max(left + 6, nowX - 5) : Math.min(nowX + 5, plotRight - 4);
-  const anchorLabelY = anchor == null ? top : Math.max(top + 12, Math.min(H - bottom - 4, y(anchor) + 18));
+  const axisTicks=chartTimeAxis(start,end,plotRight-left,textScale);
    return <div ref={measureRef} className="chart-wrap">
     <div className="chart-controls" role="group" aria-label="Chart time window">
       {(["observed", "round", 5, 15] as const).map(mode => <button key={mode} className={activeWindowMode === mode ? "active" : ""} aria-pressed={activeWindowMode === mode} disabled={mode === "round" && !round} onClick={() => { onWindowChange(mode); setSelectedKey(null); }}>{mode === "observed" ? "Observed" : mode === "round" ? "Round window" : `Last ${mode}m`}</button>)}
        <span>{activeWindowMode === "round" ? "Round window · future unobserved" : activeWindowMode === "observed" ? round ? "Active round · future unobserved" : "Recent observations · no active round" : "Rolling archive"}{partialWindow ? " · partial" : ""}</span>
       {active && <button className="return-live" onClick={() => setSelectedKey(null)}>Return to live</button>}
     </div>
-    {samples.length ? <div className="chart-measure">
+    <div className="chart-price-labels">
+      <span>Latest observed BTC <strong>{fmtUsd(latest?.price)}</strong></span>
+      {anchor!=null&&<span>WaterX price to beat <strong>{fmtUsd(anchor)}</strong></span>}
+    </div>
+    {samples.length ? <><div className="chart-measure">
        <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase BTC comparison observations over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
         <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
          {anchor != null && <><rect x={left} y={top} width={plotRight - left} height={Math.max(0, y(anchor) - top)} className="reference-zone-above" /><rect x={left} y={y(anchor)} width={plotRight - left} height={Math.max(0, H - bottom - y(anchor))} className="reference-zone-below" /></>}
          {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); const axisPrice = width < 500 ? new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(price) : fmtUsd(price); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 7} y={py + 4} textAnchor="end" className="axis-label">{axisPrice}</text></g>; })}
-         {(compact ? [0, .5, 1] : [0, 1 / 3, 2 / 3, 1]).map((f, i) => {
-           const at = start + f * (end - start), px = x(at);
-           const timeText = new Date(at).toLocaleTimeString([], compact
-             ? { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }
-             : { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" });
-           return <g key={`time-${i}`}><line x1={px} x2={px} y1={top} y2={H - bottom} className="time-tick" /><text x={px} y={H - 10} textAnchor={i === 0 ? "start" : i === (compact ? 2 : 3) ? "end" : "middle"} className="time-label">{timeText}{compact ? "" : " UTC"}</text></g>;
-         })}
-         {nowInside && <><rect x={nowX} y={top} width={Math.max(0, plotRight - nowX)} height={H - top - bottom} className="future-shade" /><line x1={nowX} x2={nowX} y1={top} y2={H - bottom} className="now-line" /><text x={nowLabelX} y={top + 13} textAnchor={nowLabelRightAligned ? "end" : "start"} className="now-label">NOW · NO PROJECTION</text></>}
-         {anchor != null && <><line x1={left} x2={plotRight} y1={y(anchor)} y2={y(anchor)} className="anchor-line" /><text x={left + 6} y={anchorLabelY} textAnchor="start" className="anchor-label">{`WATERX PRICE TO BEAT ${fmtUsd(anchor)}`}</text></>}
+         {axisTicks.map(tick=><line key={tick.at} x1={x(tick.at)} x2={x(tick.at)} y1={top} y2={H-bottom} className="time-tick" />)}
+          {nowInside && <><rect x={nowX} y={top} width={Math.max(0, plotRight - nowX)} height={H - top - bottom} className="future-shade" /><line x1={nowX} x2={nowX} y1={top} y2={H - bottom} className="now-line" /><text x={nowLabelX} y={top + 13} textAnchor={nowLabelRightAligned ? "end" : "start"} className="now-label">NOW</text></>}
+         {anchor != null && <line x1={left} x2={plotRight} y1={y(anchor)} y2={y(anchor)} className="anchor-line" />}
         {chunks.map((segment, idx) => <g key={idx}>
           {segment.length > 1 && <polygon points={`${x(Number(segment[0].at))},${H - bottom} ${segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} ${x(Number(segment.at(-1)!.at))},${H - bottom}`} className="price-area" />}
           {segment.length > 1 && <polyline points={segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} className="price-line" />}
         </g>)}
-         {latest?.price != null && <g><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="8" className="latest-halo" /><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="4" className="latest-dot" /><text x={plotRight + 7} y={Math.max(top + 9, Math.min(H - bottom - 5, y(latest.price) + 4))} className="latest-label">{fmtUsd(latest.price)}</text></g>}
+         {latest?.price != null && <g><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="8" className="latest-halo" /><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="4" className="latest-dot" /></g>}
         {active?.price != null && <g><line x1={x(Number(active.at))} x2={x(Number(active.at))} y1={top} y2={H - bottom} className="inspect-line" /><circle cx={x(Number(active.at))} cy={y(active.price)} r="5" className="inspect-point" /></g>}
-        {startInside && <><line x1={x(round!.startMs)} x2={x(round!.startMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.startMs) + 4} y={H - 8} className="boundary-label">START</text></>}
-        {endInside && <><line x1={x(round!.expiryMs)} x2={x(round!.expiryMs)} y1={top} y2={H - bottom} className="round-boundary" /><text x={x(round!.expiryMs) - 4} y={H - 8} textAnchor="end" className="boundary-label">CLOSE</text></>}
+        {startInside && <line x1={x(round!.startMs)} x2={x(round!.startMs)} y1={top} y2={H - bottom} className="round-boundary" />}
+        {endInside && <line x1={x(round!.expiryMs)} x2={x(round!.expiryMs)} y1={top} y2={H - bottom} className="round-boundary" />}
         <rect x={left} y={top} width={plotRight - left} height={H - top - bottom} className="chart-hit" tabIndex={0} aria-label="Inspect chart observations with arrow keys" onPointerMove={e => selectAt(e.clientX)} onPointerDown={e => { if (e.pointerType === "touch") selectAt(e.clientX); }} onClick={e => selectAt(e.clientX)} onKeyDown={e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); const index = active ? samples.findIndex(p => inspectedPointKey(p) === selectedKey) : samples.length - 1; const next = Math.min(samples.length - 1, Math.max(0, index + (e.key === "ArrowRight" ? 1 : -1))); setSelectedKey(inspectedPointKey(samples[next])); } }} />
       </svg>
-    </div> : <div className="chart-empty"><Activity size={22} /><strong>No comparison samples in this window</strong><span>Waiting for archived points or a live Coinbase event. Missing observations are not interpolated.</span></div>}
+    </div>
+    <div className="chart-time-axis" aria-label="Observation time ticks" style={{marginLeft:left,marginRight:right}}>
+      {axisTicks.map(tick=><time key={tick.at} dateTime={new Date(tick.at).toISOString()}
+        style={{left:`${tick.fraction*100}%`,transform:tick.align==="left"?"none":tick.align==="right"?"translateX(-100%)":"translateX(-50%)"}}>{tick.label}</time>)}
+    </div>
+    <div className="chart-boundary-row" style={{paddingLeft:left,paddingRight:right}}>
+      <span>{startInside?"START":""}</span><span>{endInside?"CLOSE":""}</span>
+    </div><div className="chart-timezone">All chart times UTC</div>
+    </> : <div className="chart-empty"><Activity size={22} /><strong>No comparison samples in this window</strong><span>Waiting for archived points or a live Coinbase event. Missing observations are not interpolated.</span></div>}
     {active && <div className="sample-inspector" aria-live="polite"><span>INSPECTED OBSERVATION</span><b>{fmtUsd(active.price)}</b><small>{utc(Number(active.at))} · {active.source || "Coinbase"} · event age {ago(active.sourceAt ?? Number(active.at))}</small></div>}
     {points.some(p => p.gap || p.price == null) && <div className="gap-caption">Feed gaps remain blank; no price is inferred. {streamStatus !== "LIVE" && "Live feed reconnecting."}</div>}
   </div>;

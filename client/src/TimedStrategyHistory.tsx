@@ -97,6 +97,14 @@ export default function TimedStrategyHistory({ interval }: Props) {
     return () => { active = false; controller.abort(); };
   }, [interval, retry]);
 
+  return <TimedStrategyHistoryView interval={interval} current={current} older={older}
+    loading={loading} error={error} onRetry={()=>setRetry(value=>value+1)} />;
+}
+
+export function TimedStrategyHistoryView({interval,current,older,loading=false,error="",onRetry}:{
+  interval:Interval;current:HistoryPayload|null;older:HistoryPayload|null;
+  loading?:boolean;error?:string;onRetry?:()=>void;
+}){
   const entries = (current?.entries ?? []).filter(entry => entry.strategyVersion === CURRENT_STRATEGY);
   const oldEntries = (older?.entries ?? []).filter(entry => entry.strategyVersion !== CURRENT_STRATEGY);
   const metrics = current?.metrics;
@@ -105,10 +113,10 @@ export default function TimedStrategyHistory({ interval }: Props) {
     <header className="timed-research-heading">
       <div><span className="research-eyebrow">PROSPECTIVE LOCK RECORD</span><h2 id="timed-history-title">Timed strategy history</h2>
         <p>Exact {interval}m rounds · {CURRENT_STRATEGY}. Results update only from verified, undisputed settlements.</p></div>
-      <button type="button" className="research-retry" onClick={() => setRetry(value => value + 1)} aria-label="Refresh timed strategy history"><RefreshCw size={14} /> Refresh</button>
+      <button type="button" className="research-retry" onClick={onRetry} aria-label="Refresh timed strategy history"><RefreshCw size={14} /> Refresh</button>
     </header>
     {loading && !current ? <div className="research-skeleton" aria-label="Loading timed strategy history"><i /><i /><i /></div> :
-      error && !current ? <div className="research-error" role="status">{error}<button type="button" onClick={() => setRetry(value => value + 1)}>Retry</button></div> :
+      error && !current ? <div className="research-error" role="status">{error}<button type="button" onClick={onRetry}>Retry</button></div> :
         <>
           {error && <p className="research-inline-error" role="status">{error}</p>}
           <div className="history-operational-strip" aria-label="Operational coverage and abstentions">

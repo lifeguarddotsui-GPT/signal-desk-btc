@@ -12,6 +12,7 @@ import {probabilityState,type WaterxDataHealth} from "../../shared/waterx-data-h
 import {observationId} from "./observation-provenance";
 import {observeTimedStrategy,timedSourceUnavailable,stopTimedStrategy,startTimedRecovery,timedStrategyQueueMetrics} from "./timed-decision-coordinator";
 import {timedPoolHealth} from "./timed-db";
+import {acceptLiveTimedObservation} from "./live-observation";
 import {healthyCollectionDelay,collectionTimerDelay,collectionCadence,observeCollectionResponse} from "./collection-cadence";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
@@ -526,37 +527,13 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
       providerSourceAtMs:null,
     };
     refreshHealth.record({interval,roundId:round.id,stage:"IDENTITY_VALIDATION",outcome:"ok"});
-    roundDecisions.discovered(input,Date.parse(observedAt));
-    const receivedAtMs=input.receivedAtMs!;
-    const purchase=(side:WaterxRound["sides"]["up"])=>({
-      status:side.availability,askCents:side.oddsCents,
-      marketObjectId:side.trade?.marketId??null,selection:side.trade?.selection??null});
-    roundDecisions.context(input,{sourceId:"waterx.public.crypto.v1",
-      observationId:observationId(interval,round.id,receivedAtMs),receivedAtMs,
-      providerEventAtMs:null,priceLastChangedAtMs:null,
-      reference:{price:round.anchorPrice,status:round.anchorPrice===null?"unavailable":
-        round.anchorPriceConfirmed?"confirmed":"provisional"},
-      marketId:round.marketId,url:`https://waterx.app/en/predict/market/crypto/${round.slug}/${round.endsAt}`,
-      orderCutoffAtMs:null,probabilityEvidence:input.probabilityUp===null||input.probabilityDown===null?
-        "unavailable":validWaterxProbabilityPair(input.probabilityUp,input.probabilityDown)?"available":"invalid",
-      purchase:{up:purchase(round.sides.up),down:purchase(round.sides.down)}});
     // Publish live progress independently of slow storage and historical reports.
     const evaluatedAt=performance.now();
-    if(input.probabilityUp!==null&&input.probabilityDown!==null)roundDecisions.observe(input,{
-      atMs:Date.parse(input.observedAt),receivedAtMs:input.receivedAtMs??Date.parse(input.observedAt),
-      providerSourceAtMs:null,probabilityUp:input.probabilityUp,probabilityDown:input.probabilityDown,
-      sourceHealthy:true});
+    acceptLiveTimedObservation(input,round,latestComparison());
     refreshHealth.record({interval,roundId:round.id,stage:"READINESS_INPUT",outcome:inputState==="CURRENT"?"ok":"rejected",
       errorClass:inputState==="CURRENT"?null:inputState,
       elapsedMs:performance.now()-evaluatedAt,sourceAgeMs:Date.now()-input.receivedAtMs!});
     earlyLockTimers.arm({intervalMinutes:interval,roundId:round.id,startMs,expiryMs});
-    const comparison=latestComparison();
-    observeTimedStrategy({...input,features:{referenceQuality:round.anchorPriceConfirmed?"confirmed":"provisional",
-      purchaseUp:{status:round.sides.up.availability,askCents:round.sides.up.oddsCents},
-      purchaseDown:{status:round.sides.down.availability,askCents:round.sides.down.oddsCents},
-      comparison:comparison?{price:comparison.price,source:comparison.source,asOf:comparison.asOf}:null,
-      executableQuote:null,settlementRule:"UNVERIFIED_COMPARISON_IS_NOT_SETTLEMENT",
-      marketId:round.marketId,providerUrl:providerUrl(interval,round.endsAt)}});
     if(inputState==="CURRENT"){
       roundDecisions.queued(input,Date.now());
       canonicalLockQueue.enqueue(input);

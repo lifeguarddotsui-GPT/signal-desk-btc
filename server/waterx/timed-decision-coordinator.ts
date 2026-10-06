@@ -1,5 +1,5 @@
 import {timedWindow,type TimedRound} from "../../shared/timed-decision";
-import {captureTimedDecision,type TimedInput} from "./timed-decision-store";
+import {captureTimedDecision,loadTimedDecision,type TimedInput} from "./timed-decision-store";
 import {roundDecisions} from "./round-decision";
 import {createWaterxBackgroundQueue} from "./background-queue";
 import {refreshErrorClass} from "./refresh-health";
@@ -17,7 +17,11 @@ import {researchPool} from "./research-store";
 import {gateResearchHealth,recoverGateResearch} from "./gate-research-queue";
 const enqueuedAt=new WeakMap<TimedInput,number>();
 const persistenceFailures=new Map<string,number>();
-const active=new Map<number,{input:TimedInput;timers:ReturnType<typeof setTimeout>[]}>();
+export type GateScheduler={schedule:(callback:()=>void,delayMs:number)=>()=>void};
+const realGateScheduler:GateScheduler={schedule(callback,delayMs){
+  const timer=setTimeout(callback,delayMs);timer.unref?.();return ()=>clearTimeout(timer);
+}};
+const active=new Map<number,{input:TimedInput;timers:(()=>void)[]}>();
 let recoveryTimer:ReturnType<typeof setInterval>|null=null,recovering=false;
 let recovered=0,recoveryFailures=0,lastRecoveryAtMs:number|null=null;
 let skippedRecoveryAtGate=0,lastRecoveryDurationMs:number|null=null,lastRecoveryRows=0;
@@ -41,7 +45,7 @@ const enqueue=(input:TimedInput)=>{
   input={...input,features:{...input.features,persistenceFailureCount:Math.max(n,Number(input.features?.persistenceFailureCount??0))}};
   enqueuedAt.set(input,performance.now());queue.enqueue(input);
 };
-export function observeTimedStrategy(input:TimedInput){
+export function observeTimedStrategy(input:TimedInput,scheduler:GateScheduler=realGateScheduler){
    const acceptedAt=Date.now();
    const toObservation=(v:TimedInput):IntervalObservation=>{
      const cmp=v.features?.comparison as {price?:number;asOf?:string}|undefined;
@@ -62,23 +66,23 @@ export function observeTimedStrategy(input:TimedInput){
     if((input.receivedAtMs??0)>=(previous.input.receivedAtMs??0))
       previous.input={...input,discoveredAtMs:previous.input.discoveredAtMs};
   }else{
-    previous?.timers.forEach(clearTimeout);
+    previous?.timers.forEach(cancel=>cancel());
      recordEarlyDelivery(input.intervalMinutes,input.roundId,"ROUND_DISCOVERY_ELAPSED_UNQUALIFIED_CLOCK",
        Math.max(0,Date.now()-input.startMs),"ok");
      recordEarlyDelivery(input.intervalMinutes,input.roundId,"FIRST_PROVIDER_RECEIPT_ELAPSED_UNQUALIFIED_CLOCK",
        input.receivedAtMs==null?null:Math.max(0,input.receivedAtMs-input.startMs),"ok");
-    const entry={input:{...input,discoveredAtMs:input.discoveredAtMs??Date.now()},timers:[] as ReturnType<typeof setTimeout>[]};active.set(input.intervalMinutes,entry);
+    const entry={input:{...input,discoveredAtMs:input.discoveredAtMs??Date.now()},timers:[] as (()=>void)[]};active.set(input.intervalMinutes,entry);
     const window=timedWindow(input.intervalMinutes);
     const hard=input.startMs+window.hardSeconds*1000;
     for(const at of Array.from(new Set([hard,
       ...earlyHorizons(input.intervalMinutes).map(h=>input.startMs+h*1000)]))){
       if(at>Date.now()){
          const delay=at-Date.now(),scheduled=performance.now();
-         const timer=setTimeout(()=>{
+         const cancel=scheduler.schedule(()=>{
            recordEarlyDelivery(input.intervalMinutes,input.roundId,"SCHEDULER_JITTER",Math.max(0,performance.now()-scheduled-delay),"ok");
            enqueue(entry.input);
          },delay);
-        timer.unref?.();entry.timers.push(timer);
+         entry.timers.push(cancel);
       }
     }
   }
@@ -119,7 +123,14 @@ export async function recoverTimedSchedules(db=researchPool,now=Date.now()){
     }else if(previous&&previous.input.startMs>input.startMs){
       // Finalize a missed older persisted round without replacing the active interval.
       enqueue(input);
-    }else observeTimedStrategy(input);
+    }else {
+      // Recover the committed choice even before upstream odds recover.
+      // Historical observations must not be advertised as fresh live odds.
+      roundDecisions.discovered(input,now);
+      const saved=await loadTimedDecision(input,db);
+      if(saved)roundDecisions.timedSaved(input,saved);
+      observeTimedStrategy(input);
+    }
     recovered++;
   }
   lastRecoveryAtMs=now;
@@ -165,7 +176,7 @@ export function startTimedRecovery(){
 }
 export function stopTimedStrategy(){
   if(recoveryTimer)clearInterval(recoveryTimer);recoveryTimer=null;
-  for(const entry of Array.from(active.values()))entry.timers.forEach(clearTimeout);
+  for(const entry of Array.from(active.values()))entry.timers.forEach(cancel=>cancel());
   active.clear();
 }
 export const timedStrategyQueueMetrics=(now=Date.now())=>({...queue.metrics(now),

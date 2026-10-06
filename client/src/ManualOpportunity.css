@@ -1,7 +1,52 @@
+.chart-time-axis { position: relative; min-height: 1.6rem; margin-top: .4rem; font-size: .75rem; font-variant-numeric: tabular-nums; }
+.chart-time-axis time { position: absolute; top: 0; white-space: nowrap; }
+.chart-boundary-row { display: flex; justify-content: space-between; gap: 1rem; min-height: 1.25rem; font-size: .6875rem; color: #a5b9ae; }
+.chart-timezone { font-size: .6875rem; color: #91a79d; margin: .3rem 0 .7rem; }
+.chart-price-labels { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem 1rem; font-size: .75rem; margin: .7rem 0; }
+.chart-price-labels span { display: flex; flex-wrap: wrap; gap: .3rem .6rem; color: #91a79d; }
+.chart-price-labels strong { color: #e6eee5; font-weight: 600; }
+.desk-chart-slot .chart-controls { display: flex; flex-wrap: wrap; gap: .4rem; }
 .manual-opportunity > .chart-market-layout {
   grid-template-columns: minmax(0, 1fr);
   margin: 0;
   border-top: 1px solid var(--desk-border, rgba(160, 196, 189, .18));
+}
+.desk-section-title { grid-column: 1 / -1; margin: 0 0 .6rem; font-size: .6875rem; text-transform: uppercase; letter-spacing: .08em; color: var(--desk-muted); }
+.desk-decision-card > .desk-section-title { grid-column: 1 / -1; }
+.desk-primary-card { min-width: 0; }
+.desk-price-details { min-width: 0; border-top: 1px solid var(--desk-line); font-size: .75rem; }
+.manual-opportunity.has-chart .desk-decision-card { grid-template-columns: minmax(0,1fr); gap: .5rem; }
+.manual-opportunity.has-chart .desk-decision-side { display: flex; flex-direction: row; justify-content: space-between; align-items: flex-end; min-width: 0; }
+.manual-opportunity.has-chart .desk-next-evaluation { min-width: 0; text-align: left; }
+.desk-price-details .desk-price-strip { grid-template-columns: minmax(0,1fr); }
+.desk-price-details .desk-price-item,.desk-price-details .desk-price-difference { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .3rem .75rem; padding: .65rem .9rem; border-left: 0; border-bottom: 1px solid var(--desk-line); }
+.desk-price-details .desk-price-item > span,.desk-price-details .desk-price-difference > span { font-size: .7rem; white-space: normal; }
+.desk-price-details .desk-price-item strong,.desk-price-details .desk-price-difference strong { font-size: 1rem; overflow-wrap: anywhere; white-space: normal; }
+.desk-price-details .desk-price-item small,.desk-price-details .desk-price-difference small { grid-column: 1/-1; font-size: .65rem; white-space: normal; overflow: visible; text-overflow: clip; }
+.desk-price-details > summary { padding: .65rem .9rem; cursor: pointer; color: #b6c7bd; }
+.desk-probability-source small,.desk-purchase-prices { overflow-wrap: anywhere; white-space: normal; }
+.desk-price-item small,.desk-price-difference small { white-space: normal; text-overflow: clip; overflow: visible; }
+.desk-chart-slot { min-width: 0; }
+.desk-purchase-prices { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .4rem 1rem; font-size: .6875rem; padding-top: .6rem; }
+.desk-purchase-prices span { color: var(--desk-muted); }
+.desk-economics { padding: .75rem; border-top: 1px solid var(--desk-line); font-size: .75rem; }
+.desk-economics summary { cursor: pointer; }
+.desk-chart-slot .legend-row,.desk-chart-slot .chart-foot,.desk-chart-slot .legend-stamp { flex-wrap: wrap; min-width: 0; overflow-wrap: anywhere; gap: .5rem; }
+@media (min-width: 901px) {
+  .live-page .manual-opportunity.has-chart { display: grid; grid-template-columns: minmax(0,2fr) minmax(280px,1fr); grid-template-rows: min-content min-content 1fr; grid-template-areas: "chart primary" "chart prices" "chart details"; align-content: start; }
+  .manual-opportunity.has-chart .desk-primary-card { grid-area: primary; }
+  .manual-opportunity.has-chart > .desk-price-details { grid-area: prices; }
+  .manual-opportunity.has-chart > .desk-price-details > summary { display: none; }
+  .manual-opportunity.has-chart > .desk-details { grid-area: details; align-self: start; }
+  .manual-opportunity.has-chart > .desk-chart-slot { grid-area: chart; border-right: 1px solid var(--desk-line); }
+  .live-page .manual-opportunity.has-chart .desk-chart-slot > .chart-market-layout { display: block; margin: 0; }
+  .live-page .manual-opportunity.has-chart .desk-chart-slot .chart-panel { width: 100%; min-width: 0; }
+  .manual-opportunity.has-chart .desk-probability { display: flex; flex-direction: column; align-items: flex-start; gap: .3rem; }
+  .manual-opportunity.has-chart .desk-probability strong { font-size: 2rem; margin-left: 0; }
+}
+@media (max-width: 900px) {
+  .live-page .manual-opportunity.has-chart .desk-chart-slot > .chart-market-layout { display: block; margin: 0; }
+  .live-page .manual-opportunity.has-chart .desk-chart-slot .chart-panel { width: 100%; min-width: 0; }
 }
 .manual-opportunity.compact-decision {
   --desk-line: rgba(133, 163, 153, .2);

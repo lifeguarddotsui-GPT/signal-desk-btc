@@ -756,3 +756,17 @@ mtime_ms = 1791325079888
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/f2073729-adca-403f-875d-648e974ce293/e95d37a3-9446-4e9b-8f1e-03b6cbc6b4fe"
 storage_version_token = "1791325086087328"
 content_type = "text/html"
+
+[[outputs]]
+id = "BYpvC3wnHyoEIu1LmbaaW"
+uri = "file://reports/odds-sidebar-repair/acceptance.html"
+type = "html"
+title = "Bluewater repair acceptance report"
+description = "640 passing tests; synthetic lean-to-lock/restart/History evidence; responsive checks; exact build identities and unresolved live execution blockers."
+logical_id = "b4a5f975-beeb-49d4-956a-200ec6be2db6"
+content_hash = "sha256:4a16d83025ec7b845cfc6bdf8c454682f809cc6f0ee0be094a364672408f014e"
+size = 719826
+mtime_ms = 1791328773525
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/b4a5f975-beeb-49d4-956a-200ec6be2db6/7640f65f-6c4d-48be-b73b-d362e843d4cf"
+storage_version_token = "1791328821064734"
+content_type = "text/html"

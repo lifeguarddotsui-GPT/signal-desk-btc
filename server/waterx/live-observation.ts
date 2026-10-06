@@ -1,0 +1,36 @@
+import {roundDecisions} from "./round-decision";
+import {observationId} from "./observation-provenance";
+import {validWaterxProbabilityPair} from "../../shared/round-decision";
+import {observeTimedStrategy,type GateScheduler} from "./timed-decision-coordinator";
+import type {TimedInput} from "./timed-decision-store";
+import type {WaterxRound} from "./types";
+
+/** The production ingestion boundary, also used by isolated provider replays.
+ * Publishes continuous market evidence before optional storage/research work.
+ * Only the existing timed transaction can turn this evidence into a lock. */
+export function acceptLiveTimedObservation(input:TimedInput,round:WaterxRound,
+  comparison:{price:number;source:string;asOf:string}|null,scheduler?:GateScheduler){
+  const receivedAtMs=input.receivedAtMs!;
+  roundDecisions.discovered(input,Date.parse(input.observedAt));
+  const purchase=(side:WaterxRound["sides"]["up"])=>({
+    status:side.availability,askCents:side.oddsCents,
+    marketObjectId:side.trade?.marketId??null,selection:side.trade?.selection??null});
+  roundDecisions.context(input,{sourceId:"waterx.public.crypto.v1",
+    observationId:observationId(input.intervalMinutes,round.id,receivedAtMs),receivedAtMs,
+    providerEventAtMs:null,priceLastChangedAtMs:null,
+    reference:{price:round.anchorPrice,status:round.anchorPrice===null?"unavailable":
+      round.anchorPriceConfirmed?"confirmed":"provisional"},
+    marketId:round.marketId,url:`https://waterx.app/en/predict/market/crypto/${round.slug}/${round.endsAt}`,
+    orderCutoffAtMs:null,probabilityEvidence:input.probabilityUp===null||input.probabilityDown===null?
+      "unavailable":validWaterxProbabilityPair(input.probabilityUp,input.probabilityDown)?"available":"invalid",
+    purchase:{up:purchase(round.sides.up),down:purchase(round.sides.down)}});
+  if(input.probabilityUp!==null&&input.probabilityDown!==null)roundDecisions.observe(input,{
+    atMs:Date.parse(input.observedAt),receivedAtMs,providerSourceAtMs:null,
+    probabilityUp:input.probabilityUp,probabilityDown:input.probabilityDown,sourceHealthy:true});
+  observeTimedStrategy({...input,features:{...input.features,
+    referenceQuality:round.anchorPriceConfirmed?"confirmed":"provisional",
+    purchaseUp:{status:round.sides.up.availability,askCents:round.sides.up.oddsCents},
+    purchaseDown:{status:round.sides.down.availability,askCents:round.sides.down.oddsCents},
+    comparison,executableQuote:null,settlementRule:"UNVERIFIED_COMPARISON_IS_NOT_SETTLEMENT",
+    marketId:round.marketId,providerUrl:`https://waterx.app/en/predict/market/crypto/${round.slug}/${round.endsAt}`}},scheduler);
+}

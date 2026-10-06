@@ -1,15 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Activity, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Check, ChevronDown, CircleHelp, Clock3, LockKeyhole, Pause, RefreshCw, Shield, ShieldCheck, Wallet, X } from "lucide-react";
+import { AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Check, Clock3, LockKeyhole, Pause, RefreshCw, Shield, ShieldCheck, Wallet, X } from "lucide-react";
 import { getWallets, type WalletAccount } from "@mysten/wallet-standard";
 import { agentPolicySchema, defaultAgentPolicy, policySummary, type AgentPolicy } from "../../shared/agent-policy";
-import { agentDate, asErrorMessage, changePolicyLimitMode, copyPolicy, policyAmountInputValue, policyValueFromInput } from "./agent-format";
+import { agentDate, asErrorMessage, changePolicyLimitMode, copyPolicy, paperCapitalFromInput, policyAmountInputValue, policyValueFromInput } from "./agent-format";
 import AgentCurrentRound from "./AgentCurrentRound";
 import AgentFundingPreview from "./AgentFundingPreview";
+import GuidedAgentSetup from "./GuidedAgentSetup";
 
 type Paper = { startingCents: number; availableCents: number; committedCents: number; turnoverCents: number; realizedPnlCents: number; highWaterCents: number; consecutiveLosses: number; targetCents: number | null; startedAt: number | null };
 type LedgerItem = { id: string; event: string; at: number | string; details: unknown };
 type AgentState = { owner: string; policy: AgentPolicy; policyVersion: number; status: "PAUSED" | "SHADOW" | "LOSS_STOP" | "TARGET_REACHED"; accountId: string | null; delegateAddress: string | null; delegateExpiresAtMs: number | null; paper: Paper | null; ledger: LedgerItem[]; summary: string[]; blockers: string[]; balances: unknown; walletSessionExpiresAtMs?: number | null };
-type Capabilities = { developmentOnly: boolean; sdkVersion: string; network: "mainnet"; globalExecutionDisabled: boolean; mainnetEnabled: boolean; blockers: string[]; defaultPolicy: AgentPolicy; permissions: { prediction: number; account: number }; config: { status: "VERIFIED_IDENTITY_ONLY" | "UNAVAILABLE" | string; reason: string; decimals?: number; marketSemanticsVerified?: false; settlements?: unknown; packages?: unknown } };
+type Capabilities = { developmentOnly: boolean; sdkVersion: string; network: "mainnet"; globalExecutionDisabled: boolean; mainnetEnabled: boolean; blockers: string[]; defaultPolicy: AgentPolicy; capabilities?: { shadow?: boolean; arming?: boolean; execution?: boolean; betaAuthorization?: boolean }; permissions: { prediction: number; account: number }; config: { status: "VERIFIED_IDENTITY_ONLY" | "UNAVAILABLE" | string; reason: string; decimals?: number; marketSemanticsVerified?: false; settlements?: unknown; packages?: unknown } };
 type OwnerTransaction = { transaction: string; description: string; network: "mainnet"; permissions: { account: number; prediction: number } };
 type WalletLike = { name: string; icon?: string; chains?: string[]; features?: Record<string, { connect?: () => Promise<{ accounts?: WalletAccount[] }>; signPersonalMessage?: (input: { message: Uint8Array; account: WalletAccount; chain?: string }) => Promise<{ signature: string; bytes?: string }> } | undefined>; accounts?: WalletAccount[] };
 type WalletIdentity = { address: string; wallet: WalletLike | null; account: WalletAccount | null; generation: number };
@@ -83,7 +84,7 @@ function AgentPage() {
   const [redeemMinimum, setRedeemMinimum] = useState("");
   const [coinIds, setCoinIds] = useState("");
   const [paperCapital, setPaperCapital] = useState("");
-  const [settlementInfo, setSettlementInfo] = useState<{ coinType: string; network: string; decimals?: number } | null>(null);
+  const [settlementInfo, setSettlementInfo] = useState<{ coinType: string; network: string; decimals?: number; conversionAvailable?: boolean; collateral?: string } | null>(null);
   const [pendingTx, setPendingTx] = useState<OwnerTransaction | null>(null);
   const [pendingAction, setPendingAction] = useState("");
   const [pendingOwner, setPendingOwner] = useState("");
@@ -94,7 +95,6 @@ function AgentPage() {
   const [compoundingConfirmed, setCompoundingConfirmed] = useState(false);
   const [walletRecovery, setWalletRecovery] = useState("");
   const [pendingActionType, setPendingActionType] = useState("");
-  const [configInfoOpen, setConfigInfoOpen] = useState(false);
   const [accounts, setAccounts] = useState<{ accountId: string }[]>([]);
   const [lastUpdated, setLastUpdated] = useState(0);
   const requestSeq = useRef(0);
@@ -129,6 +129,13 @@ function AgentPage() {
       }
       rememberSessionExpiry(next.walletSessionExpiresAtMs);
       const previousVersion = stateRef.current?.policyVersion;
+      if (previousVersion != null && previousVersion !== next.policyVersion) {
+        setEveryRoundAck(false);
+        setEdgeOffAck(false);
+        setZeroReserveAck(false);
+        setExperimentalConfirmed(false);
+        setCompoundingConfirmed(false);
+      }
       setState(next);
       if (!dirtyPolicyRef.current) {
          setPolicyDraft(completePolicy(next.policy));
@@ -180,6 +187,9 @@ function AgentPage() {
     setOwnerChoice(false);
     setExperimentalConfirmed(false);
     setCompoundingConfirmed(false);
+    setEveryRoundAck(false);
+    setEdgeOffAck(false);
+    setZeroReserveAck(false);
     setAccounts([]);
     setSettlementInfo(null);
     setLastUpdated(0);
@@ -348,11 +358,16 @@ function AgentPage() {
     finally { setBusy(""); }
   };
   const control = async (action: "PAUSE" | "ARM_SHADOW" | "STOP_GOAL") => {
+    const initialPaperCapital = action === "ARM_SHADOW" && !state?.paper ? paperCapitalFromInput(paperCapital) : null;
+    if (action === "ARM_SHADOW" && !state?.paper && initialPaperCapital == null) {
+      setPageError("Set a positive paper-ledger starting amount from $0.01 to $1,000,000. This initializes shadow simulation only and does not move funds.");
+      return;
+    }
     setBusy(action); setPageError(""); setNotice("");
     try {
-      const result = await request<AgentState>("/control", "POST", { action, ...(action === "ARM_SHADOW" && paperCapital !== "" ? { paperCapitalCents: centsFrom(paperCapital) } : {}), acknowledged: action !== "ARM_SHADOW" || ((policy.frequency !== "EVERY_ELIGIBLE_ROUND" || everyRoundAck) && (policy.edgeEnabled || edgeOffAck) && (policy.reserveCents !== 0 || zeroReserveAck)), ...(!policy.edgeEnabled ? { edgeOffConfirmed: edgeOffAck } : {}), ...(policy.reserveCents === 0 ? { zeroReserveConfirmed: zeroReserveAck } : {}) }, identityRef.current);
+      const result = await request<AgentState>("/control", "POST", { action, ...(action === "ARM_SHADOW" && !state?.paper ? { paperCapitalCents: initialPaperCapital } : {}), acknowledged: action !== "ARM_SHADOW" || ((policy.frequency !== "EVERY_ELIGIBLE_ROUND" || everyRoundAck) && (policy.edgeEnabled || edgeOffAck) && (policy.reserveCents !== 0 || zeroReserveAck)), ...(!policy.edgeEnabled ? { edgeOffConfirmed: edgeOffAck } : {}), ...(policy.reserveCents === 0 ? { zeroReserveConfirmed: zeroReserveAck } : {}) }, identityRef.current);
       rememberSessionExpiry(result.walletSessionExpiresAtMs);
-      setState(result); setPolicyDraft(completePolicy(result.policy)); setNotice(action === "ARM_SHADOW" ? "Shadow observation requested. Mainnet execution remains blocked." : action === "PAUSE" ? "Persistent pause requested." : "Goal stop requested.");
+       setState(result); setPolicyDraft(completePolicy(result.policy)); setNotice(action === "ARM_SHADOW" ? "Shadow observation request acknowledged by the service." : action === "PAUSE" ? "Persistent pause requested." : "Goal stop requested.");
       if (action === "ARM_SHADOW") { setEveryRoundAck(false); setEdgeOffAck(false); setZeroReserveAck(false); }
     } catch (error) { setPageError(asErrorMessage(error)); }
     finally { setBusy(""); }
@@ -392,30 +407,57 @@ function AgentPage() {
   };
   const accountOptions = async () => {
     setBusy("accounts");
-    try { const result = await request<{ accounts: { accountId: string }[]; settlementCoinType: string; network: string; decimals?: number }>("/accounts", "POST", {}, identityRef.current); setAccounts(result.accounts); setSettlementInfo({ coinType: result.settlementCoinType, network: result.network, decimals: result.decimals }); setNotice(result.accounts.length ? `${result.accounts.length} agent account${result.accounts.length === 1 ? "" : "s"} returned. Select one below.` : "No agent accounts were returned."); }
+    try { const result = await request<{ accounts: { accountId: string }[]; settlementCoinType: string; network: string; decimals?: number; conversionAvailable?: boolean; collateral?: string }>("/accounts", "POST", {}, identityRef.current); setAccounts(result.accounts); setSettlementInfo({ coinType: result.settlementCoinType, network: result.network, decimals: result.decimals, conversionAvailable: result.conversionAvailable, collateral: result.collateral }); setNotice(result.accounts.length ? `${result.accounts.length} agent account${result.accounts.length === 1 ? "" : "s"} returned. Select one below.` : "No agent accounts were returned."); }
     catch (error) { setPageError(asErrorMessage(error)); }
     finally { setBusy(""); }
   };
   const setAccount = async (accountId: string) => {
     setBusy("account");
-    try { const result = await request<AgentState>("/account", "POST", { accountId }, identityRef.current); rememberSessionExpiry(result.walletSessionExpiresAtMs); setState(result); setPolicyDraft(completePolicy(result.policy)); setDirtyPolicy(false); setNotice("Agent account selected."); }
+    try { const result = await request<AgentState>("/account", "POST", { accountId }, identityRef.current); rememberSessionExpiry(result.walletSessionExpiresAtMs); setEveryRoundAck(false); setEdgeOffAck(false); setZeroReserveAck(false); setExperimentalConfirmed(false); setCompoundingConfirmed(false); setState(result); setPolicyDraft(completePolicy(result.policy)); setDirtyPolicy(false); setNotice("Agent account selected."); }
     catch (error) { setPageError(asErrorMessage(error)); }
     finally { setBusy(""); }
   };
   const cap = capabilities;
-  const blockers = Array.from(new Set([...(cap?.blockers ?? []), ...(state?.blockers ?? [])]));
   const status = state?.status ?? "NOT LOADED";
   const accountId = state?.accountId;
   const simulationPassed = !!simulation?.success && simulation.checksEnabled && simulation.network === "mainnet";
+  const setupBlocker = !isAuthorized
+    ? "Connect the owner wallet on Sui mainnet."
+    : !cap
+      ? "Capability report unavailable; shadow arming and live permissions cannot be verified."
+      : cap.capabilities?.shadow !== true
+        ? "Shadow arming is disabled in this deployment; live execution remains separately unavailable."
+        : status === "SHADOW"
+          ? "Shadow session already active; pause new submissions and continue reconciliation before any restart."
+          : status === "LOSS_STOP" || status === "TARGET_REACHED"
+            ? "Paper goal is stopped; the service must close it before another shadow goal can start."
+            : "Live order adapter, signer, and effective permissions are not exposed as verified capabilities.";
+  const technicalBlockers = Array.from(new Set([...(cap?.blockers ?? []), ...(state?.blockers ?? [])]));
+  const capabilitySummary = [
+    `Development only: ${cap ? String(cap.developmentOnly) : "not reported"}`,
+    `Mainnet execution enabled: ${cap ? String(cap.mainnetEnabled) : "not reported"}`,
+    `Global execution disabled: ${cap ? String(cap.globalExecutionDisabled) : "not reported"}`,
+    `Account / prediction permissions: ${cap ? `${cap.permissions.account} / ${cap.permissions.prediction}` : "not reported"}`,
+    `Configuration: ${cap?.config.status ?? "not reported"}${cap?.config.reason ? ` — ${cap.config.reason}` : ""}`,
+    "Order adapter, signer, reservation, simulation, and uncertain-submission recovery are not verified by this capability contract.",
+  ];
+  const retryCapabilities = () => {
+    setBusy("capabilities");
+    request<Capabilities>("/capabilities").then(data => {
+      setCapabilities(data);
+      if (!dirtyPolicyRef.current) setPolicyDraft(completePolicy(data.defaultPolicy));
+      setPageError("");
+    }).catch(error => setPageError(asErrorMessage(error, "Agent capabilities are unavailable."))).finally(() => setBusy(""));
+  };
 
   return <div className="page agent-page">
     <header className="agent-mast">
-      <div><div className="eyebrow">BLUEWATERAI / EXECUTION-FIRST MAINNET BETA</div><h1>Operational view.<em> Authority stays yours.</em></h1><p>Inspect current service state, review explicit policy limits, and simulate owner actions before a transaction payload is prepared.</p></div>
+      <div><div className="eyebrow">BLUEWATERAI / READ-ONLY ROUND RESEARCH DESK</div><h1>Operational view.<em> Authority stays yours.</em></h1><p>Inspect current service state, review explicit policy limits, and simulate owner actions before a transaction payload is prepared.</p></div>
       <div className="agent-mast-badge"><span className="agent-pulse" />MAINNET · DEVELOPMENT BETA</div>
     </header>
 
     <section className="agent-safety-strip">
-      <ShieldCheck size={19} /><div><strong>IDENTITY IS NOT AUTHORITY</strong><span>Wallet connection authenticates the owner only. This console never starts trading, signs, or funds automatically; balances, fills, and profit appear only if the service reports them.</span></div><span className="agent-permission">{cap?.globalExecutionDisabled ? "GLOBAL EXECUTION DISABLED" : cap?.mainnetEnabled ? "MAINNET ENABLED · NOT A LIVE CLAIM" : "EXECUTION STATUS NOT VERIFIED"}</span>
+      <ShieldCheck size={19} /><div><strong>IDENTITY IS NOT AUTHORITY</strong><span>Wallet connection authenticates the owner only. This console never starts trading, signs, or funds automatically; balances, fills, and profit appear only if the service reports them.</span></div>
     </section>
 
     <div className="agent-overview">
@@ -423,7 +465,6 @@ function AgentPage() {
         <div className="agent-section-top"><span className="agent-kicker">CONTROL STATE</span><span className={`agent-status ${status.toLowerCase()}`}><i />{status.replace("_", " ")}</span></div>
         <div className="agent-status-main"><strong>{isAuthorized ? "OWNER SESSION · MAINNET IDENTITY" : "Owner session not connected"}</strong><p>{isAuthorized ? `Authenticated owner ${shortAddress(address)} · session expires ${agentDate(lastSessionExpiryMs)}. Identity does not create an execution permission.` : "The public console and current capabilities remain available. Connect to view owner-specific agent state."}</p></div>
         <div className="agent-actions">
-          <button className="agent-primary" disabled title={cap?.globalExecutionDisabled ? "The capability endpoint reports global execution disabled." : "This console does not provide a live execution start action."}><Activity size={15} /> Execution is not started here</button>
           <button className="agent-pause" disabled={!isAuthorized || !state || !!busy || status === "PAUSED"} onClick={() => void control("PAUSE")}><Pause size={15} /> Pause</button>
           {isAuthorized ? <button className="agent-logout" disabled={!!busy} onClick={() => void logout()}><X size={15} /> Disconnect</button> : <div className="agent-wallet-picker"><Wallet size={15} /><select aria-label="Connect compatible Sui mainnet wallet" value="" disabled={!wallets.length || !!busy} onChange={e => { const selected = wallets[Number(e.target.value)]; if (selected) void connectWallet(selected); }}><option value="">{wallets.length ? "Connect wallet" : "No wallet-standard wallet detected"}</option>{wallets.map((item, i) => <option key={`${item.name}-${i}`} value={i}>{item.name}</option>)}</select></div>}
         </div>
@@ -449,7 +490,50 @@ function AgentPage() {
     <div className="agent-columns">
       <main className="agent-main-column">
         <section className="agent-card agent-policy-card">
-          <div className="agent-card-heading"><div><span className="agent-kicker">01 / AUTHORITY BOUNDARY</span><h2>Policy surface</h2><p>Each control is independent. Sizing and compounding are saved policy intent only; they do not generate hypothetical trades before adapter verification.</p></div><span className={dirtyPolicy ? "agent-dirty" : "agent-saved"}>{dirtyPolicy ? "UNSAVED PREVIEW" : isAuthorized ? `SAVED · V${state?.policyVersion ?? "—"}` : "PUBLIC PREVIEW"}</span></div>
+          <div className="agent-card-heading"><div><span className="agent-kicker">01 / BOUNDED SESSION</span><h2>Guided agent setup</h2><p>Short, explicit setup for a finite BTC-round session. Existing owner identity, simulation, funding and withdrawal safeguards remain unchanged.</p></div><span className={dirtyPolicy ? "agent-dirty" : "agent-saved"}>{dirtyPolicy ? "UNSAVED REVIEW" : isAuthorized ? `SAVED · V${state?.policyVersion ?? "—"}` : "PUBLIC PREVIEW"}</span></div>
+          <GuidedAgentSetup
+            policy={policy}
+            onPolicyChange={changePolicy}
+            authorized={isAuthorized}
+            ownerAddress={address}
+            network={accountIsMainnet(selectedAccount) ? "Sui mainnet" : "Not verified"}
+            accountAddress={selectedAccount?.address ?? ""}
+            walletName={wallet?.name ?? ""}
+            wallets={wallets}
+            onConnect={index => { const candidate = wallets[index]; if (candidate) void connectWallet(candidate); }}
+            supportedAsset={settlementInfo ? `${settlementInfo.coinType} · ${settlementInfo.network}${settlementInfo.decimals == null ? "" : ` · ${settlementInfo.decimals} decimals`}${settlementInfo.collateral ? ` · collateral ${settlementInfo.collateral}` : ""}${settlementInfo.conversionAvailable === false ? " · wallet conversion unavailable" : ""}` : null}
+            onRefreshAsset={() => void accountOptions()}
+            status={status}
+            busy={busy}
+            dirty={dirtyPolicy}
+            onSave={() => void updatePolicy()}
+            onStartShadow={() => void control("ARM_SHADOW")}
+            onPause={() => void control("PAUSE")}
+            paperExists={!!state?.paper}
+            paperCapital={paperCapital}
+            onPaperCapitalChange={setPaperCapital}
+            experimentalConfirmed={experimentalConfirmed}
+            onExperimentalConfirmedChange={setExperimentalConfirmed}
+            compoundingConfirmed={compoundingConfirmed}
+            onCompoundingConfirmedChange={setCompoundingConfirmed}
+            everyRoundAck={everyRoundAck}
+            onEveryRoundAckChange={setEveryRoundAck}
+            edgeOffAck={edgeOffAck}
+            onEdgeOffAckChange={setEdgeOffAck}
+            zeroReserveAck={zeroReserveAck}
+            onZeroReserveAckChange={setZeroReserveAck}
+            shadowAvailable={cap?.capabilities?.shadow === true}
+            reviewGeneration={`${identityRef.current.generation}:${state?.accountId ?? "no-account"}`}
+            onRetryCapabilities={retryCapabilities}
+            capabilitiesAvailable={!!cap}
+            blocker={setupBlocker}
+            technicalBlockers={technicalBlockers}
+            capabilitySummary={capabilitySummary}
+          />
+          <details className="guided-advanced policy-technical-controls">
+            <summary>Advanced · legacy technical policy controls</summary>
+            <div className="guided-advanced-content">
+          <div className="agent-card-heading"><div><span className="agent-kicker">OWNER-APPROVED POLICY</span><h2>Technical policy controls</h2><p>Saved policy intent is shown as-is. Changes here require explicit review and saving; no previously approved broader settings are silently reset.</p></div><span className={dirtyPolicy ? "agent-dirty" : "agent-saved"}>{dirtyPolicy ? "UNSAVED PREVIEW" : isAuthorized ? `SAVED · V${state?.policyVersion ?? "—"}` : "PUBLIC PREVIEW"}</span></div>
           <fieldset className="agent-fields">
             <div className="agent-control-grid">
               <Field label="Policy network" help={`Capabilities report ${cap?.network ?? "network not loaded"}. Policy network is not an execution grant.`}><select value={policy.network} disabled><option value="mainnet">Sui mainnet · policy configuration</option><option value="testnet">Sui testnet · policy configuration</option></select></Field>
@@ -490,7 +574,7 @@ function AgentPage() {
            <section className="agent-summary"><div><span className="agent-kicker">POLICY SUMMARY</span><span className="agent-summary-note">{dirtyPolicy ? "UNSAVED DRAFT" : "CURRENT VIEW"}</span></div><ul>{policySummaries.map((line, i) => <li key={i}>{line}</li>)}</ul><p className="agent-unverified-copy">Limits below are policy intent, not a balance, quote, fill, or promise of outcome. Review every limit before saving. Funding never changes saved risk authority or compounds automatically.</p></section>
            {(policy.signalSource === "EXPERIMENTAL_QUALIFICATION_GATES" || policy.compound) && <div className="agent-confirm-group">
              <span className="agent-kicker">EXPLICIT SAVE CONSENT</span>
-             {policy.signalSource === "EXPERIMENTAL_QUALIFICATION_GATES" && <label><input type="checkbox" checked={experimentalConfirmed} onChange={e => setExperimentalConfirmed(e.target.checked)} /> I understand experimental qualification gates are uncalibrated research, have no profitability claim, and I explicitly choose this strategy.</label>}
+             {policy.signalSource === "EXPERIMENTAL_QUALIFICATION_GATES" && <label><input type="checkbox" checked={experimentalConfirmed} onChange={e => setExperimentalConfirmed(e.target.checked)} /> I understand this qualification-gates strategy is uncalibrated and I explicitly choose it.</label>}
              {policy.compound && <label><input type="checkbox" checked={compoundingConfirmed} onChange={e => setCompoundingConfirmed(e.target.checked)} /> I explicitly confirm compounding. This grants no additional funding authority and does not make trades compound here.</label>}
            </div>}
           {isAuthorized && <>
@@ -502,6 +586,8 @@ function AgentPage() {
             </div>}
              <div className="agent-policy-actions"><span>{dirtyPolicy ? "Review the complete draft; saving does not start execution." : "Authenticated policy is current."}</span><button className="agent-primary" disabled={!dirtyPolicy || !!busy || (policy.signalSource === "EXPERIMENTAL_QUALIFICATION_GATES" && !experimentalConfirmed) || (policy.compound && !compoundingConfirmed)} onClick={() => void updatePolicy()}>{busy === "policy" ? "Saving…" : "Save reviewed policy"}</button></div>
           </>}
+            </div>
+          </details>
         </section>
 
         <section className="agent-card">
@@ -537,14 +623,6 @@ function AgentPage() {
       </main>
 
       <aside className="agent-side-column">
-        <section className="agent-card agent-guard-card"><div className="agent-card-heading"><div><span className="agent-kicker">RELEASE GATES</span><h2>Execution blockers</h2></div><Shield size={18} /></div>
-           <div className="agent-blocker-state"><i />{cap?.globalExecutionDisabled ? "GLOBAL EXECUTION DISABLED" : cap?.mainnetEnabled ? "MAINNET ENABLED · EXECUTION NOT STARTED HERE" : "CAPABILITY STATUS NOT VERIFIED"}</div>
-          {blockers.length ? <ul className="agent-blockers">{blockers.map((item, i) => <li key={i}><AlertTriangle size={14} />{item}</li>)}</ul> : <p className="agent-unreported">No blocker list returned. This is not evidence of release readiness.</p>}
-           {!cap && <div className="agent-capability-retry" role="status"><span>{busy === "capabilities" ? "Loading current capabilities…" : "Capabilities are unavailable; status is not assumed."}</span><button disabled={busy === "capabilities"} onClick={() => { setBusy("capabilities"); request<Capabilities>("/capabilities").then(data => { setCapabilities(data); if (!dirtyPolicyRef.current) setPolicyDraft(completePolicy(data.defaultPolicy)); setPageError(""); }).catch(error => setPageError(asErrorMessage(error, "Agent capabilities are unavailable."))).finally(() => setBusy("")); }}>{busy === "capabilities" ? "Retrying…" : "Retry capabilities"}</button></div>}
-           <div className="agent-hard-blockers"><span>CURRENT CAPABILITY REPORT</span><b>Development only: {cap ? cap.developmentOnly ? "yes" : "no" : "not loaded"}</b><b>Mainnet enabled: {cap ? String(cap.mainnetEnabled) : "not loaded"}</b><b>Global execution disabled: {cap ? String(cap.globalExecutionDisabled) : "not loaded"}</b><b>Account permission: {cap?.permissions.account ?? "not reported"}</b></div>
-          <button className="agent-quiet-link" onClick={() => setConfigInfoOpen(v => !v)} aria-expanded={configInfoOpen}><CircleHelp size={14} /> Configuration readiness <ChevronDown size={14} /></button>
-            {configInfoOpen && <div className="agent-config-facts"><div><span>Service configuration</span><b>{cap?.config.status ?? "Not loaded"}</b></div><p>{cap?.config.reason || "No configuration reason has been returned."}</p><div><span>Network</span><b>{cap?.network ?? "Not reported"}</b></div><div><span>Settlement decimals</span><b>{cap?.config.decimals == null ? "Not reported" : `${cap.config.decimals} reported · verify before use`}</b></div><div><span>Market semantics verified</span><b>{cap?.config.marketSemanticsVerified == null ? "Not reported" : String(cap.config.marketSemanticsVerified)}</b></div><div><span>SDK version</span><b>{cap?.sdkVersion || "Not reported"}</b></div><div><span>Global execution disabled</span><b>{cap ? String(cap.globalExecutionDisabled) : "Not reported"}</b></div></div>}
-        </section>
          <section className="agent-card agent-paper-card"><div className="agent-card-heading"><div><span className="agent-kicker">SERVICE-REPORTED STATE</span><h2>Paper counters</h2></div><span className="agent-shadow-tag">{state?.paper ? "REPORTED" : "NOT REPORTED"}</span></div>
             {state?.paper ? <div className="agent-paper-facts"><div><span>AVAILABLE</span><b>${(state.paper.availableCents / 100).toFixed(2)}</b></div><div><span>COMMITTED</span><b>${(state.paper.committedCents / 100).toFixed(2)}</b></div><div><span>TURNOVER</span><b>${(state.paper.turnoverCents / 100).toFixed(2)}</b></div><div><span>REALIZED P/L</span><b>${(state.paper.realizedPnlCents / 100).toFixed(2)}</b></div></div> : <div className="agent-goal-value">NO PAPER STATE</div>}
             <p>These values are rendered only from the authenticated /state response and are paper data, not wallet balances or mainnet fills.</p>

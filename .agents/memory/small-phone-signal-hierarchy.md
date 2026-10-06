@@ -20,3 +20,9 @@ Capture the desktop and responsive harness sequentially, not in parallel.
 **Why:** Parallel captures produced completely blank harness iframes while the main app rendered; a subsequent single harness capture rendered all four real viewports.
 
 **How to apply:** Treat captures as potentially sharing browser resources. Inspect the returned image before retaining it as evidence.
+
+Check the first phone viewport and a separate view that actually includes the chart's bottom axis, boundary labels and footer.
+
+**Why:** A good top-card screenshot can leave START/CLOSE and time-label collisions below the fold. Width-only checks also miss enlarged-text tick collisions and SVG letterboxing.
+
+**How to apply:** Use the real component at round start, middle and close, and enlarged root text. Keep browser emulation distinct from physical-device and live-provider evidence.

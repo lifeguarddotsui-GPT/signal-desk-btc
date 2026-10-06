@@ -203,7 +203,7 @@ test("saved timed lock survives a market-probability outage without being replac
   assert.match(html, /WaterX market/);
   assert.match(html, /probability-up"><span>UP<\/span><strong>—<\/strong>/);
   assert.match(html, /probability-down"><span>DOWN<\/span><strong>—<\/strong>/);
-  assert.match(html, /Saved lock · DOWN/);
+  assert.match(html, /Frozen lock · DOWN/);
   assert.match(html, /UP 38\.0%/);
   assert.match(html, /DOWN 62\.0%/);
   assert.match(html, /Saved decision is frozen/);
@@ -227,7 +227,7 @@ test("non-choice timed records never become a lock or invent a side", () => {
   const timedDecision = { ...current.timedDecision!, persistence: "COMMITTED" as const, saved: noChoice };
   const html = render(5, viewFor({ ...current, timedDecision }, false));
   assert.match(html, /WATCHING/);
-  assert.doesNotMatch(html, /LOCKED (?:UP|DOWN)|Saved lock/);
+  assert.doesNotMatch(html, /LOCKED (?:UP|DOWN)|Frozen lock/);
   assert.match(html, /No side · immutable/);
   assert.match(html, /WaterX market/);
 });
@@ -265,4 +265,45 @@ test("chart remains immediately after the shared live decision, and fixtures sta
   assert.match(source, /WaterX market/);
   assert.doesNotMatch(source, /exactDecision\?\.canonical|decision\?\.canonical/);
   assert.match(app, /import\.meta\.env\.DEV && fixtureNames\.includes/);
+});
+
+test("missing probabilities have one waiting message and no failed qualification checklist",()=>{
+  for(const interval of [5,15] as const){
+    const {decision:current}=decision(interval,{market:null});
+    const html=render(interval,viewFor(current,false,health("PROBABILITIES_MISSING")));
+    assert.equal((html.match(/Waiting for WaterX odds\./g)??[]).length,1);
+    assert.match(html,/Not evaluated: missing odds/);
+    assert.doesNotMatch(html,/0 of 4 conditions|Qualification progress|title="Fresh input"/);
+    assert.match(html,/probability-up/);assert.match(html,/probability-down/);
+    assert.doesNotMatch(html,/LEANING (?:UP|DOWN)/);
+  }
+});
+
+test("one shared primary card owns the responsive chart/sidebar and mobile prices can expand",()=>{
+  const {round,decision:current}=decision(5);
+  const html=renderToStaticMarkup(React.createElement(ManualOpportunity,{
+    view:viewFor(current,true,health("CURRENT")),now,interval:5,round,
+    children:React.createElement("section",{className:"chart-panel"},"Chart")}));
+  assert.equal((html.match(/aria-label="WaterX market odds"/g)??[]).length,1);
+  assert.equal((html.match(/class="desk-primary-card"/g)??[]).length,1);
+  assert.equal((html.match(/class="desk-chart-slot"/g)??[]).length,1);
+  assert.match(html,/<details class="desk-price-details"/);
+  assert.match(css,/grid-template-columns: minmax\(0,2fr\) minmax\(280px,1fr\)/);
+  assert.match(css,/@media \(max-width: 900px\)/);
+});
+
+test("$5 economics are indicative, identity-matched and never fill unknown receipts with zero",()=>{
+  const {round,decision:current}=decision(5);
+  const props={view:viewFor(current,true,health("CURRENT")),now,interval:5 as const,round};
+  const economics={state:"OBSERVE",reason:"Uncalibrated market",amountEnteredUsd:5,
+    identity:{roundId:round.id,intervalMinutes:5,startMs:round.startMs,expiryMs:round.expiryMs},
+    sides:{up:{quote:{grossReceiptIfWinIndicative:9.09}},down:{quote:{grossReceiptIfWinIndicative:null}}}};
+  const html=renderToStaticMarkup(React.createElement(ManualOpportunity,{...props,economics}));
+  assert.match(html,/\$5 economics · indicative only/);
+  assert.match(html,/Not an executable quote or expected profit/);
+  assert.match(html,/UP · indicative gross winning receipt \$9\.09/);
+  assert.doesNotMatch(html,/DOWN · indicative gross|\$0\.00|expected profit \$|calibrated confidence/);
+  const mismatch=renderToStaticMarkup(React.createElement(ManualOpportunity,{...props,
+    economics:{...economics,identity:{...economics.identity,roundId:"other"}}}));
+  assert.doesNotMatch(mismatch,/\$5 economics/);
 });

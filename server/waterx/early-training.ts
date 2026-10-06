@@ -7,6 +7,7 @@ import {metrics} from "./bluewater-metrics";
 import {TIMED_STRATEGY,earlyHorizons} from "../../shared/timed-decision";
 import {digestEarlySnapshot} from "./early-horizons";
 import {evaluateEarlyStopping} from "./early-stopping";
+import {trainPooledGates} from "./pooled-early-training";
 export type EarlyTrainingRow={
   interval:5|15;roundId:string;startMs:number;expiryMs:number;horizon:number;probability:number;
   outcome:"UP"|"DOWN";labelAvailableAtMs:number;snapshotDigest:string;
@@ -87,10 +88,13 @@ export async function runEarlyDailyTraining(now=Date.now(),db:LockDb=researchPoo
           labelAvailableAtMs:Number(r.label_available_at_ms),snapshotDigest:String(r.snapshot_sha256)}];
       });
       const reports=earlyHorizons(interval).map(h=>trainEarlyHorizon(rows,interval,h,now));
-      const stopping=evaluateEarlyStopping(rows,interval,reports,now);
+      const pooled=trainPooledGates(rows,interval,now);
+      const forecasts=reports.map(r=>({horizon:r.horizon,artifact:r.artifact??
+        (pooled.status==="EVALUATED"?pooled.artifact:null)}));
+      const stopping=evaluateEarlyStopping(rows,interval,forecasts,now);
       await db.query(`UPDATE waterx_early_training_jobs SET finished_at_ms=$2,status=$3,report=$4 WHERE id=$1`,
-        [id,Date.now(),reports.some(r=>r.status==="EVALUATED")?"EVALUATED":"INSUFFICIENT",
-          JSON.stringify({reports,stopping,digestRejected,selected:rows.length,
+        [id,Date.now(),reports.some(r=>r.status==="EVALUATED")||pooled.status==="EVALUATED"?"EVALUATED":"INSUFFICIENT",
+          JSON.stringify({reports,pooled,stopping,digestRejected,selected:rows.length,
             newEligibleSincePreviousAttempt:rows.filter(r=>r.labelAvailableAtMs>Number(previous?.dataset_cutoff_ms??0)).length,
             promotion:"RETAIN_BASELINE",
             stoppingPolicy:"SHADOW_FULL_SEQUENCE_EVALUATION",

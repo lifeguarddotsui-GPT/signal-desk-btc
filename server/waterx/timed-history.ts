@@ -1,17 +1,19 @@
 import {z} from "zod";
 import {timedPool} from "./timed-db";
 import type {LockDb} from "./lock-store";
-import {TIMED_STRATEGY,LEGACY_TIMED_STRATEGY,type TimedDecision} from "../../shared/timed-decision";
+import {TIMED_STRATEGY,PREVIOUS_TIMED_STRATEGY,LEGACY_TIMED_STRATEGY,type TimedDecision} from "../../shared/timed-decision";
 export const timedHistoryQuery=z.object({
   interval:z.enum(["all","5","15"]).default("all"),
-  strategy:z.enum(["all",TIMED_STRATEGY,LEGACY_TIMED_STRATEGY]).default(TIMED_STRATEGY),
+  strategy:z.enum(["all",TIMED_STRATEGY,PREVIOUS_TIMED_STRATEGY,LEGACY_TIMED_STRATEGY]).default(TIMED_STRATEGY),
   window:z.enum(["lifetime","24h","7d","20","50","100"]).default("lifetime"),
   limit:z.coerce.number().int().min(1).max(200).default(50),
 }).strict();
-export type TimedResult="CORRECT"|"INCORRECT"|"PENDING"|"DISPUTED"|"NO_VALID_INPUT"|"MISSED_DEADLINE";
+export type TimedResult="CORRECT"|"INCORRECT"|"PENDING"|"DISPUTED"|"NO_VALID_INPUT"|"MISSED_DEADLINE"|"ABSTENTION"|"DATA_FAILURE";
 export function projectTimedResult(d:TimedDecision,verified:boolean,outcome:unknown,disputed:boolean):TimedResult{
   if(d.status==="NO_VALID_INPUT")return "NO_VALID_INPUT";
   if(d.status==="MISSED_DEADLINE")return "MISSED_DEADLINE";
+  if(d.status==="ABSTAINED_NO_QUALIFIED_SIGNAL")return "ABSTENTION";
+  if(d.status==="DATA_FAILURE")return "DATA_FAILURE";
   if(disputed)return "DISPUTED";
   if(!verified||(outcome!=="UP"&&outcome!=="DOWN"))return "PENDING";
   return d.side===outcome?"CORRECT":"INCORRECT";
@@ -49,6 +51,8 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
     SELECT *, CASE WHEN id IS NULL THEN 'MISSING_RECORD'
       WHEN status='NO_VALID_INPUT' THEN 'NO_VALID_INPUT'
       WHEN status='MISSED_DEADLINE' THEN 'MISSED_DEADLINE'
+       WHEN status='ABSTAINED_NO_QUALIFIED_SIGNAL' THEN 'ABSTENTION'
+       WHEN status='DATA_FAILURE' THEN 'DATA_FAILURE'
       WHEN disputed THEN 'DISPUTED'
       WHEN NOT verified THEN 'PENDING'
       WHEN decision->>'side'=outcome THEN 'CORRECT' ELSE 'INCORRECT' END AS result,
@@ -59,7 +63,10 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
     count(*) FILTER(WHERE status='LOCKED')::int AS locks,
     count(*) FILTER(WHERE on_time)::int AS on_time_locks,
     count(*) FILTER(WHERE decision->>'lockReason' LIKE 'DEADLINE%')::int AS deadline_locks,
-    count(*) FILTER(WHERE status='MISSED_DEADLINE' OR committed_ack_at_ms>(decision->>'hardDeadlineAtMs')::bigint)::int AS missed,
+    count(*) FILTER(WHERE status IN('MISSED_DEADLINE','DATA_FAILURE') OR
+      (status='LOCKED' AND committed_ack_at_ms>(decision->>'hardDeadlineAtMs')::bigint))::int AS missed,
+    count(*) FILTER(WHERE status='ABSTAINED_NO_QUALIFIED_SIGNAL')::int AS abstained,
+    count(*) FILTER(WHERE status='DATA_FAILURE')::int AS data_failures,
     count(*) FILTER(WHERE result='MISSING_RECORD')::int AS missing_records,
     count(*) FILTER(WHERE result='NO_VALID_INPUT')::int AS no_valid_input,
     count(*) FILTER(WHERE result='CORRECT')::int AS correct,
@@ -74,12 +81,13 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
   const entries=rows.rows.map(row=>{
     const d={...(row.decision as TimedDecision)},ack=row.committed_ack_at_ms==null?null:Number(row.committed_ack_at_ms);
     return {...d,committedAtMs:ack,workerReceivedAtMs:row.worker_received_at_ms==null?null:Number(row.worker_received_at_ms),
-      onTime:ack===null?null:ack<=d.hardDeadlineAtMs,
+      onTime:ack===null||d.status!=="LOCKED"?null:ack<=d.hardDeadlineAtMs,
       acknowledgementStatus:ack===null?"UNKNOWN":"JOURNALED",
       lifecycle:d.status!=="LOCKED"?"OBSERVING":row.disputed===true?"DISPUTED":row.verified===true?
         d.side===row.outcome?"CORRECT":"INCORRECT":now>=d.expiryMs?"RESULT_PENDING":
         d.side==="UP"?"LOCKED_UP":d.side==="DOWN"?"LOCKED_DOWN":"OBSERVING",
-      operationalFailure:ack!==null&&ack>d.hardDeadlineAtMs?"COMMIT_AFTER_HARD_DEADLINE":null,
+      operationalFailure:d.status==="LOCKED"&&ack!==null&&ack>d.hardDeadlineAtMs?
+        d.strategyVersion===TIMED_STRATEGY?"COMMIT_AFTER_GATE_GRACE":"COMMIT_AFTER_HARD_DEADLINE":null,
       result:projectTimedResult(d,row.verified===true,row.outcome,row.disputed===true),
       verifiedOutcome:row.verified===true?row.outcome:null,
       executionStatus:"NOT_INFERRED",actualPnl:null};
@@ -90,6 +98,8 @@ export async function scoredTimedHistory(query:unknown,now=Date.now(),db:LockDb=
     settledN,correct,incorrect,pending:Number(s.pending),disputed:Number(s.disputed),
     ratio:`${correct}:${incorrect}`,hitRate:settledN?correct/settledN:null,
     choiceCoverage:n?Number(s.locks)/n:null,onTimeCoverage:n?Number(s.on_time_locks)/n:null,
+    abstained:Number(s.abstained),dataFailures:Number(s.data_failures),
+    abstentionRate:n?Number(s.abstained)/n:null,operationalFailureRate:n?Number(s.missed)/n:null,
     medianElapsedMs:s.median_elapsed_ms===null?null:Number(s.median_elapsed_ms)},
     rowsTruncated:Number(s.n)>entries.length,
     qualification:"Verified exact-round settlements only. All-policy totals count policy-round decisions, not independent training outcomes. Coverage denominator is discovered strategy-rounds; unobserved rounds are not claimed. Trading and actual P/L remain separate."};

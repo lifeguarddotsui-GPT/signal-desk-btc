@@ -229,16 +229,30 @@
 .mo-frozen-lock { color: var(--mo-accent); }
 .manual-opportunity .mo-decision-row { grid-template-columns: repeat(3,minmax(0,1fr)); }
 .mo-data-safety { margin: 5px 0 0; color: var(--mo-faint); font-size: 8px; line-height: 1.4; }
+.mo-market-pair { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.mo-market-pair .mo-odds-value { font-size: 10px; line-height: 1.4; }
+.mo-primary-metrics { grid-template-columns: 1fr 1fr 1fr; }
+.mo-indicator.gate-countdown > small { color: var(--mo-faint); font-size: 8px; line-height: 1.4; }
+.mo-indicator.qualification { align-content: start; }
+.mo-checklist { display: flex !important; justify-content: flex-start !important; gap: 5px; min-height: 8px; }
+.mo-checklist i { width: 18px; height: 4px; border-radius: 1px; background: rgba(147,174,162,.22); }
+.mo-checklist i.met { background: #92cbb1; }
+.mo-requirement { color: #d4c6a7; }
+.mo-requirement::before { background: #c3a678; }
 @media (max-width: 600px) {
   .manual-opportunity { padding: 12px 11px 9px; }
   .mo-primary-card { grid-template-columns: minmax(0,1fr); gap: 10px; }
-  .mo-market-pair { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .mo-primary-metrics { gap: 7px; }
+  .mo-market-pair { grid-template-columns: 1fr 1fr; }
+  .mo-market-pair > div:last-child { grid-column: 1 / -1; }
+  .mo-primary-metrics { grid-template-columns: 1fr 1fr; gap: 7px; }
   .mo-indicator b { font-size: 8px; }
   .manual-opportunity .mo-decision-row { grid-template-columns: 1fr; }
+  .mo-primary-call .mo-timed-status { font-size: clamp(22px, 7vw, 30px); }
+  .mo-primary-probability { font-size: 11px; }
 }
 @media (max-width: 360px) {
-  .mo-primary-metrics { grid-template-columns: 1fr; }
+  .mo-primary-metrics { grid-template-columns: 1fr 1fr; }
+  .mo-primary-metrics .qualification { grid-column: 1 / -1; }
   .mo-primary-metrics .mo-indicator { grid-template-columns: 1fr minmax(88px,.8fr); align-items: center; }
   .mo-primary-metrics .mo-indicator .mo-progress-label { grid-column: 1/-1; }
   .mo-market-pair strong { font-size: 12px; }

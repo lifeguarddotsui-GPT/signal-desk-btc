@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {TIMED_STRATEGY,LEGACY_TIMED_STRATEGY,timedWindow} from "../shared/timed-decision";
+import {TIMED_STRATEGY,LEGACY_TIMED_STRATEGY,timedWindow,earlyHorizons} from "../shared/timed-decision";
 import {freezeEarlyHorizon,digestEarlySnapshot} from "../server/waterx/early-horizons";
 import {trainEarlyHorizon} from "../server/waterx/early-training";
 import {projectTimedResult,timedHistoryQuery} from "../server/waterx/timed-history";
@@ -11,8 +11,8 @@ const start=1700000000000;
 const input={intervalMinutes:5 as const,roundId:"round-test",startMs:start,expiryMs:start+300000,
   observedAt:new Date(start+30000).toISOString(),receivedAtMs:start+30000,probabilityUp:.8,probabilityDown:.2};
 test("new timing is explicitly versioned and legacy windows are immutable",()=>{
-  assert.deepEqual(timedWindow(5),{targetSeconds:60,hardSeconds:90});
-  assert.deepEqual(timedWindow(15),{targetSeconds:180,hardSeconds:300});
+  assert.deepEqual(timedWindow(5),{targetSeconds:60,hardSeconds:300});
+  assert.deepEqual(timedWindow(15),{targetSeconds:180,hardSeconds:900});
   assert.deepEqual(timedWindow(5,LEGACY_TIMED_STRATEGY),{targetSeconds:120,hardSeconds:150});
   assert.deepEqual(timedWindow(15,LEGACY_TIMED_STRATEGY),{targetSeconds:300,hardSeconds:450});
   assert.notEqual(TIMED_STRATEGY,LEGACY_TIMED_STRATEGY);
@@ -61,9 +61,9 @@ test("training refuses duplicate snapshots and late-label leakage across chronol
 });
 test("sequential policy counts one decision per round, uses calibration to select threshold, and retains live baseline",()=>{
   const now=Date.UTC(2026,9,6),day=86400000;
-  const forecasts=[30,45,60,75,90].map(horizon=>({horizon,artifact:{
+  const forecasts=earlyHorizons(5).map(horizon=>({horizon,artifact:{
     parameters:{intercept:0,coefficients:[1]},calibration:{intercept:0,coefficients:[1]}}}));
-  const rows=Array.from({length:140},(_,i)=>[30,45,60,75,90].map(horizon=>({
+  const rows=Array.from({length:140},(_,i)=>earlyHorizons(5).map(horizon=>({
     interval:5 as const,roundId:`fixture-${i}`,startMs:now-(i<70?3:1)*day+i*300000,
     expiryMs:now-(i<70?3:1)*day+i*300000+300000,horizon,
     probability:i%2?.2:.8,outcome:i%2?"DOWN" as const:"UP" as const,

@@ -7,7 +7,7 @@ import {captureTimedDecision,loadTimedDecision,consumeTimedDecisionReceipts} fro
 import {lockPool} from "../server/waterx/lock-store";
 import {TIMED_STRATEGY} from "../shared/timed-decision";
 import {scoredTimedHistory} from "../server/waterx/timed-history";
-import {buildTimedDecision} from "../server/waterx/timed-decision-builder";
+import {buildTimedDecision,evaluateQualificationGate} from "../server/waterx/timed-decision-builder";
 import {captureEarlyHorizons} from "../server/waterx/early-horizons";
 import {runEarlyDailyTraining,earlyLearningReport} from "../server/waterx/early-training";
 test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollback, receipt and restart recovery",
@@ -22,6 +22,8 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     await pool.query(readFileSync(new URL("../migrations/agent-durable-auth.sql",import.meta.url),"utf8"));
     await pool.query(readFileSync(new URL("../migrations/waterx-early-horizons.sql",import.meta.url),"utf8"));
     await pool.query(readFileSync(new URL("../migrations/early-training-retry.sql",import.meta.url),"utf8"));
+    await pool.query(readFileSync(new URL("../migrations/waterx-qualification-gates.sql",import.meta.url),"utf8"));
+    await pool.query(readFileSync(new URL("../migrations/waterx-gate-horizons.sql",import.meta.url),"utf8"));
     const nonce="0".repeat(64);
     await pool.query(`INSERT INTO bluewater_agent_challenges(token_hash,owner,origin,network,expires_at)
       VALUES($1,'test-owner','https://qa.invalid','sui:mainnet',clock_timestamp()+interval '2 minutes')`,[nonce]);
@@ -30,13 +32,13 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     const consumed=await Promise.all([consume(),consume()]);
     assert.equal(consumed.reduce((sum,r)=>sum+r.rows.length,0),1);
     assert.equal((await consume()).rows.length,0);
-    const now=Date.now(),start=now-65000,round={intervalMinutes:5 as const,roundId:randomUUID(),startMs:start,expiryMs:start+300000};
+    const now=Date.now(),start=now-60000,round={intervalMinutes:5 as const,roundId:randomUUID(),startMs:start,expiryMs:start+300000};
     // Test-only prospective observations; no production data or funded transaction.
     await pool.query(`INSERT INTO waterx_timed_rounds VALUES('sui:mainnet',$1,5,$2,$3,$4,$5)`,
       [TIMED_STRATEGY,round.roundId,start,round.expiryMs,start+1000]);
     for(let at=now-60000;at<now;at+=5000){
       const input={...round,receivedAtMs:at,observedAt:new Date(at).toISOString(),probabilityUp:.8,probabilityDown:.2};
-      await pool.query(`INSERT INTO waterx_timed_observations VALUES('sui:mainnet',$1,5,$2,$3,$4)`,
+      await pool.query(`INSERT INTO waterx_timed_observations VALUES('sui:mainnet',$1,5,$2,$3,$4,$3)`,
         [TIMED_STRATEGY,round.roundId,at,JSON.stringify(input)]);
     }
     const input={...round,receivedAtMs:now,observedAt:new Date(now).toISOString(),probabilityUp:.8,probabilityDown:.2};
@@ -57,8 +59,9 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
       settled_at bigint,first_verified_at timestamptz,settle_price float8,settlement_anchor_price float8)`);
     for(const [i,outcome]of ["UP","DOWN"].entries()){
       const oldStart=now-3600000-i*300000,old={...round,roundId:randomUUID(),startMs:oldStart,expiryMs:oldStart+300000};
-      const at=oldStart+85000,observation={atMs:at,receivedAtMs:at,providerSourceAtMs:null,probabilityUp:.56,probabilityDown:.44,sourceHealthy:true};
-      const d=buildTimedDecision(old,[observation],oldStart,at,true,{},true)!;
+      const at=oldStart+60000,observations=Array.from({length:13},(_,i)=>({atMs:at-i*5000,receivedAtMs:at-i*5000,
+        providerSourceAtMs:null,probabilityUp:.8,probabilityDown:.2,sourceHealthy:true}));
+      const d=buildTimedDecision(old,observations,oldStart,at,true)!;
       await pool.query("INSERT INTO waterx_timed_rounds VALUES('sui:mainnet',$1,5,$2,$3,$4,$3)",[TIMED_STRATEGY,old.roundId,old.startMs,old.expiryMs]);
       await pool.query(`INSERT INTO waterx_timed_decisions VALUES($1,'sui:mainnet',$2,5,$3,$4,'LOCKED',$5)`,
         [d.id,TIMED_STRATEGY,old.roundId,at,JSON.stringify(d)]);
@@ -76,7 +79,7 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     await pool.query("UPDATE waterx_learning_rounds SET label_status='withdrawn' WHERE outcome='DOWN'");
     assert.equal((await scoredTimedHistory({interval:"5"},Date.now(),pool)).metrics.settledN,0);
     await captureEarlyHorizons(input,Date.now(),pool);
-    assert.equal((await pool.query("SELECT count(*)::int AS n FROM waterx_early_horizons")).rows[0].n,3);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM waterx_early_horizons")).rows[0].n,2);
     await assert.rejects(pool.query("UPDATE waterx_early_horizons SET status='FROZEN'"),(e:{code:string})=>e.code==="23514");
     await runEarlyDailyTraining(Date.now(),pool);
     const learning=await earlyLearningReport(pool);
@@ -84,26 +87,44 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     assert.equal(learning.affectedArtifacts.length,0);
     await runEarlyDailyTraining(Date.now(),pool);
     assert.equal((await earlyLearningReport(pool)).jobs.length,2);
-    // Real PostgreSQL fallback preparation: weak valid evidence freezes before
-    // the hard cutoff, rather than requiring a transaction starting at cutoff.
-    const fallbackNow=Date.now(),fallbackStart=fallbackNow-86000;
+    // Weak evidence cannot freeze just because the former forced deadline passes.
+    const fallbackNow=Date.now(),fallbackStart=fallbackNow-90000;
     const fallbackRound={...round,roundId:randomUUID(),startMs:fallbackStart,expiryMs:fallbackStart+300000};
     let selected=0;
     const fallback=await captureTimedDecision({...input,...fallbackRound,receivedAtMs:fallbackNow,
       discoveredAtMs:fallbackStart+1000,observedAt:new Date(fallbackNow).toISOString(),
       probabilityUp:.56,probabilityDown:.44},pool,()=>{selected++;});
-    assert(fallback);assert.equal(selected,1);
-    assert.equal(fallback.lockReason,"DEADLINE_FALLBACK");
-    assert.equal(fallback.probabilityUp,.56);assert.equal(fallback.onTime,true);
-    assert(fallback.decisionAtMs<fallback.hardDeadlineAtMs);
-    assert(fallback.committedAtMs!<=fallback.hardDeadlineAtMs);
-    const failedStart=Date.now()-160000;
+    assert.equal(fallback,null);assert.equal(selected,0);
+    const journals=await pool.query("SELECT journal FROM waterx_gate_journals WHERE round_id=$1 ORDER BY gate_index",[round.roundId]);
+    assert.equal(journals.rows.length,2);
+    assert.equal(journals.rows[1].journal.decisionId,a.id);
+    await assert.rejects(pool.query("UPDATE waterx_gate_journals SET result='QUALIFIED'"),(e:{code:string})=>e.code==="23514");
+    const failedStart=Date.now()-301000;
     const failedRound={...round,roundId:randomUUID(),startMs:failedStart,expiryMs:failedStart+300000};
     await pool.query(`CREATE FUNCTION fail_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'Injected event storage failure'; END $$;
       CREATE TRIGGER fail_outbox BEFORE INSERT ON waterx_timed_outbox FOR EACH ROW EXECUTE FUNCTION fail_outbox()`);
-    await assert.rejects(captureTimedDecision({...input,...failedRound},pool),/Injected event storage failure/);
+    await assert.rejects(captureTimedDecision({...input,...failedRound,receivedAtMs:failedStart+270000},pool),/Injected event storage failure/);
     assert.equal(await loadTimedDecision(failedRound,pool),null);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM waterx_gate_journals WHERE round_id=$1",[failedRound.roundId])).rows[0].n,0);
+    await pool.query("DROP TRIGGER fail_outbox ON waterx_timed_outbox");
+    const recovered=await captureTimedDecision({...input,...failedRound,receivedAtMs:failedStart+270000},pool);
+    assert.equal(recovered!.status,"DATA_FAILURE");assert.equal(recovered!.side,null);
+    // Synthetic durable history models nine successfully evaluated weak gates,
+    // not nine independent outcomes and not a fabricated prospective collection.
+    const abstain={...failedRound,roundId:randomUUID()};
+    await pool.query("INSERT INTO waterx_timed_rounds VALUES('sui:mainnet',$1,5,$2,$3,$4,$3)",
+      [TIMED_STRATEGY,abstain.roundId,abstain.startMs,abstain.expiryMs]);
+    for(let index=1;index<=9;index++){
+      const at=abstain.startMs+index*30000,observation={atMs:at,receivedAtMs:at,providerSourceAtMs:null,
+        probabilityUp:.525,probabilityDown:.475,sourceHealthy:true};
+      const gate=evaluateQualificationGate(abstain,[observation],index,at+1);
+      await pool.query(`INSERT INTO waterx_gate_journals VALUES('sui:mainnet',$1,5,$2,$3,$4,$5,$4,$6,NULL,$7)`,
+        [TIMED_STRATEGY,abstain.roundId,index,at,at+1,gate.result,JSON.stringify(gate)]);
+    }
+    const abstained=await captureTimedDecision({...input,...abstain,receivedAtMs:abstain.startMs+270000},pool);
+    assert.equal(abstained!.status,"ABSTAINED_NO_QUALIFIED_SIGNAL");assert.equal(abstained!.side,null);
+    assert.equal(abstained!.onTime,null);
   }finally{
     await pool.end();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();await lockPool.end();
   }

@@ -492,6 +492,31 @@
 .canonical-history .timed-history-loading { min-height: 64px; grid-template-columns: 110px 1fr; align-items: center; }
 .canonical-history .timed-history-loading i { display: block; width: 100%; height: 8px; border-radius: 4px; background: linear-gradient(90deg,#e6eee8,#d3e2d9,#e6eee8); background-size: 200% 100%; animation: timed-history-skeleton 1.5s ease-in-out infinite; }
 @keyframes timed-history-skeleton { from { opacity: .45; } to { opacity: 1; } }
+.canonical-history .gate-journal { margin-top: 16px; padding: 13px; border: 1px solid #cadbd3; background: #f0f5ee; }
+.canonical-history .gate-journal-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.canonical-history .gate-journal-heading span { color: #527970; font: 8px "DM Mono", monospace; letter-spacing: .09em; }
+.canonical-history .gate-journal h3 { margin: 4px 0 0; color: #203c45; font-size: 15px; }
+.canonical-history .gate-journal-heading small { max-width: 46%; color: #68817b; font: 8px/1.4 "DM Mono", monospace; text-align: right; overflow-wrap: anywhere; }
+.canonical-history .gate-journal > p { margin: 7px 0 11px; color: #627a75; font-size: 9px; line-height: 1.45; }
+.canonical-history .gate-journal-rows { display: grid; gap: 5px; }
+.canonical-history .gate-journal-row { border: 1px solid #d5e2db; background: #fffef9; }
+.canonical-history .gate-journal-row > summary { display: grid; grid-template-columns: 42px minmax(0,1fr) minmax(0,1fr); align-items: center; gap: 10px; padding: 9px 10px; cursor: pointer; list-style: none; }
+.canonical-history .gate-journal-row > summary::-webkit-details-marker { display: none; }
+.canonical-history .gate-journal-row > summary > span { color: #287261; font: 10px "DM Mono", monospace; }
+.canonical-history .gate-journal-row > summary > b { color: #324e50; font: 9px "DM Mono", monospace; }
+.canonical-history .gate-journal-row > summary > time { color: #708682; font: 8px "DM Mono", monospace; text-align: right; }
+.canonical-history .gate-journal-facts { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); border-top: 1px solid #e1ebe4; }
+.canonical-history .gate-journal-facts > div { min-width: 0; display: grid; gap: 4px; padding: 8px 10px; border-bottom: 1px solid #e8eee9; }
+.canonical-history .gate-journal-facts span { color: #788c87; font: 8px "DM Mono", monospace; text-transform: uppercase; }
+.canonical-history .gate-journal-facts b { color: #324e50; font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .canonical-history .gate-journal { padding: 10px; }
+  .canonical-history .gate-journal-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .canonical-history .gate-journal-heading small { max-width: 100%; text-align: left; }
+  .canonical-history .gate-journal-row > summary { grid-template-columns: 34px minmax(0,1fr); gap: 5px 8px; }
+  .canonical-history .gate-journal-row > summary > time { grid-column: 2; text-align: left; }
+  .canonical-history .gate-journal-facts { grid-template-columns: 1fr 1fr; }
+}
 @media (max-width: 700px) {
   .canonical-history .timed-history-filters { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .canonical-history .timed-history-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); }

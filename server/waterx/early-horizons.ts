@@ -66,7 +66,7 @@ export async function captureEarlyHorizons(input:TimedInput,now=Date.now(),db:Lo
     const at=input.startMs+h*1000,missed=now>at+2000;
     const data=missed?{rows:[]} :await db.query(`SELECT input FROM waterx_timed_observations
       WHERE network='sui:mainnet' AND strategy_version=$1 AND interval_minutes=$2 AND round_id=$3
-        AND received_at_ms BETWEEN $4 AND $5 ORDER BY received_at_ms DESC LIMIT 512`,
+        AND received_at_ms BETWEEN $4 AND $5 AND accepted_at_ms<=$5 ORDER BY received_at_ms DESC LIMIT 512`,
       [TIMED_STRATEGY,input.intervalMinutes,input.roundId,Math.max(input.startMs,at-75000),at]);
     const locked=await db.query(`SELECT id FROM waterx_timed_decisions WHERE network='sui:mainnet'
       AND strategy_version=$1 AND interval_minutes=$2 AND round_id=$3 AND status='LOCKED'`,

@@ -1,48 +1,58 @@
 import {randomUUID} from "node:crypto";
-import {evaluateTimedDecision,TIMED_STRATEGY,timedPolicy,type TimedRound,type TimedDecision} from "../../shared/timed-decision";
+import {evaluateTimedDecision,TIMED_STRATEGY,timedPolicy,GATE_MS,GATE_GRACE_MS,
+ type TimedRound,type TimedDecision,type GateJournal} from "../../shared/timed-decision";
 import type {LockObservation} from "../../shared/lock-readiness";
 import {observationId} from "./observation-provenance";
-import {timedCompletionPolicy} from "../../shared/timed-completion";
+import {digestEarlySnapshot} from "./early-horizons";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
-export function buildTimedDecision(round:TimedRound,observations:LockObservation[],discoveredAtMs:number,
-  now:number,latestInputValid:boolean,evidence:Record<string,unknown>={},prepareFallback=false):TimedDecision|null{
-  const evaluated=evaluateTimedDecision(round,observations,now);
-  const before=observations.filter(o=>o.receivedAtMs<=now).slice().sort((a,b)=>a.receivedAtMs-b.receivedAtMs);
-  const completion=timedCompletionPolicy(round.intervalMinutes);
-  const latest=before.at(-1),hardReached=now>=evaluated.hardDeadlineAtMs;
-  const preparing=prepareFallback&&now>=evaluated.hardDeadlineAtMs-completion.allowanceMs;
-  const deadline=hardReached||preparing;
-  if(now<evaluated.targetAtMs)return null;
-  if(!deadline&&(!evaluated.qualified||!latestInputValid))return null;
-  const missed=discoveredAtMs>evaluated.hardDeadlineAtMs;
-  const sourceValid=!missed&&latestInputValid&&latest&&evaluated.sourceAgeMs!==null&&evaluated.sourceAgeMs<=10000&&
-    latest.sourceHealthy&&validWaterxProbabilityPair(latest.probabilityUp,latest.probabilityDown)&&
-    latest.receivedAtMs<=evaluated.hardDeadlineAtMs;
-  const locked=!!sourceValid;
-  // Do not freeze an early NO_VALID_INPUT: new valid evidence may still arrive.
-  if(preparing&&!hardReached&&!locked)return null;
-  const status=missed?"MISSED_DEADLINE":locked?"LOCKED":"NO_VALID_INPUT";
-  const ambiguous=locked&&latest!.probabilityUp===latest!.probabilityDown;
-  const maxGap=before.length>1?Math.max(...before.slice(1).map((o,i)=>o.receivedAtMs-before[i].receivedAtMs)):null;
-  return {id:randomUUID(),strategyVersion:TIMED_STRATEGY,network:"sui:mainnet",...round,status,
-    side:locked?latest!.probabilityUp>=latest!.probabilityDown?"UP":"DOWN":null,
-    probabilityUp:locked?latest!.probabilityUp:null,probabilityDown:locked?latest!.probabilityDown:null,
-    observationId:locked?observationId(round.intervalMinutes,round.roundId,latest!.receivedAtMs):null,
-    receivedAtMs:locked?latest!.receivedAtMs:null,decisionAtMs:now,elapsedMs:now-round.startMs,
-    targetAtMs:evaluated.targetAtMs,hardDeadlineAtMs:evaluated.hardDeadlineAtMs,
-    lockReason:missed?"COLLECTOR_DISCOVERED_AFTER_HARD_DEADLINE":!locked?
-      !latestInputValid?String(evidence.inputFailure??"LATEST_PROBABILITY_INPUT_INVALID"):latest&&latest.receivedAtMs>evaluated.hardDeadlineAtMs?
-        "NO_PRE_DEADLINE_SOURCE":evaluated.blocker:
-      ambiguous?"DEADLINE_FALLBACK_TIE_BREAK_UP_AMBIGUOUS":deadline?"DEADLINE_FALLBACK":"STABILITY_POLICY_QUALIFIED",
-    earlyBlocker:evaluated.blocker,ambiguous,
-    coverage:{n:before.length,firstAtMs:before[0]?.receivedAtMs??null,lastAtMs:latest?.receivedAtMs??null,maxGapMs:maxGap},
-    committedAtMs:null,workerReceivedAtMs:null,onTime:null,operationalFailure:null,
-    automaticExecutionAllowed:false,
-    evidence:{...evidence,policy:timedPolicy(round.intervalMinutes),completionPolicy:completion,
-      fallbackPreparation:preparing,sourceId:"waterx.public.crypto.v1",providerEventAtMs:null,
-      probabilitySemantics:"explicit provider probability pair, not asks",sameTimeWaterxBaseline:locked?
-        {probabilityUp:latest!.probabilityUp,probabilityDown:latest!.probabilityDown,side:ambiguous?"UP":
-          latest!.probabilityUp>latest!.probabilityDown?"UP":"DOWN"}:null,
-      tieBreak:"UP only on exact equal probability; ambiguous and never automatic execution",
-      qualifyingConditions:evaluated,deadlineEvaluationLate:now>evaluated.hardDeadlineAtMs}};
+const gateObservations=(round:TimedRound,observations:LockObservation[],at:number)=>observations.filter(o=>
+ Number.isSafeInteger(o.receivedAtMs)&&o.receivedAtMs>=Math.max(round.startMs,at-75000)&&
+ o.receivedAtMs<=at&&o.receivedAtMs<round.expiryMs&&o.sourceHealthy&&
+ validWaterxProbabilityPair(o.probabilityUp,o.probabilityDown)).sort((a,b)=>a.receivedAtMs-b.receivedAtMs);
+
+/** Actual evaluation must fall inside grace; evidence always ends AT the gate. */
+export function evaluateQualificationGate(round:TimedRound,observations:LockObservation[],gateIndex:number,
+ now:number,latestInputValid=true):GateJournal{
+ const at=round.startMs+gateIndex*GATE_MS;
+ const base={gateIndex,scheduledAtMs:at,evaluatedAtMs:now,evidenceCutoffMs:at,decisionId:null,
+    network:"sui:mainnet" as const,intervalMinutes:round.intervalMinutes,roundId:round.roundId,startMs:round.startMs,expiryMs:round.expiryMs,
+   requirementsMet:0,requirementsTotal:4,probabilityUp:null,components:undefined,
+   policyVersion:TIMED_STRATEGY,source:"experimental market-based policy",calibrationStatus:"UNQUALIFIED" as const,
+   observationIds:[],providerSourceAtMs:null,receivedAtMs:null,modelVersion:null,featureVersion:"gate-evidence-v1"};
+ if(!Number.isSafeInteger(gateIndex)||gateIndex<1||at>=round.expiryMs||
+   round.expiryMs-round.startMs!==round.intervalMinutes*60000||!Number.isSafeInteger(now))
+   return {...base,result:"INVALID_ROUND",reason:"Invalid exact round or gate"};
+ if(now<at)throw new Error("Gate not reached");
+ if(now>at+GATE_GRACE_MS)return {...base,result:"MISSED_GATE",reason:"Actual evaluation exceeded scheduling grace; no retrospective reconstruction"};
+  const prior=gateObservations(round,observations,at);
+ const state=evaluateTimedDecision(round,prior,at);
+ const result=!latestInputValid||state.sourceAgeMs===null||state.sourceAgeMs>10000?"WAIT_FRESH_DATA":
+   state.qualified?"QUALIFIED":state.blocker==="DIRECTIONAL_SEPARATION_BELOW_POLICY"||state.blocker==="AMBIGUOUS_TIE"?
+     "WAIT_WEAK_EVIDENCE":"WAIT_UNSTABLE";
+ const journal:GateJournal={...base,result,reason:latestInputValid?state.remainingRequirement??state.blocker:"Latest pre-gate input invalid",
+   probabilityUp:prior.at(-1)?.probabilityUp??null,receivedAtMs:prior.at(-1)?.receivedAtMs??null,
+   requirementsMet:Math.max(0,(state.requirementsMet??0)-Number(!latestInputValid&&state.sourceAgeMs!==null&&state.sourceAgeMs<=10000)),components:state.components,
+   observationIds:prior.map(o=>observationId(round.intervalMinutes,round.roundId,o.receivedAtMs))};
+ return {...journal,snapshotDigest:digestEarlySnapshot(journal)};
+}
+
+export function buildTimedDecision(round:TimedRound,observations:LockObservation[],_discoveredAtMs:number,
+ now:number,latestInputValid:boolean,evidence:Record<string,unknown>={},_unusedFallback=false):TimedDecision|null{
+ const index=Math.floor((now-round.startMs)/GATE_MS);
+ if(index<1||now>=round.expiryMs)return null;
+ const gate=evaluateQualificationGate(round,observations,index,now,latestInputValid);
+ if(gate.result!=="QUALIFIED")return null;
+  const prior=gateObservations(round,observations,gate.scheduledAtMs),latest=prior.at(-1)!;
+ const maxGap=prior.length>1?Math.max(...prior.slice(1).map((o,i)=>o.receivedAtMs-prior[i].receivedAtMs)):null;
+ return {id:randomUUID(),strategyVersion:TIMED_STRATEGY,network:"sui:mainnet",...round,status:"LOCKED",
+   side:latest.probabilityUp>latest.probabilityDown?"UP":"DOWN",probabilityUp:latest.probabilityUp,probabilityDown:latest.probabilityDown,
+   observationId:observationId(round.intervalMinutes,round.roundId,latest.receivedAtMs),receivedAtMs:latest.receivedAtMs,
+   decisionAtMs:now,elapsedMs:now-round.startMs,targetAtMs:gate.scheduledAtMs,
+   hardDeadlineAtMs:gate.scheduledAtMs+GATE_GRACE_MS,gateIndex:index,gateScheduledAtMs:gate.scheduledAtMs,
+   lockReason:"QUALIFIED_SCHEDULED_GATE",earlyBlocker:"CONDITIONS_SATISFIED",ambiguous:false,
+   coverage:{n:prior.length,firstAtMs:prior[0]?.receivedAtMs??null,lastAtMs:latest.receivedAtMs,maxGapMs:maxGap},
+   committedAtMs:null,workerReceivedAtMs:null,onTime:null,operationalFailure:null,automaticExecutionAllowed:false,
+   evidence:{...evidence,gate,policy:timedPolicy(round.intervalMinutes),sourceId:"waterx.public.crypto.v1",
+     calibrationStatus:"UNQUALIFIED",probabilitySemantics:"experimental market-based policy; not a calibrated forecast",
+     tieBreak:"NONE",sameTimeWaterxBaseline:{probabilityUp:latest.probabilityUp,probabilityDown:latest.probabilityDown}}};
 }

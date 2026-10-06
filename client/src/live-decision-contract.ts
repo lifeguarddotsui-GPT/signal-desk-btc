@@ -1,7 +1,7 @@
 import type {RoundDecision} from "../../shared/round-decision";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {lockPolicy} from "../../shared/lock-readiness";
-import {isTimedStrategy,timedWindow,type TimedDecision,type TimedState} from "../../shared/timed-decision";
+import {GATE_GRACE_MS,GATE_MS,isTimedStrategy,TIMED_STRATEGY,timedWindow,type GateJournal,type TimedDecision,type TimedState} from "../../shared/timed-decision";
 
 export type LiveSnapshotEnvelope={
   serverTime?:string;intervalMinutes?:number;status?:string;reason?:string;
@@ -20,11 +20,12 @@ const probabilityOrNull=(n:unknown):n is number|null=>n===null||bounded(n);
 function validateTimedDecisionState(timed:TimedState,d:RoundDecision,now:number):string|null{
   if(!timed||!isTimedStrategy(timed.strategyVersion))return "TIMED_STATE_INVALID";
   const round=d,window=timedWindow(d.intervalMinutes,timed.strategyVersion),target=round.startMs+window.targetSeconds*1000;
-  const hard=round.startMs+window.hardSeconds*1000,elapsed=Math.max(0,now-round.startMs);
+  const gateStrategy=timed.strategyVersion===TIMED_STRATEGY;
+  const hard=gateStrategy?round.expiryMs:round.startMs+window.hardSeconds*1000,elapsed=Math.max(0,now-round.startMs);
   if(timed.targetAtMs!==target||
     timed.hardDeadlineAtMs!==hard||!integer(timed.elapsedMs)||timed.elapsedMs!==elapsed||
     !Number.isFinite(timed.timeProgress)||timed.timeProgress<0||timed.timeProgress>1||
-    Math.abs(timed.timeProgress-Math.min(1,elapsed/(hard-round.startMs)))>0.001||
+     Math.abs(timed.timeProgress-Math.min(1,elapsed/(hard-round.startMs)))>0.001||
     !["OBSERVING","EVALUATING","DEADLINE","EXPIRED"].includes(timed.phase)||
     !integer(timed.readinessPercent)||timed.readinessPercent<0||timed.readinessPercent>100||
     typeof timed.qualified!=="boolean"||typeof timed.blocker!=="string"||!timed.blocker||
@@ -36,8 +37,17 @@ function validateTimedDecisionState(timed:TimedState,d:RoundDecision,now:number)
     !["WAITING","SAVING","FAILED","COMMITTED"].includes(timed.persistence)||
     (timed.errorClass!==null&&typeof timed.errorClass!=="string"))
     return "TIMED_STATE_INVALID";
-  const expectedPhase=now>=round.expiryMs?"EXPIRED":now>=hard?"DEADLINE":now>=target?"EVALUATING":"OBSERVING";
+  const expectedPhase=now>=round.expiryMs?"EXPIRED":!gateStrategy&&now>=hard?"DEADLINE":now>=target?"EVALUATING":"OBSERVING";
   if(timed.phase!==expectedPhase)return "TIMED_PHASE_MISMATCH";
+  if(gateStrategy){
+    const expectedNext=round.startMs+(Math.floor(elapsed/GATE_MS)+1)*GATE_MS;
+    if(timed.nextGateAtMs!==(expectedNext<round.expiryMs?expectedNext:null)||
+      !Number.isSafeInteger(timed.requirementsMet)||timed.requirementsMet!<0||timed.requirementsMet!>4||
+      timed.requirementsTotal!==4||timed.policySource!=="experimental market-based policy"||
+      timed.executionCutoffAtMs!==null||
+      (timed.lastGate!==null&&(!timed.lastGate||!validGateJournal(timed.lastGate,round.startMs,now))))
+      return "TIMED_GATE_STATE_INVALID";
+  }
 
   const saved=timed.saved;
   if((timed.persistence==="COMMITTED")!==!!saved)return "TIMED_PERSISTENCE_STATE_MISMATCH";
@@ -46,20 +56,19 @@ function validateTimedDecisionState(timed:TimedState,d:RoundDecision,now:number)
     saved.intervalMinutes!==round.intervalMinutes||saved.roundId!==round.roundId||
     saved.startMs!==round.startMs||saved.expiryMs!==round.expiryMs||
     typeof saved.id!=="string"||!saved.id||
-    !["LOCKED","NO_VALID_INPUT","MISSED_DEADLINE"].includes(saved.status)||
+     !["LOCKED","NO_VALID_INPUT","MISSED_DEADLINE","ABSTAINED_NO_QUALIFIED_SIGNAL","DATA_FAILURE"].includes(saved.status)||
     (saved.side!==null&&saved.side!=="UP"&&saved.side!=="DOWN")||
     !probabilityOrNull(saved.probabilityUp)||!probabilityOrNull(saved.probabilityDown)||
     !integer(saved.decisionAtMs)||saved.decisionAtMs<round.startMs||saved.decisionAtMs>now||
     !integer(saved.elapsedMs)||saved.elapsedMs!==saved.decisionAtMs-round.startMs||
-    !integer(saved.targetAtMs)||saved.targetAtMs!==target||
-    !integer(saved.hardDeadlineAtMs)||saved.hardDeadlineAtMs!==hard||
+     !integer(saved.targetAtMs)||!integer(saved.hardDeadlineAtMs)||
     (saved.committedAtMs!==null&&(!integer(saved.committedAtMs)||saved.committedAtMs<saved.decisionAtMs||saved.committedAtMs>now))||
     // PostgreSQL notification delivery may precede the app observing its COMMIT response.
     // These are distinct clocks/stages, not a guaranteed ack -> receipt ordering.
     (saved.workerReceivedAtMs!==null&&(!integer(saved.workerReceivedAtMs)||
       saved.workerReceivedAtMs<round.startMs||saved.workerReceivedAtMs>now+1000))||
     (saved.onTime!==null&&typeof saved.onTime!=="boolean")||
-    (saved.onTime===true&&(saved.committedAtMs===null||saved.committedAtMs>hard))||
+    (saved.onTime===true&&(saved.committedAtMs===null||saved.committedAtMs>saved.hardDeadlineAtMs))||
     typeof saved.lockReason!=="string"||!saved.lockReason||
     typeof saved.earlyBlocker!=="string"||!saved.earlyBlocker||
     typeof saved.ambiguous!=="boolean"||
@@ -72,9 +81,20 @@ function validateTimedDecisionState(timed:TimedState,d:RoundDecision,now:number)
     saved.automaticExecutionAllowed!==false||
     !saved.evidence||typeof saved.evidence!=="object"||Array.isArray(saved.evidence))
     return "TIMED_SAVED_IDENTITY_OR_FIELDS_INVALID";
+  if(!gateStrategy&&(saved.targetAtMs!==target||saved.hardDeadlineAtMs!==hard))
+    return "TIMED_SAVED_WINDOW_INVALID";
+  if(gateStrategy&&(saved.targetAtMs<round.startMs||saved.targetAtMs>round.expiryMs||
+    saved.hardDeadlineAtMs<saved.targetAtMs||saved.hardDeadlineAtMs>round.expiryMs+GATE_GRACE_MS))
+    return "TIMED_SAVED_GATE_WINDOW_INVALID";
 
   if(saved.status==="LOCKED"){
+    const savedWindowValid=gateStrategy
+      ? Number.isSafeInteger(saved.gateIndex)&&saved.gateIndex!>0&&saved.gateScheduledAtMs===round.startMs+saved.gateIndex!*GATE_MS&&
+        saved.targetAtMs===saved.gateScheduledAtMs&&saved.hardDeadlineAtMs===saved.gateScheduledAtMs+GATE_GRACE_MS&&
+        saved.decisionAtMs>=saved.gateScheduledAtMs&&saved.decisionAtMs<=saved.hardDeadlineAtMs
+      : saved.targetAtMs===target&&saved.hardDeadlineAtMs===hard;
     if((saved.side!=="UP"&&saved.side!=="DOWN")||
+      !savedWindowValid||
       !validWaterxProbabilityPair(saved.probabilityUp,saved.probabilityDown)||
       !saved.observationId||saved.receivedAtMs===null||saved.coverage.n<1||
       saved.decisionAtMs>=round.expiryMs||
@@ -82,10 +102,36 @@ function validateTimedDecisionState(timed:TimedState,d:RoundDecision,now:number)
       (saved.side==="UP"&&saved.probabilityUp!==null&&saved.probabilityUp<saved.probabilityDown!)||
       (saved.side==="DOWN"&&saved.probabilityDown!==null&&saved.probabilityDown<saved.probabilityUp!))
       return "TIMED_LOCKED_CHOICE_INVALID";
-  }else if(saved.side!==null||saved.probabilityUp!==null||saved.probabilityDown!==null){
+  }else if(saved.side!==null||saved.probabilityUp!==null||saved.probabilityDown!==null||
+    (gateStrategy&&(saved.status==="ABSTAINED_NO_QUALIFIED_SIGNAL"||saved.status==="DATA_FAILURE")&&
+      (saved.targetAtMs<round.startMs||saved.targetAtMs>round.expiryMs||saved.hardDeadlineAtMs<saved.targetAtMs))){
     return "TIMED_FAILURE_RECORD_HAS_CHOICE";
   }
   return null;
+}
+
+function validGateJournal(gate:GateJournal,startMs:number,now:number):boolean{
+  const c=gate.components;
+  const noEvidence=["MISSED_GATE","INVALID_ROUND","EXECUTION_WINDOW_CLOSED"].includes(gate.result)&&
+    c===undefined&&gate.probabilityUp===null&&gate.requirementsMet===0;
+  const validComponents=!!c&&typeof c==="object"&&
+    [c.sameSideMs,c.requiredSameSideMs,c.validCount,c.requiredCount].every(value=>Number.isSafeInteger(value)&&value>=0)&&
+    (c.probabilityRange===null||bounded(c.probabilityRange))&&bounded(c.maximumRange)&&bounded(c.strength)&&bounded(c.requiredStrength);
+  return Number.isSafeInteger(gate.gateIndex)&&gate.gateIndex>0&&
+    gate.scheduledAtMs===startMs+gate.gateIndex*GATE_MS&&
+    Number.isSafeInteger(gate.evaluatedAtMs)&&gate.evaluatedAtMs>=gate.scheduledAtMs&&gate.evaluatedAtMs<=now&&
+    gate.evidenceCutoffMs===gate.scheduledAtMs&&
+    (gate.result!=="QUALIFIED"||(gate.evaluatedAtMs<=gate.scheduledAtMs+GATE_GRACE_MS&&
+      gate.requirementsMet===4&&gate.probabilityUp!==null&&gate.probabilityUp!==.5))&&
+    ["QUALIFIED","WAIT_WEAK_EVIDENCE","WAIT_UNSTABLE","WAIT_FRESH_DATA","INVALID_ROUND","MISSED_GATE","EXECUTION_WINDOW_CLOSED"].includes(gate.result)&&
+    typeof gate.reason==="string"&&gate.reason.length>0&&
+    (gate.decisionId===null||typeof gate.decisionId==="string")&&
+    Number.isSafeInteger(gate.requirementsMet)&&gate.requirementsMet>=0&&Number.isSafeInteger(gate.requirementsTotal)&&
+    gate.requirementsTotal===4&&gate.requirementsMet<=gate.requirementsTotal&&
+    (gate.probabilityUp===null||bounded(gate.probabilityUp))&&(noEvidence||validComponents)&&
+    gate.policyVersion===TIMED_STRATEGY&&typeof gate.source==="string"&&gate.calibrationStatus==="UNQUALIFIED"&&
+    Array.isArray(gate.observationIds)&&gate.observationIds.length<=10_000&&gate.observationIds.every(id=>typeof id==="string")&&
+    (gate.snapshotDigest===undefined||typeof gate.snapshotDigest==="string");
 }
 export function validateLiveEnvelope(p:LiveSnapshotEnvelope,interval:5|15,previous:LiveSnapshotEnvelope|null=null):string|null{
   const now=serverTime(p),prior=previous?serverTime(previous):NaN;
@@ -186,7 +232,9 @@ export function validateDecisionSnapshot(p:LiveSnapshotEnvelope,interval:5|15,pr
     if(!currentSaved||currentSaved.id!==priorSaved.id||currentSaved.status!==priorSaved.status||
       currentSaved.side!==priorSaved.side||currentSaved.decisionAtMs!==priorSaved.decisionAtMs||
       currentSaved.probabilityUp!==priorSaved.probabilityUp||
-      currentSaved.probabilityDown!==priorSaved.probabilityDown)
+     currentSaved.probabilityDown!==priorSaved.probabilityDown||
+     currentSaved.gateIndex!==priorSaved.gateIndex||currentSaved.gateScheduledAtMs!==priorSaved.gateScheduledAtMs||
+     currentSaved.targetAtMs!==priorSaved.targetAtMs||currentSaved.hardDeadlineAtMs!==priorSaved.hardDeadlineAtMs)
       return "IMMUTABLE_TIMED_DECISION_REGRESSION";
   }
   if(d.opportunity&&(d.opportunity.sourceId!=="waterx.public.crypto.v1"||

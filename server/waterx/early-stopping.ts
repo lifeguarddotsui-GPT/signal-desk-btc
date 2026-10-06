@@ -1,4 +1,5 @@
 import {logit,sigmoid} from "./bluewater-fast";
+import {earlyHorizons} from "../../shared/timed-decision";
 import {metrics} from "./bluewater-metrics";
 import {digestEarlySnapshot} from "./early-horizons";
 import type {EarlyTrainingRow} from "./early-training";
@@ -8,11 +9,13 @@ type Forecast={horizon:number;artifact:null|{
  * calibration only; test results never choose the runtime candidate. */
 export function evaluateEarlyStopping(rows:EarlyTrainingRow[],interval:5|15,forecasts:Forecast[],now:number){
   const day=86400000,cutoff=Math.floor(now/day)*day,trainEnd=cutoff-4*day,calEnd=cutoff-2*day;
-  const target=interval===5?60:180,hard=interval===5?90:300;
-  if(forecasts.some(f=>!f.artifact))return {status:"INSUFFICIENT",reason:"Every sequential horizon needs a trained/calibrated artifact; isolated thresholds are not qualified.",promotion:"RETAIN_BASELINE"};
+  const target=interval===5?60:180,hard=interval*60;
+  if(forecasts.some(f=>!f.artifact)||earlyHorizons(interval).some(h=>!forecasts.some(f=>f.horizon===h&&f.artifact)))
+    return {status:"INSUFFICIENT",reason:"Every sequential gate needs a trained/calibrated artifact; isolated thresholds are not qualified.",promotion:"RETAIN_BASELINE"};
   const artifacts=new Map(forecasts.map(f=>[f.horizon,f.artifact!]));
   const groups=new Map<string,EarlyTrainingRow[]>();
-  for(const r of rows.filter(r=>r.interval===interval&&r.startMs>=cutoff-14*day&&r.expiryMs<=cutoff)){
+  for(const r of rows.filter(r=>r.interval===interval&&earlyHorizons(interval).includes(r.horizon)&&
+    r.startMs>=cutoff-14*day&&r.expiryMs<=cutoff&&r.labelAvailableAtMs<=now)){
     const key=r.roundId+":"+r.startMs+":"+r.expiryMs;
     const list=groups.get(key)??[];
     if(!list.some(v=>v.horizon===r.horizon))list.push(r);
@@ -21,12 +24,13 @@ export function evaluateEarlyStopping(rows:EarlyTrainingRow[],interval:5|15,fore
   const sequences=Array.from(groups.values()).map(s=>s.sort((a,b)=>a.horizon-b.horizon));
   const probability=(r:EarlyTrainingRow)=>{
     const a=artifacts.get(r.horizon)!;
-    const raw=sigmoid(a.parameters.intercept+a.parameters.coefficients[0]*logit(r.probability));
+    const raw=sigmoid(a.parameters.intercept+a.parameters.coefficients[0]*logit(r.probability)+
+      (a.parameters.coefficients[1]??0)*r.horizon/(interval*60));
     return sigmoid(a.calibration.intercept+a.calibration.coefficients[0]*logit(raw));
   };
   const valid=(r:EarlyTrainingRow)=>Number.isFinite(r.probability)&&r.probability>=0&&r.probability<=1;
-  const select=(s:EarlyTrainingRow[],threshold:number)=>s.find(r=>valid(r)&&r.horizon<=hard&&Math.max(probability(r),1-probability(r))>=threshold)
-    ??s.find(r=>valid(r)&&r.horizon===hard);
+  const select=(s:EarlyTrainingRow[],threshold:number)=>s.find(r=>valid(r)&&earlyHorizons(interval).includes(r.horizon)&&
+    r.horizon<interval*60&&Math.max(probability(r),1-probability(r))>=threshold);
   const evaluate=(part:EarlyTrainingRow[][],threshold:number)=>{
     const picked=part.flatMap(s=>{const r=select(s,threshold);return r?[r]:[];});
     const forecast=metrics(picked.map(r=>({probability:probability(r),outcome:r.outcome})));

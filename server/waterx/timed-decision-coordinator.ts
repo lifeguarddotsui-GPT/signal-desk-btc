@@ -3,7 +3,6 @@ import {captureTimedDecision,type TimedInput} from "./timed-decision-store";
 import {roundDecisions} from "./round-decision";
 import {createWaterxBackgroundQueue} from "./background-queue";
 import {refreshErrorClass} from "./refresh-health";
-import {timedCompletionPolicy} from "../../shared/timed-completion";
 import {TIMED_STRATEGY} from "../../shared/timed-decision";
 import {timedPool} from "./timed-db";
 import type {LockDb} from "./lock-store";
@@ -23,7 +22,8 @@ const researchQueue=createWaterxBackgroundQueue<TimedInput>(async input=>capture
 const queue=createWaterxBackgroundQueue<TimedInput>(async input=>{
    recordEarlyDelivery(input.intervalMinutes,input.roundId,"QUEUE_DELAY",
      enqueuedAt.has(input)?performance.now()-enqueuedAt.get(input)!:null,"ok");
-   try{roundDecisions.timedSaved(input,await captureTimedDecision(input,undefined,()=>roundDecisions.timedSaving(input)));
+    try{roundDecisions.timedSaved(input,await captureTimedDecision(input,undefined,()=>roundDecisions.timedSaving(input),
+      gate=>roundDecisions.timedGate(input,gate)));
      researchQueue.enqueue(input);}
   catch(error){roundDecisions.timedFailed(input,refreshErrorClass(error));throw error;}
 },(interval,error)=>console.error(`[waterx-${interval}m] timed decision storage failure: ${refreshErrorClass(error)}`));
@@ -43,8 +43,7 @@ export function observeTimedStrategy(input:TimedInput){
     const entry={input:{...input,discoveredAtMs:input.discoveredAtMs??Date.now()},timers:[] as ReturnType<typeof setTimeout>[]};active.set(input.intervalMinutes,entry);
     const window=timedWindow(input.intervalMinutes);
     const hard=input.startMs+window.hardSeconds*1000;
-    for(const at of Array.from(new Set([input.startMs+window.targetSeconds*1000,
-      hard-timedCompletionPolicy(input.intervalMinutes).allowanceMs,hard,
+    for(const at of Array.from(new Set([hard,
       ...earlyHorizons(input.intervalMinutes).map(h=>input.startMs+h*1000)]))){
       if(at>Date.now()){
          const delay=at-Date.now(),scheduled=performance.now();
@@ -61,19 +60,21 @@ export function observeTimedStrategy(input:TimedInput){
 /** Schedule identity/start/discovery and accepted evidence already live in
  * waterx_timed_rounds/observations. Deadlines derive from the pinned strategy.
  * Recovery cannot wake a sleeping Autoscale service; that still needs edge delivery. */
-export async function recoverTimedSchedules(db:LockDb=timedPool,now=Date.now()){
+export async function recoverTimedSchedules(db=timedPool,now=Date.now()){
   const rows=await db.query(`SELECT r.discovered_at_ms,x.input FROM waterx_timed_rounds r
     LEFT JOIN waterx_timed_decisions d USING(network,strategy_version,interval_minutes,round_id)
     JOIN LATERAL (SELECT input FROM waterx_timed_observations o
       WHERE o.network=r.network AND o.strategy_version=r.strategy_version
         AND o.interval_minutes=r.interval_minutes AND o.round_id=r.round_id
       ORDER BY received_at_ms DESC LIMIT 1) x ON true
-    WHERE r.strategy_version=$1 AND d.id IS NULL AND r.start_ms<=$2 AND r.expiry_ms>=$2-60000
+     WHERE r.strategy_version=$1 AND r.start_ms<=$2 AND (d.id IS NULL OR r.expiry_ms>$2)
     ORDER BY r.start_ms DESC LIMIT 32`,[TIMED_STRATEGY,now]);
   for(const row of rows.rows){
     const input={...(row.input as TimedInput),discoveredAtMs:Number(row.discovered_at_ms)};
     const previous=active.get(input.intervalMinutes);
-    if(previous&&previous.input.startMs>input.startMs){
+    if(input.expiryMs<=now){
+      await captureTimedDecision(input,db);
+    }else if(previous&&previous.input.startMs>input.startMs){
       // Finalize a missed older persisted round without replacing the active interval.
       enqueue(input);
     }else observeTimedStrategy(input);

@@ -29,7 +29,7 @@ function decision(overrides: Partial<RoundDecision> = {}): RoundDecision {
     readiness: {
       state: "READY", score: 100, side: "UP", probability: .72, evaluatedAtMs: now,
       secondsRemaining: 280, sameSideMs: 30_000, earliestPossibleAtMs: now,
-      reason: "Exact-round evidence remains fresh.", health: "AVAILABLE",
+      reason: "Exact-round evidence remains fresh.", health: "WAITING FOR EVIDENCE",
       components: {
         strength: .8, requiredStrength: .65, persistenceMs: 30_000, requiredPersistenceMs: 12_000,
         range: .02, reversals: 0, observationCount: 12, ageMs: 0, gapReset: false,
@@ -173,25 +173,27 @@ test("manual card is above the chart; audit readiness is collapsed and mobile la
   assert.match(css, /@media \(max-width: 440px\)/);
 });
 
-test("primary card consolidates source prices and exposes independent time, readiness and market-probability indicators", () => {
+test("primary card consolidates source prices, gate timing and an explicit qualification checklist", () => {
   const source = readFileSync(new URL("./ManualOpportunity.tsx", import.meta.url), "utf8");
   const markup = renderToStaticMarkup(React.createElement(ManualOpportunity, {
     view: { decision: decision({ timedDecision: null }), fresh: true, sourceAgeMs: 900, lean: "UP", stage: "LEANING", score: 60, reason: "Evidence is building." },
     now, marketReference: { price: 83_500, quality: "confirmed", source: "WaterX" },
     comparison: { price: 83_517.25, source: "Coinbase SSE", receivedAtMs: now - 900 },
   }));
-  assert.match(markup, /Authoritative early decision/);
+  assert.match(markup, /Authoritative round research state/);
   assert.match(markup, /PRICE TO BEAT · CONFIRMED/);
   assert.match(markup, /\$83,500\.00/);
-  assert.match(markup, /COMPARISON · Coinbase SSE/);
+  assert.match(markup, /BTC COMPARISON · Coinbase SSE/);
   assert.match(markup, /\$83,517\.25/);
+  assert.match(markup, /MARKET ODDS · CURRENT ONLY/);
+  assert.match(markup, /QUALIFICATION CHECKLIST/);
   assert.match(app, /comparisonFresh \? comparison\?\.source/);
   assert.match(app, /source: coinbaseDisplaySource \|\| "Not reported"/);
   assert.doesNotMatch(app, /HTTP comparison|streamCoinbaseFresh \? "Coinbase SSE"/);
-  assert.match(source, /OBSERVATION TIME/);
-  assert.match(source, /EVIDENCE READINESS/);
-  assert.match(source, /MARKET PROBABILITY/);
-  assert.match(markup, /market probability · not calibrated/i);
+  assert.match(source, /ELAPSED ROUND TIME/);
+  assert.doesNotMatch(source, /EVIDENCE READINESS/);
+  assert.doesNotMatch(source, /readinessPercent/);
+  assert.match(markup, /market probability · uncalibrated/i);
 });
 
 test("unknown comparison provenance is withheld rather than defaulted to Coinbase", () => {
@@ -199,6 +201,6 @@ test("unknown comparison provenance is withheld rather than defaulted to Coinbas
     view: { decision: decision({ timedDecision: null }), fresh: true, sourceAgeMs: 900, lean: "UP", stage: "LEANING", score: 60, reason: "Evidence is building." },
     now,
   }));
-  assert.match(markup, /COMPARISON · Not reported/);
-  assert.doesNotMatch(markup, /COMPARISON · Coinbase/);
+  assert.match(markup, /BTC COMPARISON · Not reported/);
+  assert.doesNotMatch(markup, /BTC COMPARISON · Coinbase/);
 });

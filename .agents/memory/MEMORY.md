@@ -17,5 +17,6 @@
 - [Publish boolean CHECKs](publish-boolean-check-introspection.md) — compare stored predicates with generated SQL; bare boolean CHECKs can be double-wrapped.
 - [Open-wallet mainnet beta](open-wallet-mainnet-beta.md) — open wallet login is not trade authority; $5 all-in per wallet/round, no compounding, separate prospective early signals.
 - [Mainnet beta controls](single-order-pilot.md) — $5 aggregate all-in per exact round; exposure/turnover are separate controls; delegation requires independent proof and approval.
-- [Early-decision scope](early-decision-scope.md) — authoritative 60/90 and 180/300 timing; earlier horizons shadow only; meaningful acceptance includes bounded mainnet recovery.
+- [Qualification-gate scope](early-decision-scope.md) — 30-second gates replace forced choices; do not ease thresholds for locks; acceptance still includes bounded mainnet recovery.
+- [Gate evidence availability](gate-evidence-availability.md) — receipt timestamps alone cannot prove pre-gate availability; test complete live schema constraints too.
 - [Production SQL evidence](production-sql-evidence.md) — success plus transaction markers is not query evidence; require actual expected result data.

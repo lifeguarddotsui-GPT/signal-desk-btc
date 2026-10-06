@@ -1,4 +1,5 @@
 import {scoredTimedHistory,timedHistoryQuery} from "./waterx/timed-history";
+import {gateHistory,gateHistoryQuery} from "./waterx/gate-history";
 import {earlyLearningReport} from "./waterx/early-training";
 import {usdcFundingPreview} from "./agent/funding-preview";
 import {resolve} from "node:path";
@@ -200,6 +201,12 @@ export function registerRoutes(app: Express) {
     if(!parsed.success){res.status(400).json({error:"Invalid timed-history filters"});return;}
     try{res.set("Cache-Control","no-store").json(await scoredTimedHistory(parsed.data));}
     catch{res.status(503).json({error:"Timed strategy history unavailable; no outcome is fabricated."});}
+  });
+  app.get("/api/waterx/gates",async(req,res)=>{
+    const parsed=gateHistoryQuery.safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid gate history filters"});return;}
+    try{res.set("Cache-Control","no-store").json(await gateHistory(parsed.data));}
+    catch{res.status(503).json({error:"Gate journals unavailable; no gate is reconstructed."});}
   });
   app.get("/api/waterx/early-learning",async(_req,res)=>{
     try{res.set("Cache-Control","no-store").json(await earlyLearningReport());}

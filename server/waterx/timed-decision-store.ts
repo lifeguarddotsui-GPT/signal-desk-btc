@@ -1,142 +1,133 @@
+import {randomUUID} from "node:crypto";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
-import {TIMED_STRATEGY,timedWindow,type TimedDecision,type TimedRound} from "../../shared/timed-decision";
+import {TIMED_STRATEGY,timedWindow,GATE_MS,GATE_GRACE_MS,type TimedDecision,type TimedRound,type GateJournal} from "../../shared/timed-decision";
 import type {LockObservation} from "../../shared/lock-readiness";
 import {type LockDb} from "./lock-store";
 import {timedPool} from "./timed-db";
-import {buildTimedDecision} from "./timed-decision-builder";
+import {buildTimedDecision,evaluateQualificationGate} from "./timed-decision-builder";
 import {scoredTimedHistory} from "./timed-history";
 import {journalTimedAcknowledgement,retryTimedAcknowledgements} from "./timed-acknowledgement";
 import {recordEarlyDelivery} from "./early-delivery-metrics";
+import {digestEarlySnapshot} from "./early-horizons";
 export type TimedInput=TimedRound&{receivedAtMs?:number;observedAt:string;probabilityUp:number|null;
-  probabilityDown:number|null;discoveredAtMs?:number;anchorPrice?:number|null;anchorConfirmed?:boolean;features?:Record<string,unknown>};
+ probabilityDown:number|null;discoveredAtMs?:number;anchorPrice?:number|null;anchorConfirmed?:boolean;features?:Record<string,unknown>};
 const values=(r:TimedRound)=>["sui:mainnet",TIMED_STRATEGY,r.intervalMinutes,r.roundId];
 const selectSaved=`SELECT d.decision,o.committed_ack_at_ms,o.worker_received_at_ms
  FROM waterx_timed_decisions d JOIN waterx_timed_outbox o ON o.decision_id=d.id`;
 function unpack(row:Record<string,unknown>):TimedDecision{
-  const d={...(row.decision as TimedDecision)},ack=row.committed_ack_at_ms==null?null:Number(row.committed_ack_at_ms);
-  d.committedAtMs=ack;d.workerReceivedAtMs=row.worker_received_at_ms==null?null:Number(row.worker_received_at_ms);
-  d.onTime=ack===null?null:ack<=d.hardDeadlineAtMs;
-  d.acknowledgementStatus=ack===null?"UNKNOWN":"JOURNALED";
-  d.operationalFailure=ack!==null&&ack>d.hardDeadlineAtMs?"COMMIT_AFTER_HARD_DEADLINE":null;
-  return d;
+ const d={...(row.decision as TimedDecision)},ack=row.committed_ack_at_ms==null?null:Number(row.committed_ack_at_ms);
+ d.committedAtMs=ack;d.workerReceivedAtMs=row.worker_received_at_ms==null?null:Number(row.worker_received_at_ms);
+ d.onTime=ack===null||d.status!=="LOCKED"?null:ack<=d.hardDeadlineAtMs;
+ d.acknowledgementStatus=ack===null?"UNKNOWN":"JOURNALED";
+ d.operationalFailure=d.onTime===false?d.strategyVersion===TIMED_STRATEGY?"COMMIT_AFTER_GATE_GRACE":"COMMIT_AFTER_HARD_DEADLINE":null;return d;
 }
 export async function loadTimedDecision(round:TimedRound,db:LockDb=timedPool){
-  const r=await db.query(`${selectSaved} WHERE d.network=$1 AND d.strategy_version=$2
-    AND d.interval_minutes=$3 AND d.round_id=$4`,values(round));
-  const saved=r.rows[0]?unpack(r.rows[0]):null;
-  if(saved&&(saved.startMs!==round.startMs||saved.expiryMs!==round.expiryMs))throw new Error("Timed round identity mismatch");
-  return saved;
+ const r=await db.query(`${selectSaved} WHERE d.network=$1 AND d.strategy_version=$2 AND d.interval_minutes=$3 AND d.round_id=$4`,values(round));
+ const saved=r.rows[0]?unpack(r.rows[0]):null;
+ if(saved&&(saved.startMs!==round.startMs||saved.expiryMs!==round.expiryMs))throw new Error("Timed round identity mismatch");
+ return saved;
 }
-/** Network reads never await this writer. The transaction serializes all instances by exact strategy/round. */
-export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelected?:()=>void){
-  const received=input.receivedAtMs;
-  if(!Number.isSafeInteger(received)||received!<input.startMs||received!>=input.expiryMs)
-    throw new Error("Invalid timed source receipt");
-  if(input.expiryMs-input.startMs!==input.intervalMinutes*60000)throw new Error("Invalid timed exact round");
-  const acquireStarted=performance.now();
-  const c=await db.connect().catch(error=>{
-    recordEarlyDelivery(input.intervalMinutes,input.roundId,"CAPTURE_ATTEMPT",performance.now()-acquireStarted,"error");
-    recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_ACQUISITION",performance.now()-acquireStarted,"error");throw error;
-  });let committed=false,transactionStarted=false,saved:TimedDecision|null=null,inserted=false;
-  const acquisitionMs=performance.now()-acquireStarted,preparationStarted=performance.now();
-  recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_ACQUISITION",acquisitionMs,"ok");
-  let transactionAt:number|null=null;
-  try{
-    // Prospective capture/preparation precedes the short serialized final write.
-    // An observation surviving a failed decision transaction is evidence, not a lock.
-    const now=Date.now();
-    const discovered=input.discoveredAtMs??received!;
-    if(!Number.isSafeInteger(discovered)||discovered<input.startMs||discovered>now)
-      throw new Error("Invalid timed actual discovery clock");
-    await c.query(`INSERT INTO waterx_timed_rounds(network,strategy_version,interval_minutes,round_id,
-      start_ms,expiry_ms,discovered_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
-      [...values(input),input.startMs,input.expiryMs,discovered]);
-    const identity=await c.query(`SELECT start_ms,expiry_ms,discovered_at_ms FROM waterx_timed_rounds
-      WHERE network=$1 AND strategy_version=$2 AND interval_minutes=$3 AND round_id=$4`,values(input));
-    const r=identity.rows[0];
-    if(!r||Number(r.start_ms)!==input.startMs||Number(r.expiry_ms)!==input.expiryMs)
-      throw new Error("Timed persisted exact round mismatch");
-    saved=await loadTimedDecision(input,c);
-     // Later shadow horizons still need prospective evidence after an early
-     // primary lock. Stop recording here at the last scheduled early horizon.
-     if(received!<=input.startMs+timedWindow(input.intervalMinutes).hardSeconds*1000){
-      await c.query(`INSERT INTO waterx_timed_observations(network,strategy_version,interval_minutes,
-        round_id,received_at_ms,input) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-        [...values(input),received,JSON.stringify(input)]);
-     }
-     if(!saved){
-      const data=await c.query(`SELECT input FROM waterx_timed_observations WHERE network=$1 AND strategy_version=$2
-        AND interval_minutes=$3 AND round_id=$4 AND received_at_ms >= $5
-        ORDER BY received_at_ms DESC LIMIT 513`,[...values(input),Date.now()-75000]);
-      if(data.rows.length>512)throw new Error("Timed rolling evidence bound exceeded");
-      const all=data.rows.map(row=>row.input as TimedInput).reverse(),latest=all.at(-1);
-      const observations:LockObservation[]=all.filter(v=>validWaterxProbabilityPair(v.probabilityUp,v.probabilityDown))
-        .map(v=>({atMs:v.receivedAtMs!,receivedAtMs:v.receivedAtMs!,providerSourceAtMs:null,
-          probabilityUp:v.probabilityUp!,probabilityDown:v.probabilityDown!,sourceHealthy:true}));
-      const decisionAtMs=Date.now(); // Real post-query time, never the queued event's old clock.
-      const evaluationAt=performance.now();
-      const candidate=buildTimedDecision(input,observations,Number(r.discovered_at_ms),decisionAtMs,
-        !!latest&&validWaterxProbabilityPair(latest.probabilityUp,latest.probabilityDown),
-        {inputFailure:latest?.probabilityUp===null&&latest?.probabilityDown===null?"NO_PROBABILITY_INPUT":
-          latest?.probabilityUp===null||latest?.probabilityDown===null?"MISSING_PROBABILITY_SIDE":"INVALID_PROBABILITY_PAIR",
-          reference:latest?.anchorPrice??null,referenceConfirmed:latest?.anchorConfirmed??false,
-          features:latest?.features??{},comparisonSettlementInference:false,coverageScope:"rolling 75 seconds; full observations retained separately",
-           discoveredAtMs:Number(r.discovered_at_ms),
-           quote:"INDICATIVE_ONLY_NO_EXECUTABLE_FILL",observationHistory:all.map(v=>({
-             receivedAtMs:v.receivedAtMs,probabilityUp:v.probabilityUp,probabilityDown:v.probabilityDown}))},true);
-      recordEarlyDelivery(input.intervalMinutes,input.roundId,"EVALUATION",performance.now()-evaluationAt,"ok");
-      if(candidate){
-         onSelected?.();
-         candidate.evidence.persistenceTiming={
-           databaseAcquisitionMs:acquisitionMs,preparationMs:performance.now()-preparationStarted,
-           preparedAtMs:decisionAtMs,transactionRequestedAtMs:Date.now(),
-           definition:"Monotonic acquisition/preparation durations; ACK is recorded separately. No provider/browser latency inferred."};
-          transactionAt=performance.now();await c.query("BEGIN");
-         transactionStarted=true;
-         await c.query("SELECT pg_advisory_xact_lock(hashtext($1))",[values(input).join(":")]);
-        const result=await c.query(`INSERT INTO waterx_timed_decisions(id,network,strategy_version,
-          interval_minutes,round_id,decision_at_ms,status,decision) VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-          ON CONFLICT(network,strategy_version,interval_minutes,round_id) DO NOTHING RETURNING id`,
-          [candidate.id,...values(input),candidate.decisionAtMs,candidate.status,JSON.stringify(candidate)]);
-        inserted=result.rows.length>0;
-        if(inserted){
-          await c.query("INSERT INTO waterx_timed_outbox(decision_id) VALUES($1)",[candidate.id]);
-          await c.query("SELECT pg_notify('bluewater_timed_decision',$1)",[candidate.id]);
-        }
-        saved=await loadTimedDecision(input,c);
-      }
-    }
-    if(transactionStarted){
-      if(transactionAt!==null)recordEarlyDelivery(input.intervalMinutes,input.roundId,"FINAL_TRANSACTION_PRE_COMMIT",performance.now()-transactionAt,"ok");
-      const commitAt=performance.now();await c.query("COMMIT");
-      recordEarlyDelivery(input.intervalMinutes,input.roundId,"COMMIT_RESPONSE",performance.now()-commitAt,"ok");
-    }
-    if(transactionAt!==null)recordEarlyDelivery(input.intervalMinutes,input.roundId,"TRANSACTION_TO_COMMIT_RESPONSE",performance.now()-transactionAt,"ok");
-    committed=true;
-    if(inserted&&saved){
-      const ack=Date.now();
-       const journalAt=performance.now();
-      // Separate acknowledgement journal: never mutates the frozen prediction or outbox identity.
-      const journaled=await journalTimedAcknowledgement(saved.id,ack,c);
-       recordEarlyDelivery(input.intervalMinutes,input.roundId,"ACK_JOURNAL",performance.now()-journalAt,journaled?"ok":"error");
-      saved={...saved,committedAtMs:ack,onTime:ack<=saved.hardDeadlineAtMs,
-        acknowledgementStatus:journaled?"JOURNALED":"UNJOURNALED",
-        operationalFailure:ack>saved.hardDeadlineAtMs?"COMMIT_AFTER_HARD_DEADLINE":null};
-    }
-    recordEarlyDelivery(input.intervalMinutes,input.roundId,"CAPTURE_ATTEMPT",performance.now()-acquireStarted,"ok");
-    return saved;
-  }catch(error){
-    recordEarlyDelivery(input.intervalMinutes,input.roundId,"CAPTURE_ATTEMPT",performance.now()-acquireStarted,"error");
-    if(transactionAt!==null&&!committed)recordEarlyDelivery(input.intervalMinutes,input.roundId,"TRANSACTION_TO_COMMIT_RESPONSE",performance.now()-transactionAt,"error");
-    throw error;
-  }finally{if(transactionStarted&&!committed)await c.query("ROLLBACK").catch(()=>{});c.release();}
+export async function loadGateJournals(round:TimedRound,db:LockDb=timedPool){
+ const r=await db.query(`SELECT journal FROM waterx_gate_journals WHERE network=$1 AND strategy_version=$2
+ AND interval_minutes=$3 AND round_id=$4 ORDER BY gate_index`,values(round));return r.rows.map((r:Record<string,unknown>)=>r.journal as GateJournal);
+}
+function finalRecord(input:TimedInput,gates:GateJournal[],now:number):TimedDecision{
+ const hadFailures=gates.some(g=>["WAIT_FRESH_DATA","MISSED_GATE","INVALID_ROUND"].includes(g.result));
+ const worked=gates.length===input.intervalMinutes*2-1&&!hadFailures;
+ const status=worked?"ABSTAINED_NO_QUALIFIED_SIGNAL":"DATA_FAILURE",w=timedWindow(input.intervalMinutes);
+ return {id:randomUUID(),strategyVersion:TIMED_STRATEGY,network:"sui:mainnet",intervalMinutes:input.intervalMinutes,
+ roundId:input.roundId,startMs:input.startMs,expiryMs:input.expiryMs,status,side:null,probabilityUp:null,probabilityDown:null,
+ observationId:null,receivedAtMs:null,decisionAtMs:now,elapsedMs:now-input.startMs,
+ targetAtMs:input.startMs+w.targetSeconds*1000,hardDeadlineAtMs:input.expiryMs,lockReason:status,earlyBlocker:status,
+ ambiguous:false,coverage:{n:gates.length,firstAtMs:gates[0]?.scheduledAtMs??null,lastAtMs:gates.at(-1)?.scheduledAtMs??null,maxGapMs:null},
+ committedAtMs:null,workerReceivedAtMs:null,onTime:null,operationalFailure:null,automaticExecutionAllowed:false,
+ evidence:{gateResults:gates.map(g=>({gateIndex:g.gateIndex,result:g.result})),hadFailures,noForcedChoice:true}};
+}
+/** One short serialized transaction commits the immutable gate, lock and outbox together.
+ * Accepted-at is an independent DB timestamp: queued later data cannot enter an earlier gate. */
+export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelected?:()=>void,
+ onGate?:(gate:GateJournal)=>void){
+ const received=input.receivedAtMs,now=Date.now();
+ if(!Number.isSafeInteger(received)||received!<input.startMs||received!>=input.expiryMs||received!>now)
+   throw new Error("Invalid timed source receipt");
+ if(input.expiryMs-input.startMs!==input.intervalMinutes*60000)throw new Error("Invalid timed exact round");
+ const acquire=performance.now(),c=await db.connect();let committed=false,inserted:TimedDecision|null=null;
+ const emitted:GateJournal[]=[];let saved:TimedDecision|null=null;
+ recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_ACQUISITION",performance.now()-acquire,"ok");
+ try{
+ const discovered=input.discoveredAtMs??received!;
+ if(!Number.isSafeInteger(discovered)||discovered<input.startMs||discovered>now)throw new Error("Invalid discovery clock");
+ await c.query(`INSERT INTO waterx_timed_rounds(network,strategy_version,interval_minutes,round_id,start_ms,expiry_ms,discovered_at_ms)
+ VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,[...values(input),input.startMs,input.expiryMs,discovered]);
+ const identity=(await c.query(`SELECT start_ms,expiry_ms FROM waterx_timed_rounds
+ WHERE network=$1 AND strategy_version=$2 AND interval_minutes=$3 AND round_id=$4`,values(input))).rows[0];
+ if(!identity||Number(identity.start_ms)!==input.startMs||Number(identity.expiry_ms)!==input.expiryMs)throw new Error("Persisted round identity mismatch");
+ // Evidence ingestion is independent of the final gate transaction and remains live after lock.
+ await c.query(`INSERT INTO waterx_timed_observations(network,strategy_version,interval_minutes,round_id,received_at_ms,input)
+ VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,[...values(input),received,JSON.stringify(input)]);
+ await c.query("BEGIN");
+ await c.query("SELECT pg_advisory_xact_lock(hashtext($1))",[values(input).join(":")]);
+ saved=await loadTimedDecision(input,c);
+ const existing=await loadGateJournals(input,c),seen=new Set(existing.map(g=>g.gateIndex));
+ const due=Math.min(input.intervalMinutes*2-1,Math.floor((Date.now()-input.startMs)/GATE_MS));
+ for(let index=1;index<=due;index++){
+   if(seen.has(index))continue;
+   const at=input.startMs+index*GATE_MS;
+   const data:{rows:Record<string,unknown>[]}=Date.now()>at+GATE_GRACE_MS?{rows:[]}:
+     await c.query(`SELECT input FROM waterx_timed_observations WHERE network=$1 AND strategy_version=$2
+       AND interval_minutes=$3 AND round_id=$4 AND received_at_ms BETWEEN $5 AND $6
+       AND accepted_at_ms<=$6 ORDER BY received_at_ms DESC LIMIT 513`,[...values(input),Math.max(input.startMs,at-75000),at]);
+   if(data.rows.length>512)throw new Error("Gate evidence bound exceeded");
+   const inputs=data.rows.map(r=>r.input as TimedInput).reverse(),latest=inputs.at(-1);
+   const obs:LockObservation[]=inputs.filter(v=>validWaterxProbabilityPair(v.probabilityUp,v.probabilityDown)).map(v=>({
+     atMs:v.receivedAtMs!,receivedAtMs:v.receivedAtMs!,providerSourceAtMs:null,
+     probabilityUp:v.probabilityUp!,probabilityDown:v.probabilityDown!,sourceHealthy:true}));
+   const evaluatedAt=Date.now(),valid=!!latest&&validWaterxProbabilityPair(latest.probabilityUp,latest.probabilityDown);
+   let gate=evaluateQualificationGate(input,obs,index,evaluatedAt,valid);
+   const candidate=!saved&&gate.result==="QUALIFIED"?buildTimedDecision(input,obs,discovered,evaluatedAt,valid,
+     {reference:latest?.anchorPrice??null,referenceConfirmed:latest?.anchorConfirmed??false,
+       features:latest?.features??{},observationHistory:inputs,executionCutoffAtMs:null}):null;
+   if(candidate){
+     onSelected?.();
+     await c.query(`INSERT INTO waterx_timed_decisions(id,network,strategy_version,interval_minutes,round_id,decision_at_ms,status,decision)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[candidate.id,...values(input),candidate.decisionAtMs,candidate.status,JSON.stringify(candidate)]);
+     await c.query("INSERT INTO waterx_timed_outbox(decision_id) VALUES($1)",[candidate.id]);
+     await c.query("SELECT pg_notify('bluewater_timed_decision',$1)",[candidate.id]);saved=inserted=candidate;
+   }
+   const {snapshotDigest:_digest,...body}=gate;
+   const frozen={...body,decisionId:candidate?.id??null,evidenceSnapshot:{
+     schema:"waterx-gate-evidence-v1",availableByMs:at,observations:inputs,
+     reference:latest?.anchorPrice??null,referenceConfirmed:latest?.anchorConfirmed??false,
+     features:latest?.features??{},missingInput:!latest,latestInputValid:valid,
+     inputReceiptSemantics:"Both HTTP receipt and database acceptance at or before scheduled gate"}};
+   gate={...frozen,snapshotDigest:digestEarlySnapshot(frozen)};
+   await c.query(`INSERT INTO waterx_gate_journals(network,strategy_version,interval_minutes,round_id,gate_index,
+     scheduled_at_ms,evaluated_at_ms,evidence_cutoff_ms,result,decision_id,journal) VALUES($1,$2,$3,$4,$5,$6,$7,$6,$8,$9,$10)`,
+     [...values(input),index,at,evaluatedAt,gate.result,gate.decisionId,JSON.stringify(gate)]);
+   existing.push(gate);emitted.push(gate);
+ }
+ if(!saved&&Date.now()>=input.expiryMs){
+   const final=finalRecord(input,existing,Date.now());
+   await c.query(`INSERT INTO waterx_timed_decisions(id,network,strategy_version,interval_minutes,round_id,decision_at_ms,status,decision)
+   VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[final.id,...values(input),final.decisionAtMs,final.status,JSON.stringify(final)]);
+   await c.query("INSERT INTO waterx_timed_outbox(decision_id) VALUES($1)",[final.id]);saved=inserted=final;
+ }
+ const commitAt=performance.now();await c.query("COMMIT");committed=true;
+ recordEarlyDelivery(input.intervalMinutes,input.roundId,"COMMIT_RESPONSE",performance.now()-commitAt,"ok");
+ if(inserted){
+   const ack=Date.now(),ok=await journalTimedAcknowledgement(inserted.id,ack,c);
+   saved={...inserted,committedAtMs:ack,acknowledgementStatus:ok?"JOURNALED":"UNJOURNALED",
+     onTime:inserted.status==="LOCKED"?ack<=inserted.hardDeadlineAtMs:null,
+     operationalFailure:inserted.status==="LOCKED"&&ack>inserted.hardDeadlineAtMs?"COMMIT_AFTER_GATE_GRACE":null};
+ }
+ emitted.forEach(g=>onGate?.(g));if(!emitted.length&&existing.length)onGate?.(existing.at(-1)!);return saved;
+ }catch(error){recordEarlyDelivery(input.intervalMinutes,input.roundId,"CAPTURE_ATTEMPT",performance.now()-acquire,"error");throw error;}
+ finally{if(!committed)await c.query("ROLLBACK").catch(()=>{});c.release();}
 }
 export async function consumeTimedDecisionReceipts(db:LockDb=timedPool){
-  await retryTimedAcknowledgements(db);
-  return db.query(`UPDATE waterx_timed_outbox SET worker_received_at_ms=floor(extract(epoch FROM clock_timestamp())*1000)::bigint
-    WHERE decision_id IN(SELECT decision_id FROM waterx_timed_outbox
-      WHERE worker_received_at_ms IS NULL ORDER BY created_at LIMIT 20)
-    AND worker_received_at_ms IS NULL RETURNING decision_id`);
+ await retryTimedAcknowledgements(db);
+ return db.query(`UPDATE waterx_timed_outbox SET worker_received_at_ms=floor(extract(epoch FROM clock_timestamp())*1000)::bigint
+ WHERE decision_id IN(SELECT decision_id FROM waterx_timed_outbox WHERE worker_received_at_ms IS NULL ORDER BY created_at LIMIT 20)
+ AND worker_received_at_ms IS NULL RETURNING decision_id`);
 }
-export const timedHistory=(interval:5|15,limit=50,db:LockDb=timedPool)=>
-  scoredTimedHistory({interval:String(interval),limit},Date.now(),db);
+export const timedHistory=(interval:5|15,limit=50,db:LockDb=timedPool)=>scoredTimedHistory({interval:String(interval),limit},Date.now(),db);

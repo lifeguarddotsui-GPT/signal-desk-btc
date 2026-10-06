@@ -13,6 +13,7 @@ import { validateDecisionSnapshot, type LiveSnapshotEnvelope } from "./live-deci
 
 const now = 1_720_000_000_000;
 const strategyVersion = "waterx-timed-baseline-v1";
+const gateStrategyVersion = "waterx-qualification-gates-v3";
 
 function savedRecord(interval: 5 | 15, status: TimedDecision["status"] = "LOCKED"): TimedDecision {
   const elapsedMs = status === "NO_VALID_INPUT" ? (interval === 5 ? 150_000 : 450_000)
@@ -64,6 +65,26 @@ function timed(interval: 5 | 15, elapsed: number, phase: TimedState["phase"]): T
   };
 }
 
+function gateTimed(interval: 5 | 15, elapsed: number): TimedState {
+  const state = timed(interval, elapsed, elapsed >= (interval === 5 ? 60_000 : 180_000) ? "EVALUATING" : "OBSERVING");
+  const start = now - elapsed;
+  const expiry = start + interval * 60_000;
+  const next = start + (Math.floor(elapsed / 30_000) + 1) * 30_000;
+  return {
+    ...state,
+    strategyVersion: gateStrategyVersion,
+    targetAtMs: start + (interval === 5 ? 60_000 : 180_000),
+    hardDeadlineAtMs: expiry,
+    timeProgress: elapsed / (interval * 60_000),
+    nextGateAtMs: next < expiry ? next : null,
+    lastGate: null,
+    requirementsMet: 3,
+    requirementsTotal: 4,
+    policySource: "experimental market-based policy",
+    executionCutoffAtMs: null,
+  };
+}
+
 function roundDecision(interval: 5 | 15, state: TimedState): RoundDecision {
   const startMs = now - state.elapsedMs;
   return {
@@ -73,7 +94,7 @@ function roundDecision(interval: 5 | 15, state: TimedState): RoundDecision {
     readiness: {
       state: "LEANING", score: 50, side: "UP", probability: .64, evaluatedAtMs: now,
       secondsRemaining: 100, sameSideMs: 2000, earliestPossibleAtMs: now + 1000,
-      reason: "Conditions are still building.", health: "AVAILABLE",
+      reason: "Conditions are still building.", health: "WAITING FOR EVIDENCE",
       components: { strength: .64, requiredStrength: .7, persistenceMs: 2000, requiredPersistenceMs: 12000,
         range: .03, reversals: 0, observationCount: 4, ageMs: 1200, gapReset: false, velocity: 0,
         acceleration: 0, sourceHealthy: true, withinWindow: true, fresh: true, stable: false },
@@ -99,27 +120,23 @@ function history(interval: 5 | 15, record: TimedDecision): TimedHistoryResponse 
   return { strategyVersion, entries: [record], metrics: { n: 1, onTimeLocks: 0, deadlineLocks: 1, missed: 0, noValidInput: 0, settledN: 0 } };
 }
 
-test("both interval contracts render independent target and mandatory hard-deadline countdowns", () => {
+test("v3 gates show the next evaluation without a mandatory hard-deadline countdown", () => {
   for (const interval of [5, 15] as const) {
-    const target = interval === 5 ? 120_000 : 300_000;
-    const hard = interval === 5 ? 150_000 : 450_000;
-    const observing = timed(interval, target - 30_000, "OBSERVING");
-    const evaluating = timed(interval, hard - 10_000, "EVALUATING");
-    assert.match(renderDesk(roundDecision(interval, observing)), /TARGET DECISION IN<\/span><strong>00:30/);
-    assert.match(renderDesk(roundDecision(interval, evaluating)), /MANDATORY DECISION IN<\/span><strong>00:10/);
+    const state = gateTimed(interval, 45_000);
+    const html = renderDesk(roundDecision(interval, state));
+    assert.match(html, /NEXT QUALIFICATION GATE<\/span><b>00:15/);
+    assert.match(html, /A check, not a forced choice/);
+    assert.doesNotMatch(html, /MANDATORY DECISION|HARD DEADLINE/);
   }
 });
 
-test("primary timing omits ambiguous latest-decision time and reports saved elapsed only for immutable choices", () => {
-  const observing = timed(5, 31_000, "OBSERVING");
-  const start = now - observing.elapsedMs;
-  observing.targetAtMs = start + 60_000;
-  observing.hardDeadlineAtMs = start + 90_000;
+test("primary gate timing shows elapsed time and saved gate identity without a forced choice timer", () => {
+  const observing = gateTimed(5, 31_000);
   const pendingHtml = renderDesk(roundDecision(5, observing));
-  assert.match(pendingHtml, /00:31 \/ target 01:00/);
-  assert.match(pendingHtml, /Target <b>01:00/);
-  assert.match(pendingHtml, /Hard deadline <b>01:30/);
-  assert.doesNotMatch(pendingHtml, /Latest decision|elapsed<\/b>/);
+  assert.match(pendingHtml, /00:31 \/ 01:00/);
+  assert.match(pendingHtml, /Qualification objective <b>01:00/);
+  assert.match(pendingHtml, /NEXT QUALIFICATION GATE<\/span><b>00:29/);
+  assert.doesNotMatch(pendingHtml, /Hard deadline|Mandatory decision|Latest decision/);
 
   const saved = savedRecord(5);
   const locked = timed(5, saved.elapsedMs, "DEADLINE");
@@ -131,25 +148,21 @@ test("primary timing omits ambiguous latest-decision time and reports saved elap
   assert.doesNotMatch(savedHtml, /Latest decision/);
 });
 
-test("new live baseline shows 60-second 5m target, exact unmet rule, and separated indicators", () => {
-  const state = timed(5, 48_000, "OBSERVING");
-  const start = now - state.elapsedMs;
-  state.strategyVersion = "waterx-early-baseline-v2";
-  state.targetAtMs = start + 60_000;
-  state.hardDeadlineAtMs = start + 90_000;
-  state.timeProgress = state.elapsedMs / 90_000;
-  state.readinessPercent = 75;
+test("gate policy uses a four-item qualification checklist and one wait reason, not a readiness percentage", () => {
+  const state = gateTimed(5, 48_000);
   state.components = {
     sameSideMs: 54_000, requiredSameSideMs: 60_000, validCount: 4, requiredCount: 3,
     probabilityRange: .018, maximumRange: .045, strength: .64, requiredStrength: .72,
   };
+  state.requirementsMet = 2;
   const markup = renderDesk(roundDecision(5, state));
-  assert.match(markup, /00:48 \/ target 01:00/);
-  assert.match(markup, /Hard deadline <b>01:30/);
+  assert.match(markup, /00:48 \/ 01:00/);
+  assert.match(markup, /Qualification objective <b>01:00/);
   assert.match(markup, /Needs 6 seconds more same-side stability/);
-  assert.match(markup, /EVIDENCE READINESS/);
-  assert.match(markup, /MARKET PROBABILITY/);
-  assert.match(markup, /not calibrated/i);
+  assert.match(markup, /2 of 4 requirements/);
+  const primary = markup.split('<details class="mo-benchmark-details">')[0];
+  assert.doesNotMatch(primary, /EVIDENCE READINESS|READINESS|readinessPercent/);
+  assert.match(markup, /uncalibrated/i);
 });
 
 test("saved DOWN remains frozen through quote outage and never swaps to current UP lean", () => {
@@ -159,7 +172,7 @@ test("saved DOWN remains frozen through quote outage and never swaps to current 
   const markup = renderDesk(roundDecision(5, state), false);
   assert.match(markup, /LOCKED DOWN/);
   assert.doesNotMatch(markup,/50% conditions reported/);
-  assert.match(markup, /FROZEN SIDE PROBABILITY/);
+  assert.match(markup, /FROZEN MARKET PROBABILITY/);
   assert.match(markup, /Choice is frozen\. Trading authority remains disabled/);
   assert.match(markup, /Quote delayed · frozen choice retained/);
   assert.match(markup, /Decision lifecycle, policy and raw evidence/);
@@ -173,8 +186,9 @@ test("late saved choice is visibly a missed deadline, never a green on-time lock
   state.saved={...savedRecord(5),onTime:false,operationalFailure:"COMMIT_AFTER_HARD_DEADLINE"};
   state.persistence="COMMITTED";
   const markup=renderDesk(roundDecision(5,state));
-  assert.match(markup,/LOCKED DOWN · LATE/);
-  assert.match(markup,/COMMIT TIMING<\/span><strong>LATE/);
+  assert.match(markup,/LOCKED DOWN/);
+  assert.match(markup,/deadline missed/);
+  assert.match(markup,/COMMIT ACKNOWLEDGEMENT<\/span><strong>LATE/);
   assert.match(markup,/Operational failure: COMMIT_AFTER_HARD_DEADLINE/);
 });
 
@@ -190,7 +204,7 @@ test("no-input and missed-deadline outcomes are explicit recorded failures witho
   assert.match(noInputMarkup, /NO VALID INPUT/);
   assert.match(noInputMarkup, /NO VALID PROBABILITY INPUT/);
   assert.doesNotMatch(noInputMarkup, /UP LOCKED|DOWN LOCKED/);
-  assert.match(missedMarkup, /MISSED DEADLINE/);
+  assert.match(missedMarkup, /MISSED GATE/);
   assert.match(missedMarkup, /no late choice substituted|MISSED_DEADLINE/);
 });
 
@@ -272,4 +286,63 @@ test("timed snapshots require exact absolute windows and saved records cannot re
   swapped.decision!.stateVersion = 1;
   swapped.decision!.timedDecision!.saved!.id = "replacement-decision-id";
   assert.equal(validateDecisionSnapshot(swapped, 5, payload), "IMMUTABLE_TIMED_DECISION_REGRESSION");
+});
+
+test("v3 snapshot validation binds expiry, qualification gates, and the saved gate acknowledgement grace", () => {
+  const elapsed = 121_000;
+  const state = gateTimed(5, elapsed);
+  const startMs = now - elapsed;
+  const scheduledAt = startMs + 120_000;
+  const saved: TimedDecision = {
+    ...savedRecord(5),
+    strategyVersion: gateStrategyVersion,
+    startMs,
+    expiryMs: startMs + 5 * 60_000,
+    elapsedMs: elapsed,
+    targetAtMs: scheduledAt,
+    hardDeadlineAtMs: scheduledAt + 2_000,
+    decisionAtMs: now,
+    committedAtMs: now,
+    onTime: true,
+    receivedAtMs: scheduledAt,
+    coverage: { n: 3, firstAtMs: scheduledAt - 20_000, lastAtMs: scheduledAt, maxGapMs: 10_000 },
+    gateIndex: 4,
+    gateScheduledAtMs: scheduledAt,
+  };
+  state.saved = saved;
+  state.persistence = "COMMITTED";
+  const payload: LiveSnapshotEnvelope = {
+    serverTime: new Date(now).toISOString(), intervalMinutes: 5,
+    round: { id: saved.roundId, startMs, expiryMs: saved.expiryMs },
+    decision: roundDecision(5, state),
+  };
+  assert.equal(validateDecisionSnapshot(payload, 5), null);
+  const wrongAckWindow = structuredClone(payload);
+  wrongAckWindow.decision!.timedDecision!.saved!.hardDeadlineAtMs = scheduledAt + 3_000;
+  assert.equal(validateDecisionSnapshot(wrongAckWindow, 5), "TIMED_LOCKED_CHOICE_INVALID");
+  const legacyMutation = structuredClone(payload);
+  legacyMutation.decision!.timedDecision!.strategyVersion = "waterx-early-baseline-v2";
+  assert.equal(validateDecisionSnapshot(legacyMutation, 5), "TIMED_STATE_INVALID");
+});
+
+test("gate history displays intentional abstention and keeps gate journals separate from lock scoring", () => {
+  const record = {
+    ...savedRecord(5, "ABSTAINED_NO_QUALIFIED_SIGNAL"),
+    strategyVersion: gateStrategyVersion,
+    result: "ABSTENTION" as const,
+  };
+  const markup = renderToStaticMarkup(React.createElement(TimedDecisionHistoryRecords, {
+    interval: 5,
+    data: {
+      strategyVersion: gateStrategyVersion, entries: [record],
+      metrics: { n: 1, onTimeLocks: 0, deadlineLocks: 0, missed: 0, noValidInput: 0, settledN: 0,
+        abstentionRate: 1, operationalFailureRate: 0 },
+    },
+  }));
+  assert.match(markup, /Abstained · no qualified signal/);
+  assert.match(markup, /Abstention rate/);
+  assert.match(markup, /Operational failure rate/);
+  assert.match(markup, /Scored sample count<\/span><b>0/);
+  assert.match(markup, /Intentional abstention · excluded from prediction scoring/);
+  assert.doesNotMatch(markup, /Operationally late/);
 });

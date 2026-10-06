@@ -105,14 +105,17 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
         {([5, 15] as const).map(value => <button key={value} type="button" aria-pressed={interval === value} className={interval === value ? "selected" : ""} onClick={() => setInterval(value)}>{value}m</button>)}
       </div>
     </div>
-    <div className="agent-round-identity">
-      <div><span>ACTIVE ROUND</span><strong>{round?.id ?? "Unavailable"}</strong></div>
-      <div className="agent-expiry"><span><Clock3 size={12} /> EXPIRES IN</span><strong>{round ? clock(round.expiryMs - now) : "—:—"}</strong></div>
-      <div><span>INTERVAL</span><strong>{interval} minutes</strong></div>
-      <div><span>RESEARCH SNAPSHOT</span><strong>{clockStamp(reports.research?.asOf)}</strong></div>
-    </div>
     <ManualOpportunity view={timedView} now={timedNow} browserReceivedAtMs={timedLive.atomicUpdated}
       onRetry={timedLive.reload} refresh={{ pending: timedLive.loading, error: timedLive.error }} />
+    <details className="agent-round-identity-audit">
+      <summary>Active round identity &amp; snapshot diagnostics</summary>
+      <div className="agent-round-identity">
+        <div><span>ATOMIC DECISION ROUND ID</span><strong>{timedRound?.id ?? "Unavailable"}</strong></div>
+        <div className="agent-expiry"><span><Clock3 size={12} /> DECISION ROUND EXPIRES IN</span><strong>{timedRound ? clock(timedRound.expiryMs - timedNow) : "—:—"}</strong></div>
+        <div><span>INTERVAL</span><strong>{interval} minutes</strong></div>
+        <div><span>RESEARCH REPORT ROUND · SEPARATE</span><strong>{round?.id ?? "Unavailable"} · {clockStamp(reports.research?.asOf)}</strong></div>
+      </div>
+    </details>
     <details className="agent-benchmarks">
       <summary>Canonical, champion &amp; readiness benchmarks · separate research references</summary>
       <div className="agent-round-evidence">

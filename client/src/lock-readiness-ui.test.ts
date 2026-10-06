@@ -119,7 +119,9 @@ test("live desk uses the atomic snapshot hook and passes one view to both curren
   assert.match(panelSource, /export type RoundDecisionEvidence = RoundDecision/);
   assert.match(app, /`\/api\/waterx\/refresh-health\?interval=\$\{interval\}`/);
   assert.match(app, /PROCESS-LOCAL · NO DATABASE READ/);
-  assert.match(app, /Coinbase SSE/);
+  assert.match(app, /comparisonFresh \? comparison\?\.source/);
+  assert.match(app, /streamCoinbaseFresh \? latestStreamPoint\?\.source/);
+  assert.match(app, /typeof body\.source === "string" \? body\.source : "Not reported"/);
   assert.match(app, /not durable coverage, proof of a persisted round, or trade evidence/);
 });
 

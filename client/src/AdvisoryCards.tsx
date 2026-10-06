@@ -94,13 +94,17 @@ export function AdvisoryCards({ advisory, expectedIdentity, roundCurrent, quoteC
         const ui = assessment as typeof assessment & AssessmentUi;
         const state = ["OBSERVE", "HIGH_LIKELIHOOD", "FAVORABLE_RISK_REWARD"].includes(assessment.state)
           ? assessment.state : "OBSERVE";
-        const isQualifiedState = assessment.qualified && state !== "OBSERVE";
-        const presentedState = isQualifiedState ? state : "OBSERVE";
         const modelAvailable = ui.modelAvailable === true;
         const quoteAvailable = ui.quoteAvailable === true;
         const proof = advisory?.proof?.[side];
         const verifiedModel = ui.model;
         const verifiedEconomics = ui.economics;
+        const executionProof = advisory?.proof?.[side]?.executionQuote;
+        const hasVerifiedOpportunityProof = !fixtureName && assessment.qualified && modelAvailable &&
+          quoteAvailable && !!verifiedEconomics && validNumber(ui.calibratedProbability ?? verifiedModel?.calibratedProbability) &&
+          executionProof?.kind === "certified-executable" && executionProof.executable === true;
+        const isQualifiedState = hasVerifiedOpportunityProof && state !== "OBSERVE";
+        const presentedState = isQualifiedState ? state : "OBSERVE";
         const model = (proof?.model ?? {}) as NonNullable<typeof proof>["model"] & ProofModelUi;
         const execution = (proof?.executionQuote ?? {}) as NonNullable<typeof proof>["executionQuote"] & ProofQuoteUi;
         const modelProbability = modelAvailable
@@ -143,7 +147,7 @@ export function AdvisoryCards({ advisory, expectedIdentity, roundCurrent, quoteC
             <span className="assessment-probability"><small>BLUEWATERAI CALIBRATED</small><b>{percent(modelProbability)}</b></span>
             <span className="assessment-market"><small>WATERX MARKET</small><b>{marketOdds.current ? marketOdds[side] : "Unavailable"}</b><em>{marketOdds.current ? `${side === "up" ? marketOdds.upPrice : marketOdds.downPrice} side price` : "Side price unavailable"}</em></span>
           </div>
-          {isQualifiedState && <p className={`assessment-position-note ${opportunityClass}`}>{presentedState === "HIGH_LIKELIHOOD" ? "CYAN · High likelihood · modest return" : "VIOLET · Favorable risk/reward"}</p>}
+          {isQualifiedState && <p className={`assessment-position-note ${opportunityClass}`}>{presentedState === "HIGH_LIKELIHOOD" ? "CYAN · Higher calibrated probability · smaller potential profit" : "VIOLET · Verified qualifying risk / reward economics"}</p>}
           <div className="assessment-metadata">
             <span>Model <b>{modelAvailable && modelVersion ? modelVersion : "Withheld"}</b></span>
             <span>Probability age <b>{probabilityAge}</b></span>

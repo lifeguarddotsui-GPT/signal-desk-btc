@@ -130,9 +130,13 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
         entry.opportunity.receivedAtMs>=(last?.receivedAtMs??0)){
         timing.qualified=false;timing.readinessPercent=0;timing.liveSide=null;timing.liveProbabilityUp=null;
         timing.blocker=entry.opportunity.probabilityEvidence==="invalid"?"INVALID_PROBABILITY_PAIR":"NO_VALID_PROBABILITY_INPUT";
+        timing.lifecycle="OBSERVING";timing.remainingRequirement="Needs valid current WaterX probabilities";
       }
       timing.saved=saved?.saved??null;timing.errorClass=saved?.error??null;
       timing.persistence=saved?.saved?"COMMITTED":saved?.error?"FAILED":saved?.saving?"SAVING":"WAITING";
+      if(timing.saved?.side&&timing.saved.status==="LOCKED")
+        timing.lifecycle=timing.saved.side==="UP"?"LOCKED_UP":"LOCKED_DOWN";
+      else if(timing.persistence==="SAVING")timing.lifecycle="SAVING";
       return {...identity,format:"waterx-live-decision-v2",streamId,network:"sui:mainnet",
         policyVersion:policy.version,stateVersion:++version,updatedAtMs:entry.updatedAtMs,publishedAtMs:now,
         readiness,market:last?{probabilityUp:last.probabilityUp,probabilityDown:last.probabilityDown,

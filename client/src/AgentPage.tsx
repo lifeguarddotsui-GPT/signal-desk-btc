@@ -4,6 +4,7 @@ import { getWallets, type WalletAccount } from "@mysten/wallet-standard";
 import { agentPolicySchema, defaultAgentPolicy, policySummary, type AgentPolicy } from "../../shared/agent-policy";
 import { agentDate, asErrorMessage, changePolicyLimitMode, copyPolicy, policyAmountInputValue, policyValueFromInput } from "./agent-format";
 import AgentCurrentRound from "./AgentCurrentRound";
+import AgentFundingPreview from "./AgentFundingPreview";
 
 type Paper = { startingCents: number; availableCents: number; committedCents: number; turnoverCents: number; realizedPnlCents: number; highWaterCents: number; consecutiveLosses: number; targetCents: number | null; startedAt: number | null };
 type LedgerItem = { id: string; event: string; at: number | string; details: unknown };
@@ -448,6 +449,7 @@ function AgentPage() {
             <button disabled={!isAuthorized || !accountId || !!busy} onClick={() => void beginOwnerAction("REVOKE")}><ShieldCheck size={15} /> Revoke delegate</button>
             <button disabled={!isAuthorized || !accountId || !!busy} onClick={() => void beginOwnerAction("WITHDRAW")}><ArrowUpFromLine size={15} /> Review withdrawal</button>
           </div>
+          <AgentFundingPreview />
           <div className="agent-funding-form">
             <Field label="Funding amount · atomic units" help="Settlement coin decimals are not assumed."><input inputMode="numeric" placeholder="Enter exact atomic amount" value={fundingAmount} onChange={e => setFundingAmount(e.target.value)} /></Field>
             <Field label="Coin object IDs" help="Comma-separated owner coin object IDs from your wallet."><input placeholder="Required only if service requests specific coins" value={coinIds} onChange={e => setCoinIds(e.target.value)} /></Field>

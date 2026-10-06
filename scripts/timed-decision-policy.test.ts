@@ -24,7 +24,7 @@ for(const interval of [5,15] as const){
     assert.equal(buildTimedDecision(r,samples(target,.56),start,target,true),null);
     const d=buildTimedDecision(r,rows,start,hard,true)!;
     assert.equal(d.status,"LOCKED");assert.equal(d.side,"UP");
-    assert.equal(d.lockReason,"DEADLINE_BEST_SUPPORTED_CHOICE");assert.equal(d.onTime,null);
+    assert.equal(d.lockReason,"DEADLINE_FALLBACK");assert.equal(d.onTime,null);
     assert.equal(d.earlyBlocker,"DIRECTIONAL_SEPARATION_BELOW_POLICY");
   });
   test(`${interval}m tie is deterministic, marked ambiguous and never automatic`,()=>{

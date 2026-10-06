@@ -5,7 +5,7 @@
  * This is not a verified safe cutoff, nor a promise under outages.
  */
 export function timedCompletionPolicy(interval:5|15) {
-  return {version:"timed-completion-v2",allowanceMs:interval===5?5000:3000,
+  return {version:"early-completion-v3",allowanceMs:interval===5?5000:3000,
     basis:"observed evaluation-to-ACK tail plus provisional pilot scheduling buffer",
     measuredP95Ms:interval===5?2903:746,measuredN:interval===5?17:5,
     verifiedSafeCutoff:false,extraSafetyMs:2000};

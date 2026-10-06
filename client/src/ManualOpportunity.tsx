@@ -12,6 +12,8 @@ type Props = {
   onRetry?: () => void;
   refresh?: { pending: boolean; error: string };
   browserReceivedAtMs?: number;
+  marketReference?: { price: number | null; quality: string; source: string };
+  comparison?: { price: number | null; source: string; receivedAtMs: number | null };
 };
 
 const stamp = (value: number | null | undefined) => value == null || !Number.isFinite(value)
@@ -30,8 +32,9 @@ const mmss = (value: number | null | undefined) => {
 };
 const elapsedLabel = (value: number) => {
   const seconds = Math.max(0, Math.floor(value / 1000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 };
+const requirementDuration = (value: number) => `${Math.ceil(Math.max(0, value) / 1000)} second${Math.ceil(Math.max(0, value) / 1000) === 1 ? "" : "s"}`;
 const exactReason = (value: string | null | undefined) => value?.replaceAll("_", " ") ?? "No blocker reported";
 
 function healthLabel(value: string | undefined) {
@@ -42,7 +45,12 @@ function sideLabel(side: "UP" | "DOWN" | null | undefined) {
   return side ?? "Unavailable";
 }
 
-function TimedDecisionCard({ timed, decision, now, liveFresh }: { timed: TimedState | null; decision: RoundDecision | null; now: number; liveFresh: boolean }) {
+type TimedDisplay = TimedState & { lifecycle?: string; remainingRequirement?: string | null };
+function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, marketReference, comparison }: {
+  timed: TimedState | null; decision: RoundDecision | null; now: number; liveFresh: boolean;
+  marketReference?: Props["marketReference"]; comparison?: Props["comparison"];
+}) {
+  const timed = timedState as TimedDisplay | null;
   const saved: TimedDecision | null = timed?.saved ?? null;
   const isLocked = saved?.status === "LOCKED" && saved.side !== null;
   const stateKind = isLocked ? saved.onTime===false?"failed":"locked"
@@ -70,74 +78,105 @@ function TimedDecisionCard({ timed, decision, now, liveFresh }: { timed: TimedSt
   const liveProbability = timed?.liveProbabilityUp;
   const displayedLiveProbability = liveSide === "UP" ? liveProbability
     : liveSide === "DOWN" && liveProbability != null ? decision?.market?.probabilityDown ?? null : null;
-  const remainingRound = saved ? Math.max(0, saved.expiryMs - (saved.committedAtMs ?? saved.decisionAtMs)) : null;
-  const timeProgress = Math.max(0, Math.min(100, timed?.timeProgress == null ? 0 : timed.timeProgress * 100));
+  const targetSeconds = decision && timed ? Math.max(1, Math.round((timed.targetAtMs - decision.startMs) / 1000))
+    : decision?.intervalMinutes === 15 ? 180 : 60;
+  const hardSeconds = decision && timed ? Math.max(1, Math.round((timed.hardDeadlineAtMs - decision.startMs) / 1000))
+    : decision?.intervalMinutes === 15 ? 300 : 90;
+  const elapsed = saved?.elapsedMs ?? timed?.elapsedMs ?? 0;
+  const observationProgress = Math.max(0, Math.min(100, elapsed / (targetSeconds * 1000) * 100));
   const readiness = Math.max(0, Math.min(100, timed?.readinessPercent ?? 0));
-  const components=timed?.components;
+  const probability = liveFresh ? displayedLiveProbability : null;
+  const components = timed?.components;
   const sourceAge=decision?.market?.receivedAtMs!=null?Math.max(0,now-decision.market.receivedAtMs):timed?.sourceAgeMs;
+  const unmetRequirement = isLocked
+    ? "Choice is frozen. Trading authority remains disabled."
+    : timed?.remainingRequirement || (components
+      ? components.sameSideMs < components.requiredSameSideMs
+        ? `Needs ${requirementDuration(components.requiredSameSideMs - components.sameSideMs)} more same-side stability`
+        : components.validCount < components.requiredCount
+          ? `Needs ${components.requiredCount - components.validCount} more valid observation${components.requiredCount - components.validCount === 1 ? "" : "s"}`
+          : components.probabilityRange !== null && components.probabilityRange > components.maximumRange
+            ? `Probability range ${components.probabilityRange.toFixed(3)} exceeds ${components.maximumRange.toFixed(3)}`
+            : components.strength < components.requiredStrength
+              ? `Directional separation ${components.strength.toFixed(3)} is below ${components.requiredStrength.toFixed(3)}`
+              : timed?.blocker?.replaceAll("_", " ") || "No unmet requirement reported"
+      : timed?.blocker?.replaceAll("_", " ") || "Waiting for valid same-round observations");
+  const referencePrice = marketReference?.price ?? decision?.opportunity?.reference.price ?? null;
+  const referenceQuality = marketReference?.quality ?? decision?.opportunity?.reference.status ?? "not reported";
+  const referenceSource = marketReference?.source ?? "WaterX round reference";
+  const comparePrice = comparison?.price ?? null;
+  const comparisonSource = comparison?.source?.trim() || "Not reported";
+  const comparisonAge = comparison?.receivedAtMs == null ? null : Math.max(0, now - comparison.receivedAtMs);
+  const compactHealth = !liveFresh ? "Quote delayed · frozen choice retained"
+    : decision?.componentHealth?.storage === "FAILED" ? "Storage issue · no new saved choice asserted"
+      : decision?.componentHealth?.priceFeed !== "AVAILABLE" ? "Price feed delayed · research only"
+        : "Data current · read-only research";
 
-  return <section className="mo-timed" aria-label="Early timed decision">
-    <div className="mo-timed-top">
-      <div className="mo-timed-title">
-        <span className="mo-label">EARLY STRATEGY · {timed?.strategyVersion ?? "waterx-timed-baseline-v1"}</span>
-        <strong className={`mo-timed-status ${stateKind}`} role="status">{status}</strong>
-        <small>{decision ? `${decision.intervalMinutes}m round · ${decision.roundId}` : "Waiting for exact-round authoritative state"}</small>
-      </div>
-      <div className="mo-timed-countdown">
-        <span className="mo-label">{saved?"COMMIT TIMING":nextLabel}</span>
-        <strong>{saved?saved.onTime===false?"LATE":saved.onTime===true?"ON TIME":"UNKNOWN":countdown == null ? (timed?.phase === "DEADLINE" ? "00:00" : "—:—") : mmss(countdown)}</strong>
-      </div>
-    </div>
-    <div className="mo-timed-evidence">
-      <div className="mo-timed-direction">
-        <span className="mo-label">{isLocked ? "FROZEN RESEARCH CHOICE" : "CURRENT LIVE LEAN"}</span>
-        <strong className={`mo-side ${(isLocked ? saved.side : liveSide)?.toLowerCase() ?? "unavailable"}`}>
-          {sideLabel(isLocked ? saved.side : liveSide)}
+  return <section className="mo-primary-card" aria-label="Authoritative early decision">
+    <div className="mo-primary-main">
+      <span className="mo-primary-eyebrow">EARLY RESEARCH · DECISION STATE</span>
+      <div className="mo-primary-call">
+        <strong className={`mo-timed-status ${stateKind}`} role="status">
+          {isLocked ? `LOCKED ${saved.side}${saved.onTime === false ? " · LATE" : ""}` : saved?.status === "NO_VALID_INPUT" ? "NO VALID INPUT" :
+            saved?.status === "MISSED_DEADLINE" ? "MISSED DEADLINE" :
+              liveFresh && liveSide ? `LEANING ${liveSide}` : status.toUpperCase()}
         </strong>
-        <small>{isLocked
-          ? `Frozen probability ${percent(sideProbability)} · ${saved.observationId ? `source ${saved.observationId}` : "source not reported"}${liveFresh ? "" : " · current quote unavailable; frozen choice retained"}`
-          : `Live observation ${percent(displayedLiveProbability)} · source age ${duration(sourceAge)}`}</small>
+        <span className="mo-primary-probability">{percent(isLocked ? sideProbability : probability)}
+          <small>{isLocked ? "FROZEN SIDE PROBABILITY" : "MARKET PROBABILITY · NOT CALIBRATED"}</small>
+        </span>
       </div>
-      {!saved&&<div className="mo-progress-set">
-        <div className="mo-progress-label"><span>OBSERVATION TIME</span><b>{timed ? elapsedLabel(timed.elapsedMs) : "—:—"} elapsed</b></div>
-        <div className="mo-progress-track" role="progressbar" aria-label="Observation time progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(timeProgress)}>
-          <i style={{ transform: `scaleX(${timeProgress / 100})` }} />
+      <span className="mo-primary-round">{decision ? `${decision.intervalMinutes}m · exact active round` : "Awaiting exact-round decision snapshot"}</span>
+    </div>
+    <div className="mo-market-pair" aria-label="Round reference and comparison price">
+      <div><span className="mo-primary-eyebrow">PRICE TO BEAT · {referenceQuality.toUpperCase()}</span><strong>{usd(referencePrice, 2)}</strong><small>{referenceSource}</small></div>
+      <div><span className="mo-primary-eyebrow">COMPARISON · {comparisonSource}</span><strong>{usd(comparePrice, 2)}</strong><small>{comparisonAge == null ? "Current comparison unavailable" : `${duration(comparisonAge)} source age`}</small></div>
+    </div>
+    <div className="mo-primary-metrics">
+      <div className="mo-indicator observation">
+        <div><span className="mo-indicator-label">OBSERVATION TIME</span><b>{elapsedLabel(elapsed)} / target {String(Math.floor(targetSeconds / 60)).padStart(2, "0")}:{String(targetSeconds % 60).padStart(2, "0")}</b></div>
+        <div className="mo-progress-track" role="progressbar" aria-label="Observation time toward preferred target" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(observationProgress)}><i style={{ transform: `scaleX(${observationProgress / 100})` }} /></div>
+      </div>
+      <div className="mo-indicator readiness">
+        <div><span className="mo-indicator-label">EVIDENCE READINESS</span><b>{timed ? `${readiness}%` : "Unavailable"}</b></div>
+        <div className="mo-progress-track" role="progressbar" aria-label="Evidence readiness, not outcome probability" aria-valuemin={0} aria-valuemax={100} aria-valuenow={readiness}><i style={{ transform: `scaleX(${readiness / 100})` }} /></div>
+      </div>
+      <div className="mo-indicator probability">
+        <div><span className="mo-indicator-label">MARKET PROBABILITY</span><b>{percent(isLocked ? sideProbability : probability)}</b></div>
+        <div className="mo-progress-track" role="img" aria-label={`Market probability ${percent(isLocked ? sideProbability : probability)}`}><i style={{ transform: `scaleX(${Math.max(0, Math.min(1, (isLocked ? sideProbability : probability) ?? 0))})` }} /></div>
+      </div>
+    </div>
+    <p className="mo-requirement"><b>{isLocked ? "SAVED" : "REMAINING REQUIREMENT"}:</b> {unmetRequirement}</p>
+    <div className="mo-primary-save">
+      <span>Target <b>{String(Math.floor(targetSeconds / 60)).padStart(2, "0")}:{String(targetSeconds % 60).padStart(2, "0")}</b></span>
+      <span>Hard deadline <b>{String(Math.floor(hardSeconds / 60)).padStart(2, "0")}:{String(hardSeconds % 60).padStart(2, "0")}</b></span>
+       {saved && <span>Saved elapsed <b>{elapsedLabel(saved.elapsedMs)}</b></span>}
+      <span>Freshness <b>{liveFresh ? `Current · ${duration(sourceAge)}` : "Delayed"}</b></span>
+      <span>Saved choice <b>{saved ? `${stamp(saved.committedAtMs)} · ${saved.onTime === false ? "late" : "authoritative"}` : "Not saved"}</b></span>
+    </div>
+    <div className="mo-health-compact" role="status"><b>DATA HEALTH</b> · {compactHealth} · no automatic trading authority.</div>
+    <details className="mo-timed-audit">
+      <summary>Decision lifecycle, policy and raw evidence</summary>
+      <div className="mo-timed">
+        <div className="mo-timed-top">
+          <div className="mo-timed-title"><span className="mo-label">LIFECYCLE · {timed?.lifecycle ?? timed?.phase ?? "UNKNOWN"}</span><strong className={`mo-timed-status ${stateKind}`}>{status}</strong><small>{decision ? `Round ${decision.roundId} · strategy ${timed?.strategyVersion ?? "not reported"}` : "Exact-round identity unavailable"}</small></div>
+          <div className="mo-timed-countdown"><span className="mo-label">{saved ? "COMMIT TIMING" : nextLabel}</span><strong>{saved ? saved.onTime === false ? "LATE" : saved.onTime === true ? "ON TIME" : "UNKNOWN" : countdown == null ? "—:—" : mmss(countdown)}</strong></div>
         </div>
-        {components?<div className="mo-timed-result">
-          <span>Same side: {duration(components.sameSideMs)} / {duration(components.requiredSameSideMs)}</span>
-          <span>Valid observations: {components.validCount} / {components.requiredCount}</span>
-          <span>Probability range: {components.probabilityRange===null?"unavailable":components.probabilityRange.toFixed(3)} / maximum {components.maximumRange.toFixed(3)}</span>
-          <span>Direction rule: max(UP, DOWN) {components.strength.toFixed(3)} ≥ {components.requiredStrength.toFixed(3)} · not calibrated win confidence</span>
-        </div>:<span>Component evidence unavailable · {readiness}% conditions reported, not win probability.</span>}
-      </div>}
-    </div>
-    <div className="mo-timed-bottom">
-      {isLocked ? <div className="mo-timed-result">
-        <b>{saved.side} LOCKED · {elapsedLabel(saved.elapsedMs)} INTO ROUND · {elapsedLabel(remainingRound ?? 0)} REMAINING</b>
-        <span>{saved.lockReason.replaceAll("_", " ")} · decision ID <code>{saved.id}</code></span>
-        <span>Observation {saved.observationId ?? "not reported"} · received {stamp(saved.receivedAtMs)} · commit {stamp(saved.committedAtMs)}</span>
-        {saved.onTime === null && <span>On-time commit status not yet acknowledged.</span>}
-        {saved.operationalFailure && <span className="mo-failure-note">Operational failure: {saved.operationalFailure}</span>}
-      </div> : saved?.status === "NO_VALID_INPUT" ? <div className="mo-timed-result failed">
-        <b>NO VALID INPUT RECORDED</b>
-        <span>{saved.earlyBlocker.replaceAll("_", " ")}</span>
-        <span>Decision ID <code>{saved.id}</code> · operational failure {saved.operationalFailure ?? "none reported"}</span>
-      </div> : saved?.status === "MISSED_DEADLINE" ? <div className="mo-timed-result failed">
-        <b>HARD DEADLINE MISSED</b>
-        <span>{saved.earlyBlocker.replaceAll("_", " ")} · no late choice substituted.</span>
-        <span>Decision ID <code>{saved.id}</code> · recorded {stamp(saved.committedAtMs)}</span>
-      </div> : <div className="mo-timed-blocker">
-        <b>{timed?.phase === "EVALUATING" ? "CURRENT BLOCKER" : "READINESS BLOCKER"}</b>
-        <span>{exactReason(timed?.blocker)}</span>
-        {timed?.persistence === "FAILED" && <span className="mo-failure-note">Persistence failed · {timed.errorClass ?? "error class not reported"}</span>}
-        {timed?.phase === "DEADLINE" && <span>Deadline reached; waiting for authoritative persistence outcome. No lock is asserted before commit acknowledgement.</span>}
-      </div>}
-      <div className="mo-timed-safety">
-        <b>READ ONLY</b>
-        <span>Automatic execution disabled · order adapter unverified</span>
-        <span>Research probability is not a win guarantee.</span>
+        {components && <div className="mo-timed-result">
+          <span>Same side: {duration(components.sameSideMs)} / {duration(components.requiredSameSideMs)} · valid observations {components.validCount} / {components.requiredCount}</span>
+          <span>Probability range {components.probabilityRange === null ? "unavailable" : components.probabilityRange.toFixed(3)} / max {components.maximumRange.toFixed(3)} · separation {components.strength.toFixed(3)} / {components.requiredStrength.toFixed(3)}</span>
+          <span>These thresholds measure evidence qualification, not calibrated outcome confidence.</span>
+        </div>}
+        {saved && <div className="mo-timed-result">
+          <b className="mo-frozen-lock">{saved.side ?? saved.status} · IMMUTABLE RESEARCH RECORD</b>
+          <span>{saved.lockReason.replaceAll("_", " ")} · decision ID <code>{saved.id}</code> · observation {saved.observationId ?? "not reported"}</span>
+          <span>Early blocker: {saved.earlyBlocker.replaceAll("_", " ")}</span>
+          <span>Received {stamp(saved.receivedAtMs)} · decision {stamp(saved.decisionAtMs)} · commit {stamp(saved.committedAtMs)} · policy {saved.strategyVersion}</span>
+          {saved.operationalFailure && <span className="mo-failure-note">Operational failure: {saved.operationalFailure}</span>}
+        </div>}
+        {!saved && <div className="mo-timed-blocker"><b>UNMET POLICY REQUIREMENT</b><span>{exactReason(timed?.blocker)}</span>{timed?.persistence === "FAILED" && <span className="mo-failure-note">Persistence failed · {timed.errorClass ?? "error class not reported"}</span>}</div>}
+        <div className="mo-timed-safety"><b>RESEARCH ONLY · NO TRADING AUTHORITY</b><span>Automatic execution disabled · order adapter unverified.</span><span>Live odds may change after a frozen choice.</span></div>
       </div>
-    </div>
+    </details>
   </section>;
 }
 
@@ -318,7 +357,7 @@ function DecisionContent({
   </div>;
 }
 
-export function ManualOpportunity({ view, now, onRetry, refresh, browserReceivedAtMs }: Props) {
+export function ManualOpportunity({ view, now, onRetry, refresh, browserReceivedAtMs, marketReference, comparison }: Props) {
   const [minimumWinningProfit, setMinimumWinningProfit] = useState<1 | 2>(1);
   const decision = view.decision;
   const pending = refresh?.pending ?? false;
@@ -326,8 +365,8 @@ export function ManualOpportunity({ view, now, onRetry, refresh, browserReceived
   return <section className="manual-opportunity" aria-label="Manual round opportunity" aria-busy={pending}>
     <header className="mo-header">
       <div>
-        <span className="mo-kicker">MANUAL OPPORTUNITY · BTC / USD</span>
-        <h2>Exact-round decision &amp; $5 economics</h2>
+        <span className="mo-kicker">ONE AUTHORITATIVE RESEARCH DECISION · BTC / USD</span>
+        <h2>Early decision · exact round</h2>
       </div>
       <div className="mo-header-tools">
         {pending && <span className="mo-refreshing" role="status">Refreshing snapshot</span>}
@@ -343,9 +382,9 @@ export function ManualOpportunity({ view, now, onRetry, refresh, browserReceived
       <span className="mo-missing-mark" aria-hidden="true">—</span>
       <div><strong>Data delayed · no exact-round decision snapshot</strong><p>{view.reason} Quotes and decisions are withheld until a matching snapshot arrives.</p></div>
     </div>}
-    <TimedDecisionCard timed={decision?.timedDecision ?? null} decision={decision} now={now} liveFresh={view.fresh} />
+    <TimedDecisionCard timed={decision?.timedDecision ?? null} decision={decision} now={now} liveFresh={view.fresh} marketReference={marketReference} comparison={comparison} />
     <details className="mo-benchmark-details">
-      <summary>Canonical benchmark &amp; indicative $5 economics · separate from early strategy</summary>
+      <summary>Reference provenance, canonical benchmarks, economics &amp; diagnostics</summary>
       {(!pending || decision) && <DecisionContent decision={decision} view={view} now={now} browserReceivedAtMs={browserReceivedAtMs}
         minimumWinningProfit={minimumWinningProfit} onMinimumWinningProfitChange={setMinimumWinningProfit} />}
     </details>

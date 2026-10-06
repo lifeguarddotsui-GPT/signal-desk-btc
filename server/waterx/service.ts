@@ -9,7 +9,7 @@ import {refreshHealth,refreshErrorClass} from "./refresh-health";
 import {boundedDatabaseRetry} from "./bounded-retry";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {observationId} from "./observation-provenance";
-import {observeTimedStrategy,stopTimedStrategy,timedStrategyQueueMetrics} from "./timed-decision-coordinator";
+import {observeTimedStrategy,stopTimedStrategy,startTimedRecovery,timedStrategyQueueMetrics} from "./timed-decision-coordinator";
 import {timedPoolHealth} from "./timed-db";
 import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
@@ -640,6 +640,7 @@ export function startWaterxCapture(options: {
   retryDelayMs?: number;
   onStalled?: (interval: WaterxInterval, ageMs: number) => void;
 } = {}): () => void {
+  startTimedRecovery();
   const notifiedStalls = new Set<WaterxInterval>();
   for (const interval of intervals) {
     if (running.has(interval)) continue;

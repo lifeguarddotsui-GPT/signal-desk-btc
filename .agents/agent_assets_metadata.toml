@@ -672,3 +672,17 @@ mtime_ms = 1791236354736
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/6c8c48a3-887e-4075-b88d-0a67efe7d912/234633c9-b043-48f9-8cae-16eece43442b"
 storage_version_token = "1791236355903219"
 content_type = "text/html"
+
+[[outputs]]
+id = "9ccMKhM_Buyrq8GjznPpw"
+uri = "file://reports/early-v2-evidence-and-remaining-scope.html"
+type = "html"
+title = "Early-decision evidence and remaining scope"
+description = "Actual 5m/15m timing, verified history, learning jobs, responsive screenshots, build identities and incomplete mainnet gates."
+logical_id = "3c3420b5-75d4-4c6d-aea0-9da3c8d4eb8f"
+content_hash = "sha256:a28a6e7091cf8797d1e5c0bdb6423f6dbbfca8636d50229095b18e61eaccae6f"
+size = 438204
+mtime_ms = 1791247674651
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/3c3420b5-75d4-4c6d-aea0-9da3c8d4eb8f/ee3e139c-7449-4f4e-9067-a8d1057aa3e0"
+storage_version_token = "1791247676465800"
+content_type = "text/html"

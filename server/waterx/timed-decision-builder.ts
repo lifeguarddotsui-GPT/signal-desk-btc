@@ -3,6 +3,7 @@ import {evaluateTimedDecision,TIMED_STRATEGY,timedPolicy,type TimedRound,type Ti
 import type {LockObservation} from "../../shared/lock-readiness";
 import {observationId} from "./observation-provenance";
 import {timedCompletionPolicy} from "../../shared/timed-completion";
+import {validWaterxProbabilityPair} from "../../shared/round-decision";
 export function buildTimedDecision(round:TimedRound,observations:LockObservation[],discoveredAtMs:number,
   now:number,latestInputValid:boolean,evidence:Record<string,unknown>={},prepareFallback=false):TimedDecision|null{
   const evaluated=evaluateTimedDecision(round,observations,now);
@@ -15,6 +16,7 @@ export function buildTimedDecision(round:TimedRound,observations:LockObservation
   if(!deadline&&(!evaluated.qualified||!latestInputValid))return null;
   const missed=discoveredAtMs>evaluated.hardDeadlineAtMs;
   const sourceValid=!missed&&latestInputValid&&latest&&evaluated.sourceAgeMs!==null&&evaluated.sourceAgeMs<=10000&&
+    latest.sourceHealthy&&validWaterxProbabilityPair(latest.probabilityUp,latest.probabilityDown)&&
     latest.receivedAtMs<=evaluated.hardDeadlineAtMs;
   const locked=!!sourceValid;
   // Do not freeze an early NO_VALID_INPUT: new valid evidence may still arrive.
@@ -31,7 +33,7 @@ export function buildTimedDecision(round:TimedRound,observations:LockObservation
     lockReason:missed?"COLLECTOR_DISCOVERED_AFTER_HARD_DEADLINE":!locked?
       !latestInputValid?String(evidence.inputFailure??"LATEST_PROBABILITY_INPUT_INVALID"):latest&&latest.receivedAtMs>evaluated.hardDeadlineAtMs?
         "NO_PRE_DEADLINE_SOURCE":evaluated.blocker:
-      ambiguous?"DEADLINE_TIE_BREAK_UP_AMBIGUOUS":deadline?"DEADLINE_BEST_SUPPORTED_CHOICE":"STABILITY_POLICY_QUALIFIED",
+      ambiguous?"DEADLINE_FALLBACK_TIE_BREAK_UP_AMBIGUOUS":deadline?"DEADLINE_FALLBACK":"STABILITY_POLICY_QUALIFIED",
     earlyBlocker:evaluated.blocker,ambiguous,
     coverage:{n:before.length,firstAtMs:before[0]?.receivedAtMs??null,lastAtMs:latest?.receivedAtMs??null,maxGapMs:maxGap},
     committedAtMs:null,workerReceivedAtMs:null,onTime:null,operationalFailure:null,

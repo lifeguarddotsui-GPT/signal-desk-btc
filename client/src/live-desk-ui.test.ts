@@ -8,7 +8,9 @@ const styleSource = readFileSync(new URL("./index.css", import.meta.url), "utf8"
 
 test("opportunity styling is driven by the validator's exact per-side state", () => {
   assert.match(cardSource, /assessment\.state/);
-  assert.match(cardSource, /assessment\.qualified && state !== "OBSERVE"/);
+  assert.match(cardSource, /hasVerifiedOpportunityProof && state !== "OBSERVE"/);
+  assert.match(cardSource, /!fixtureName && assessment\.qualified && modelAvailable/);
+  assert.match(cardSource, /executionProof\?\.kind === "certified-executable" && executionProof\.executable === true/);
   assert.match(cardSource, /"HIGH_LIKELIHOOD", "FAVORABLE_RISK_REWARD"/);
   assert.match(cardSource, /data-classification=\{presentedState\}/);
 });
@@ -19,7 +21,7 @@ test("independent verified model and quote facts stay available when edge state 
   assert.match(cardSource, /const modelProbability = modelAvailable/);
   assert.match(cardSource, /const economicsAvailable = quoteAvailable && !!verifiedEconomics/);
   assert.match(cardSource, /dollars\(verifiedEconomics\.totalCostUsd\)/);
-  assert.match(cardSource, /const isQualifiedState = assessment\.qualified && state !== "OBSERVE"/);
+  assert.match(cardSource, /const isQualifiedState = hasVerifiedOpportunityProof && state !== "OBSERVE"/);
 });
 
 test("reduced motion leaves the risk/reward assessment as a static bordered state", () => {

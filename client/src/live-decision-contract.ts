@@ -1,7 +1,7 @@
 import type {RoundDecision} from "../../shared/round-decision";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {lockPolicy} from "../../shared/lock-readiness";
-import {TIMED_STRATEGY,timedWindow,type TimedDecision,type TimedState} from "../../shared/timed-decision";
+import {isTimedStrategy,timedWindow,type TimedDecision,type TimedState} from "../../shared/timed-decision";
 
 export type LiveSnapshotEnvelope={
   serverTime?:string;intervalMinutes?:number;status?:string;reason?:string;
@@ -18,9 +18,10 @@ const serverTime=(p:LiveSnapshotEnvelope)=>Date.parse(p.serverTime??"");
 const probabilityOrNull=(n:unknown):n is number|null=>n===null||bounded(n);
 
 function validateTimedDecisionState(timed:TimedState,d:RoundDecision,now:number):string|null{
-  const round=d,window=timedWindow(d.intervalMinutes),target=round.startMs+window.targetSeconds*1000;
+  if(!timed||!isTimedStrategy(timed.strategyVersion))return "TIMED_STATE_INVALID";
+  const round=d,window=timedWindow(d.intervalMinutes,timed.strategyVersion),target=round.startMs+window.targetSeconds*1000;
   const hard=round.startMs+window.hardSeconds*1000,elapsed=Math.max(0,now-round.startMs);
-  if(!timed||timed.strategyVersion!==TIMED_STRATEGY||timed.targetAtMs!==target||
+  if(timed.targetAtMs!==target||
     timed.hardDeadlineAtMs!==hard||!integer(timed.elapsedMs)||timed.elapsedMs!==elapsed||
     !Number.isFinite(timed.timeProgress)||timed.timeProgress<0||timed.timeProgress>1||
     Math.abs(timed.timeProgress-Math.min(1,elapsed/(hard-round.startMs)))>0.001||
@@ -41,7 +42,7 @@ function validateTimedDecisionState(timed:TimedState,d:RoundDecision,now:number)
   const saved=timed.saved;
   if((timed.persistence==="COMMITTED")!==!!saved)return "TIMED_PERSISTENCE_STATE_MISMATCH";
   if(!saved)return null;
-  if(saved.strategyVersion!==TIMED_STRATEGY||saved.network!=="sui:mainnet"||
+  if(saved.strategyVersion!==timed.strategyVersion||saved.network!=="sui:mainnet"||
     saved.intervalMinutes!==round.intervalMinutes||saved.roundId!==round.roundId||
     saved.startMs!==round.startMs||saved.expiryMs!==round.expiryMs||
     typeof saved.id!=="string"||!saved.id||
@@ -180,7 +181,7 @@ export function validateDecisionSnapshot(p:LiveSnapshotEnvelope,interval:5|15,pr
     if(timedError)return timedError;
   }
   const previousTimed=old?.timedDecision??null;
-  if(previousTimed?.saved&&old?.roundId===d.roundId&&old.startMs===d.startMs&&old.expiryMs===d.expiryMs){
+  if(previousTimed?.saved&&previousTimed.strategyVersion===timed?.strategyVersion&&old?.roundId===d.roundId&&old.startMs===d.startMs&&old.expiryMs===d.expiryMs){
     const priorSaved=previousTimed.saved,currentSaved=timed?.saved;
     if(!currentSaved||currentSaved.id!==priorSaved.id||currentSaved.status!==priorSaved.status||
       currentSaved.side!==priorSaved.side||currentSaved.decisionAtMs!==priorSaved.decisionAtMs||

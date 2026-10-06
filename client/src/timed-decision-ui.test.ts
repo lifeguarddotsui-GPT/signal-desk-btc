@@ -110,18 +110,61 @@ test("both interval contracts render independent target and mandatory hard-deadl
   }
 });
 
+test("primary timing omits ambiguous latest-decision time and reports saved elapsed only for immutable choices", () => {
+  const observing = timed(5, 31_000, "OBSERVING");
+  const start = now - observing.elapsedMs;
+  observing.targetAtMs = start + 60_000;
+  observing.hardDeadlineAtMs = start + 90_000;
+  const pendingHtml = renderDesk(roundDecision(5, observing));
+  assert.match(pendingHtml, /00:31 \/ target 01:00/);
+  assert.match(pendingHtml, /Target <b>01:00/);
+  assert.match(pendingHtml, /Hard deadline <b>01:30/);
+  assert.doesNotMatch(pendingHtml, /Latest decision|elapsed<\/b>/);
+
+  const saved = savedRecord(5);
+  const locked = timed(5, saved.elapsedMs, "DEADLINE");
+  locked.targetAtMs = saved.targetAtMs;
+  locked.hardDeadlineAtMs = saved.hardDeadlineAtMs;
+  locked.saved = saved;
+  const savedHtml = renderDesk(roundDecision(5, locked));
+  assert.match(savedHtml, /Saved elapsed <b>02:20/);
+  assert.doesNotMatch(savedHtml, /Latest decision/);
+});
+
+test("new live baseline shows 60-second 5m target, exact unmet rule, and separated indicators", () => {
+  const state = timed(5, 48_000, "OBSERVING");
+  const start = now - state.elapsedMs;
+  state.strategyVersion = "waterx-early-baseline-v2";
+  state.targetAtMs = start + 60_000;
+  state.hardDeadlineAtMs = start + 90_000;
+  state.timeProgress = state.elapsedMs / 90_000;
+  state.readinessPercent = 75;
+  state.components = {
+    sameSideMs: 54_000, requiredSameSideMs: 60_000, validCount: 4, requiredCount: 3,
+    probabilityRange: .018, maximumRange: .045, strength: .64, requiredStrength: .72,
+  };
+  const markup = renderDesk(roundDecision(5, state));
+  assert.match(markup, /00:48 \/ target 01:00/);
+  assert.match(markup, /Hard deadline <b>01:30/);
+  assert.match(markup, /Needs 6 seconds more same-side stability/);
+  assert.match(markup, /EVIDENCE READINESS/);
+  assert.match(markup, /MARKET PROBABILITY/);
+  assert.match(markup, /not calibrated/i);
+});
+
 test("saved DOWN remains frozen through quote outage and never swaps to current UP lean", () => {
   const state = timed(5, 140_000, "EVALUATING");
   state.saved = savedRecord(5);
   state.persistence = "COMMITTED";
   const markup = renderDesk(roundDecision(5, state), false);
-  assert.match(markup, /DOWN locked/);
-  assert.doesNotMatch(markup,/READINESS CONDITIONS|aria-label="Readiness conditions"|50% conditions reported/);
-  assert.match(markup, /DOWN LOCKED · 2:20 INTO ROUND/);
-  assert.match(markup, /Frozen probability 62\.0%/);
-  assert.match(markup, /source observation-immutable-7/);
-  assert.match(markup, /current quote unavailable; frozen choice retained/i);
-  assert.doesNotMatch(markup, /FROZEN RESEARCH CHOICE[\s\S]*?UP<\/strong>/);
+  assert.match(markup, /LOCKED DOWN/);
+  assert.doesNotMatch(markup,/50% conditions reported/);
+  assert.match(markup, /FROZEN SIDE PROBABILITY/);
+  assert.match(markup, /Choice is frozen\. Trading authority remains disabled/);
+  assert.match(markup, /Quote delayed · frozen choice retained/);
+  assert.match(markup, /Decision lifecycle, policy and raw evidence/);
+  assert.match(markup, /observation-immutable-7/);
+  assert.doesNotMatch(markup, /LOCKED UP/);
   assert.match(markup, /timed-decision-5-shared/);
 });
 
@@ -130,9 +173,9 @@ test("late saved choice is visibly a missed deadline, never a green on-time lock
   state.saved={...savedRecord(5),onTime:false,operationalFailure:"COMMIT_AFTER_HARD_DEADLINE"};
   state.persistence="COMMITTED";
   const markup=renderDesk(roundDecision(5,state));
-  assert.match(markup,/DOWN locked · deadline missed/);
+  assert.match(markup,/LOCKED DOWN · LATE/);
   assert.match(markup,/COMMIT TIMING<\/span><strong>LATE/);
-  assert.doesNotMatch(markup,/READINESS CONDITIONS/);
+  assert.match(markup,/Operational failure: COMMIT_AFTER_HARD_DEADLINE/);
 });
 
 test("no-input and missed-deadline outcomes are explicit recorded failures without a side", () => {
@@ -144,11 +187,11 @@ test("no-input and missed-deadline outcomes are explicit recorded failures witho
   missed.saved = savedRecord(5, "MISSED_DEADLINE");
   const noInputMarkup = renderDesk(roundDecision(15, noInput), false);
   const missedMarkup = renderDesk(roundDecision(5, missed), false);
-  assert.match(noInputMarkup, /NO VALID INPUT RECORDED/);
+  assert.match(noInputMarkup, /NO VALID INPUT/);
   assert.match(noInputMarkup, /NO VALID PROBABILITY INPUT/);
   assert.doesNotMatch(noInputMarkup, /UP LOCKED|DOWN LOCKED/);
-  assert.match(missedMarkup, /HARD DEADLINE MISSED/);
-  assert.match(missedMarkup, /no late choice substituted/);
+  assert.match(missedMarkup, /MISSED DEADLINE/);
+  assert.match(missedMarkup, /no late choice substituted|MISSED_DEADLINE/);
 });
 
 test("history renders both intervals and repeats the exact authoritative desk decision ID", () => {
@@ -161,10 +204,31 @@ test("history renders both intervals and repeats the exact authoritative desk de
     const rows = renderToStaticMarkup(React.createElement(TimedDecisionHistoryRecords, { interval, data: history(interval, record) }));
     assert.match(desk, new RegExp(record.id));
     assert.match(rows, new RegExp(record.id));
-    assert.match(rows, new RegExp(`${interval}-minute early strategy records`));
-    assert.match(rows, /LOCKED/);
-    assert.match(rows, /No hit rate, training advantage/);
+    assert.match(rows, /Early strategy records/);
+    assert.match(rows, /DOWN locked/);
+    assert.match(rows, /Correctness is not trading P\/L/);
   }
+});
+
+test("history scorecard distinguishes correctness from delivery and uses cohort aggregates", () => {
+  const record = { ...savedRecord(5), onTime: false, result: "CORRECT" as const, verifiedOutcome: "DOWN" as const };
+  const data: TimedHistoryResponse = {
+    strategyVersion: "waterx-early-baseline-v2",
+    entries: [record],
+    metrics: {
+      n: 42, onTimeLocks: 31, deadlineLocks: 8, missed: 3, noValidInput: 1, settledN: 28,
+      correct: 17, incorrect: 11, pending: 9, disputed: 2, hitRate: 17 / 28,
+      ratio: "17:11", choiceCoverage: 39 / 42, onTimeCoverage: 31 / 42, medianElapsedMs: 58_000,
+    },
+  };
+  const markup = renderToStaticMarkup(React.createElement(TimedDecisionHistoryRecords, { interval: 5, data }));
+  assert.match(markup, /Correct prediction · late operational miss/);
+  assert.match(markup, /verified outcome/i);
+  assert.match(markup, /CORRECT/);
+  assert.match(markup, /60\.7%/);
+  assert.match(markup, /17:11/);
+  assert.match(markup, /42/);
+  assert.match(markup, /Correctness is not trading P\/L/);
 });
 
 test("Agent uses the same ManualOpportunity and corrected server clock; history endpoint is interval scoped", () => {
@@ -176,7 +240,10 @@ test("Agent uses the same ManualOpportunity and corrected server clock; history 
   assert.match(agent, /projectServerClock\(timedServerTime, timedLive\.atomicUpdated, now\)/);
   assert.match(agent, /<details className="agent-benchmarks">/);
   assert.match(historyPage, /<TimedDecisionHistory \/>/);
-  assert.match(historyComponent, /timed-history\?interval=\$\{interval\}&limit=50/);
+  assert.match(historyComponent, /timed-history\?\$\{query\}/);
+  assert.match(historyComponent, /new URLSearchParams\(\{ interval: String\(interval\), strategy, window, limit: String\(limit\) \}\)/);
+  assert.match(historyComponent, /correct\?: number/);
+  assert.match(historyComponent, /CORRECT.*INCORRECT.*PENDING.*DISPUTED/s);
   assert.match(historyComponent, /credentials: "include"/);
   assert.match(app, /<Route path="\/" component=\{LivePage\} \/>/);
   assert.match(app, /<Route path="\/agent" component=\{AgentPage\} \/>/);

@@ -8,7 +8,6 @@ import { Transaction } from "@mysten/sui/transactions";
 import { matchesOwnerIntent } from "./intent";
 
 const hash = (s:string)=>createHash("sha256").update(s).digest("hex");
-const challenges = new Map<string,{owner:string;expires:number;origin:string}>();
 const throttles = new Map<string,{count:number;until:number}>();
 type OwnerRequest = Request & { agentOwner?:string; agentSessionExpiresAtMs?:number };
 function origin(req: Request): string {
@@ -38,39 +37,62 @@ async function authenticate(req: OwnerRequest,res: Response,next: NextFunction) 
 }
 export function registerAgentRoutes(app:Express) {
   app.use("/api/agent", (req,res,next)=>{
-    if(process.env.NODE_ENV!=="development"){res.status(404).json({error:"Development-only agent."});return;}
+    const identityPaths=["/capabilities","/challenge","/auth","/logout","/state","/accounts","/account","/control"];
+    if(process.env.NODE_ENV!=="development"&&!identityPaths.includes(req.path)){
+      res.status(409).json({error:"This production capability is not released. Identity/account reads do not grant funding, delegation or order authority."});return;
+    }
     res.set("Cache-Control","no-store");
     if(req.method!=="GET")try{origin(req);}catch{res.status(403).json({error:"Same-origin request required."});return;}
     next();
   });
   app.get("/api/agent/capabilities",safe(async(_req,res)=>{
-    res.json({developmentOnly:true,sdkVersion:"6.1.0",network:"mainnet",globalExecutionDisabled:true,mainnetEnabled:false,
+    res.json({developmentOnly:false,sdkVersion:"6.1.0",network:"mainnet",globalExecutionDisabled:true,mainnetEnabled:false,
+      capabilities:{authentication:true,accountReads:true,accountSelection:true,
+        betaAuthorization:false,arming:false,execution:false,shadow:process.env.NODE_ENV==="development"},
       betaReleased:false,walletConnection:"OPEN",maxCollateralSpendCentsPerWalletRound:500,compounding:false,
       executableQuote:null,ownerOrderAvailable:false,delegatedOrderAvailable:false,
       blockers,defaultPolicy:defaultAgentPolicy,permissions:{prediction:1,account:0},config:await protocolStatus()});
   }));
   app.post("/api/agent/challenge",safe(async(req,res)=>{
-    const now=Date.now(),key=req.ip??"unknown",rate=throttles.get(key);
+    const now=Date.now(),key=req.ip??"unknown";
+    throttles.forEach((v,k)=>{if(v.until<=now)throttles.delete(k);});
+    const rate=throttles.get(key);
+    if(!rate&&throttles.size>=4096){res.status(429).json({error:"Wallet verification busy."});return;}
     if(rate&&rate.until>now&&rate.count>=15){res.status(429).json({error:"Too many wallet challenges; retry in one minute."});return;}
     throttles.set(key,{count:rate&&rate.until>now?rate.count+1:1,until:now+60000});
-    challenges.forEach((v,k)=>{if(v.expires<=now)challenges.delete(k);});
-    throttles.forEach((v,k)=>{if(v.until<=now)throttles.delete(k);});
-    if(challenges.size>500){res.status(429).json({error:"Wallet verification busy."});return;}
     if(req.body?.chain!=="sui:mainnet")throw new Error("sui:mainnet wallet required");
     const owner=address(req.body?.address),site=origin(req);
     const message=`Bluewater Agent wallet verification\nOrigin: ${site}\nNetwork: sui:mainnet\nOwner: ${owner}\nNonce: ${randomBytes(32).toString("hex")}\nExpires: ${new Date(now+120000).toISOString()}\nThis message grants no transaction, withdrawal or trading permission.`;
-    challenges.set(hash(message),{owner,expires:now+120000,origin:site});res.json({message});
+    const c=await agentPool.connect();
+    try{
+      await c.query("BEGIN");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext('bluewater-auth-challenge-cap'))");
+      await c.query("DELETE FROM bluewater_agent_challenges WHERE expires_at<clock_timestamp()-interval '1 day'");
+      const pending=await c.query("SELECT count(*)::int AS n FROM bluewater_agent_challenges WHERE consumed_at IS NULL AND expires_at>clock_timestamp()");
+      if(Number(pending.rows[0].n)>=500){await c.query("COMMIT");res.status(429).json({error:"Wallet verification busy."});return;}
+      await c.query(`INSERT INTO bluewater_agent_challenges(token_hash,owner,origin,network,expires_at)
+        VALUES($1,$2,$3,'sui:mainnet',clock_timestamp()+interval '2 minutes')`,[hash(message),owner,site]);
+      await c.query("COMMIT");
+    }catch(error){await c.query("ROLLBACK").catch(()=>{});throw error;}finally{c.release();}
+    res.json({message});
   }));
   app.post("/api/agent/auth",safe(async(req,res)=>{
     const {message,signature,chain}=req.body??{};
     if(chain!=="sui:mainnet")throw new Error("sui:mainnet wallet required");
     if(typeof message!=="string"||message.length>1024||typeof signature!=="string"||signature.length>8192)throw new Error("Wallet signature required");
-    const key=hash(message),challenge=challenges.get(key);challenges.delete(key);
-    if(!challenge||challenge.expires<Date.now()||challenge.origin!==origin(req))throw new Error("Expired or replayed wallet challenge");
+    const key=hash(message),site=origin(req);
+    const challenge=(await agentPool.query(`SELECT owner FROM bluewater_agent_challenges
+      WHERE token_hash=$1 AND origin=$2 AND network='sui:mainnet'
+        AND consumed_at IS NULL AND expires_at>clock_timestamp()`,[key,site])).rows[0];
+    if(!challenge)throw new Error("Expired or replayed wallet challenge");
     const publicKey=await verifyPersonalMessageSignature(new TextEncoder().encode(message),signature);
     if(address(publicKey.toSuiAddress())!==challenge.owner)throw new Error("Signature owner mismatch");
     const token=randomBytes(32).toString("hex");
     const expiresAtMs=await agentTransaction(challenge.owner,async(c)=>{
+      const consumed=await c.query(`UPDATE bluewater_agent_challenges SET consumed_at=clock_timestamp()
+        WHERE token_hash=$1 AND owner=$2 AND origin=$3 AND network='sui:mainnet'
+          AND consumed_at IS NULL AND expires_at>clock_timestamp() RETURNING token_hash`,[key,challenge.owner,site]);
+      if(consumed.rows.length!==1)throw new Error("Expired or replayed wallet challenge");
       const session=await c.query("INSERT INTO bluewater_agent_sessions(token_hash,owner,expires_at,network) VALUES($1,$2,clock_timestamp()+interval '15 minutes','mainnet') RETURNING expires_at",[hash(token),challenge.owner]);
       return new Date(session.rows[0].expires_at).getTime();
     });
@@ -102,6 +124,9 @@ export function registerAgentRoutes(app:Express) {
     });res.json(await readAgent(req.agentOwner!));
   }));
   app.post("/api/agent/control",safe(async(req,res)=>{
+    if(process.env.NODE_ENV!=="development"&&!["PAUSE","STOP_GOAL"].includes(req.body?.action)){
+      res.status(409).json({error:"Production arming is not released. Wallet identity is not trading authority."});return;
+    }
     await agentTransaction(req.agentOwner!,async(c,row)=>{
       const p=agentPolicySchema.parse(row.policy),action=req.body?.action;
       let paper=row.paper,status="PAUSED",event="PAUSED";

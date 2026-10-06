@@ -165,9 +165,40 @@ test("one unavailable selected side preserves round data without substituting th
 
 test("manual card is above the chart; audit readiness is collapsed and mobile layout has dedicated breakpoints", () => {
   assert.ok(app.indexOf("<ManualOpportunity") < app.indexOf("<section className=\"chart-panel\">"));
+  assert.doesNotMatch(app, /className="metric-ribbon"|className="distance-line"/);
   assert.ok(app.indexOf("<details className=\"mo-readiness-audit\">") < app.indexOf("<RoundDecisionPanel"));
   assert.match(app, /browserReceivedAtMs=\{live\.atomicUpdated\}/);
   assert.match(app, /refresh=\{\{ pending: snapshotRefreshState\.pending, error: snapshotRefreshState\.error \}\}/);
   assert.match(css, /@media \(max-width: 700px\)/);
   assert.match(css, /@media \(max-width: 440px\)/);
+});
+
+test("primary card consolidates source prices and exposes independent time, readiness and market-probability indicators", () => {
+  const source = readFileSync(new URL("./ManualOpportunity.tsx", import.meta.url), "utf8");
+  const markup = renderToStaticMarkup(React.createElement(ManualOpportunity, {
+    view: { decision: decision({ timedDecision: null }), fresh: true, sourceAgeMs: 900, lean: "UP", stage: "LEANING", score: 60, reason: "Evidence is building." },
+    now, marketReference: { price: 83_500, quality: "confirmed", source: "WaterX" },
+    comparison: { price: 83_517.25, source: "Coinbase SSE", receivedAtMs: now - 900 },
+  }));
+  assert.match(markup, /Authoritative early decision/);
+  assert.match(markup, /PRICE TO BEAT · CONFIRMED/);
+  assert.match(markup, /\$83,500\.00/);
+  assert.match(markup, /COMPARISON · Coinbase SSE/);
+  assert.match(markup, /\$83,517\.25/);
+  assert.match(app, /comparisonFresh \? comparison\?\.source/);
+  assert.match(app, /source: coinbaseDisplaySource \|\| "Not reported"/);
+  assert.doesNotMatch(app, /HTTP comparison|streamCoinbaseFresh \? "Coinbase SSE"/);
+  assert.match(source, /OBSERVATION TIME/);
+  assert.match(source, /EVIDENCE READINESS/);
+  assert.match(source, /MARKET PROBABILITY/);
+  assert.match(markup, /market probability · not calibrated/i);
+});
+
+test("unknown comparison provenance is withheld rather than defaulted to Coinbase", () => {
+  const markup = renderToStaticMarkup(React.createElement(ManualOpportunity, {
+    view: { decision: decision({ timedDecision: null }), fresh: true, sourceAgeMs: 900, lean: "UP", stage: "LEANING", score: 60, reason: "Evidence is building." },
+    now,
+  }));
+  assert.match(markup, /COMPARISON · Not reported/);
+  assert.doesNotMatch(markup, /COMPARISON · Coinbase/);
 });

@@ -19,7 +19,7 @@ test("captured production late ACK is reproduced without backdating or relabelin
   assert.equal(saved!.decisionAtMs,captured.decisionAtMs);
 });
 for(const interval of [5,15] as const){
-  const hard=start+(interval===5?150000:450000);
+  const hard=start+(interval===5?90000:300000);
   const allowance=timedCompletionPolicy(interval).allowanceMs;
   const r={intervalMinutes:interval,roundId:`buffer-${interval}`,startMs:start,expiryMs:start+interval*60000};
   const samples=(now:number,p=.56)=>[{atMs:now,receivedAtMs:now,providerSourceAtMs:null,
@@ -28,7 +28,7 @@ for(const interval of [5,15] as const){
     const at=hard-allowance;
     assert.equal(buildTimedDecision(r,samples(at-1),start,at-1,true,{},true),null);
     const d=buildTimedDecision(r,samples(at),start,at,true,{},true)!;
-    assert.equal(d.status,"LOCKED");assert.equal(d.lockReason,"DEADLINE_BEST_SUPPORTED_CHOICE");
+    assert.equal(d.status,"LOCKED");assert.equal(d.lockReason,"DEADLINE_FALLBACK");
     assert.equal(d.decisionAtMs,at);assert.equal(d.hardDeadlineAtMs,hard);
     assert.equal(d.onTime,null);assert.equal(d.automaticExecutionAllowed,false);
     assert.equal(d.evidence.fallbackPreparation,true);

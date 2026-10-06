@@ -14,6 +14,7 @@ import type { LockReadinessReport } from "../../shared/lock-readiness";
 import CanonicalHistory from "./CanonicalHistory";
 import { ResearchChoiceCard } from "./ResearchChoiceCard";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
+import EarlyLearningJobsPanel from "./EarlyLearningJobsPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
 import type { BluewaterReport } from "../../shared/bluewater-research";
 import { RoundDecisionPanel } from "./LockReadinessPanel";
@@ -395,7 +396,6 @@ function LivePage() {
      proof: fixtureClassification !== "OBSERVE" || fixtureMode === "stale-quote"
       ? { up: fixtureProof("up"), down: fixtureProof("down") } : undefined,
    } as AdvisoryPayload) : null;
-  const remaining = round ? timeRemaining(round.expiryMs, serverNow) : "—";
   const priceDistance = selectWaterxPriceDistance({
     referencePrice: waterxReference,
     comparisonFresh,
@@ -467,7 +467,7 @@ function LivePage() {
         try { body = JSON.parse(e.data) as Record<string, unknown>; } catch { /* malformed event is represented as a gap */ }
         const rawAt = body.sourceAt ?? body.serverEventAt ?? body.at;
         const at = typeof rawAt === "number" ? rawAt : typeof rawAt === "string" ? Date.parse(rawAt) : Date.now();
-        const eventSource = typeof body.source === "string" ? body.source : "Coinbase";
+        const eventSource = typeof body.source === "string" ? body.source : "Not reported";
         const sourceMismatch = !isCoinbaseSource(eventSource);
         const gap = e.type === "gap" || body.gap === true || sourceMismatch || typeof body.price !== "number" || !Number.isFinite(body.price);
         const p: Point = { at, sourceAt: rawAt as string | number | null, eventId: e.lastEventId || (typeof body.eventId === "string" || typeof body.eventId === "number" ? body.eventId : undefined), price: gap ? null : body.price as number, gap, source: eventSource, reason: sourceMismatch ? "Unexpected comparison source." : typeof body.reason === "string" ? body.reason : undefined };
@@ -506,7 +506,8 @@ function LivePage() {
   const coinbaseDisplayPrice = comparisonFresh ? comparison?.price ?? null
     : streamCoinbaseFresh ? latestStreamPoint?.price ?? null : null;
   const coinbaseDisplayAt = comparisonFresh ? comparison?.asOf : streamCoinbaseFresh ? latestStreamPoint?.at : undefined;
-  const coinbaseDisplaySource = comparisonFresh ? "HTTP comparison" : streamCoinbaseFresh ? "Coinbase SSE" : "";
+  const coinbaseDisplaySource = comparisonFresh ? comparison?.source ?? ""
+    : streamCoinbaseFresh ? latestStreamPoint?.source ?? "" : "";
   useEffect(() => {
     const pending = pendingPaint.current;
     if (!pending || String(stream.at(-1)?.eventId ?? "") !== pending.id) return;
@@ -544,18 +545,21 @@ function LivePage() {
         {fixtureNames.map(name => <option key={name} value={name}>{name.toUpperCase().replaceAll("-", " ")}</option>)}
       </select>
     </details>}
-      <div className="metric-ribbon">
-        <div className={`anchor-metric${waterxReferenceValid ? "" : " reference-unavailable"}`}><span className="metric-label">WATERX PRICE TO BEAT{roundProvisional && <i className="provisional-badge">PROVISIONAL</i>}</span><strong>{waterxReferenceValid ? fmtUsd(round?.referencePrice) : "WaterX reference unavailable"}</strong><small>{waterxReferenceValid ? `${roundProvisional ? "Confirmation pending" : "WaterX reported reference"} · age not reported by source` : `${referenceAvailability?.reason || "No positive reference for the active round"} · last verified age not reported`}</small></div>
-        <div className="comparison-metric"><span className="metric-label">CURRENT PRICE <b>· COINBASE</b></span><strong className={coinbasePriceFresh && priceDelta != null ? priceDelta >= 0 ? "gain" : "loss" : coinbasePriceFresh ? "comparison-live" : "dim"}>{coinbasePriceFresh ? fmtUsd(coinbaseDisplayPrice) : "—"}</strong><small>{coinbasePriceFresh ? `${coinbaseDisplaySource} · ${ago(coinbaseDisplayAt)}` : "No fresh Coinbase comparison quote"}</small></div>
-      </div>
-      <div className="distance-line">
-        <div className="distance-readout"><span>DISTANCE TO REFERENCE</span><strong className={priceDelta == null ? "dim" : priceDelta >= 0 ? "gain" : "loss"}>{priceDelta == null ? "—" : `${priceDelta >= 0 ? "+" : "−"}${fmtUsd(Math.abs(priceDelta))}`}</strong><small>{priceDeltaPct == null ? "Percent unavailable" : `${Math.abs(priceDeltaPct).toFixed(3)}% ${priceDelta! >= 0 ? "above" : "below"}`}</small></div>
-        <span className="round-count"><span>BTC · {interval}m CLOSES</span><strong>{roundCurrent && round ? remaining : "—:—"}</strong></span>
-      </div>
       <ManualOpportunity
         view={atomicDecisionView}
         now={serverNow}
         browserReceivedAtMs={live.atomicUpdated}
+        marketReference={{
+          price: waterxReferenceValid ? round?.referencePrice ?? null : null,
+          quality: roundProvisional ? "provisional" : waterxReferenceValid ? "confirmed" : "unavailable",
+          source: "WaterX round reference",
+        }}
+        comparison={{
+          price: coinbasePriceFresh ? coinbaseDisplayPrice : null,
+          source: coinbaseDisplaySource || "Not reported",
+          receivedAtMs: coinbasePriceFresh && coinbaseDisplayAt
+            ? typeof coinbaseDisplayAt === "number" ? coinbaseDisplayAt : Date.parse(coinbaseDisplayAt) : null,
+        }}
         refresh={{ pending: snapshotRefreshState.pending, error: snapshotRefreshState.error }}
         onRetry={live.reload}
       />
@@ -827,6 +831,7 @@ function LearningPage() {
   return <div className="page inner-page">
     <PageTitle index="03" title="Learning evidence"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
     <div className="learning-lede"><BookOpen size={19} /><p>Evidence is assessed separately for each WaterX market duration. WaterX odds are market probabilities, not a BluewaterAI forecast. Only verified settlement labels enter evaluation.</p></div>
+    <EarlyLearningJobsPanel />
     <BluewaterResearchPanel
       report={bluewater.loadedUrl === bluewaterUrl && bluewater.data?.intervalMinutes === interval ? bluewater.data : null}
       interval={interval}

@@ -187,3 +187,59 @@
 @media (prefers-reduced-motion: reduce) {
   .manual-opportunity, .mo-skeleton-lines i { animation: none; }
 }
+
+/* The live desk has one authoritative surface; diagnostics stay collapsed below it. */
+.manual-opportunity { margin: 10px 0 14px; padding: 14px 16px 10px; }
+.mo-header { padding-bottom: 9px; }
+.mo-header h2 { font-size: 15px; }
+.mo-header .mo-kicker { font-size: 8px; }
+.mo-primary-card { position: relative; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(190px, .9fr); gap: 12px 24px; padding: 15px 0 12px; }
+.mo-primary-main { min-width: 0; display: grid; align-content: start; gap: 7px; }
+.mo-primary-eyebrow, .mo-indicator-label { color: var(--mo-faint); font: 8px/1.4 var(--mono, monospace); letter-spacing: .1em; }
+.mo-primary-call { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.mo-primary-call .mo-timed-status { font-size: clamp(24px, 4vw, 34px); line-height: 1; }
+.mo-primary-call .mo-timed-status.watching { color: #cbd8d0; }
+.mo-primary-call .mo-timed-status.locked { color: var(--mo-accent); }
+.mo-primary-call .mo-timed-status.failed { color: var(--mo-rose); }
+.mo-primary-call .mo-timed-status.saving { color: var(--mo-amber); }
+.mo-primary-probability { color: #e5eadf; font: 500 13px var(--mono, monospace); }
+.mo-primary-probability small { display: block; margin-top: 3px; color: var(--mo-faint); font: 7px var(--mono, monospace); letter-spacing: .06em; }
+.mo-primary-round { color: var(--mo-faint); font: 8px/1.5 var(--mono, monospace); overflow-wrap: anywhere; }
+.mo-market-pair { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; align-self: stretch; }
+.mo-market-pair > div { min-width: 0; display: grid; align-content: center; gap: 3px; padding: 8px 9px; border: 1px solid var(--mo-edge); background: rgba(4,14,18,.24); }
+.mo-market-pair strong { color: #e1e9dc; font: 500 14px var(--mono, monospace); overflow-wrap: anywhere; }
+.mo-market-pair small { color: var(--mo-faint); font-size: 8px; line-height: 1.4; overflow-wrap: anywhere; }
+.mo-primary-metrics { grid-column: 1/-1; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.mo-indicator { min-width: 0; display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--mo-edge); }
+.mo-indicator > div { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+.mo-indicator b { color: #d5e0d7; font: 9px var(--mono, monospace); text-align: right; }
+.mo-indicator .mo-progress-track { height: 3px; }
+.mo-indicator.readiness .mo-progress-track i { background: #d9b77e; }
+.mo-indicator.probability .mo-progress-track i { background: #85b8bb; }
+.mo-requirement { grid-column: 1/-1; display: flex; align-items: flex-start; gap: 8px; margin: 0; color: #d9c59f; font-size: 10px; line-height: 1.45; }
+.mo-requirement::before { content: ""; flex: 0 0 5px; height: 5px; margin-top: 5px; border-radius: 50%; background: #d9b77e; }
+.mo-primary-save { grid-column: 1/-1; display: flex; flex-wrap: wrap; gap: 5px 15px; color: var(--mo-muted); font: 8px/1.45 var(--mono, monospace); }
+.mo-primary-save b { color: var(--mo-paper); font-weight: 500; }
+.mo-health-compact { padding: 7px 0 2px; border-top: 1px solid var(--mo-edge); color: var(--mo-muted); font-size: 9px; }
+.mo-health-compact b { color: #d4e0d4; font-weight: 600; }
+.mo-benchmark-details { margin-top: 7px; }
+.mo-benchmark-details > summary { padding: 7px 9px; font-size: 8px; }
+.mo-timed { margin: 7px 0 0; }
+.mo-timed-top, .mo-timed-evidence, .mo-timed-bottom { grid-template-columns: minmax(0,1fr) auto; }
+.mo-frozen-lock { color: var(--mo-accent); }
+.manual-opportunity .mo-decision-row { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.mo-data-safety { margin: 5px 0 0; color: var(--mo-faint); font-size: 8px; line-height: 1.4; }
+@media (max-width: 600px) {
+  .manual-opportunity { padding: 12px 11px 9px; }
+  .mo-primary-card { grid-template-columns: minmax(0,1fr); gap: 10px; }
+  .mo-market-pair { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .mo-primary-metrics { gap: 7px; }
+  .mo-indicator b { font-size: 8px; }
+  .manual-opportunity .mo-decision-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 360px) {
+  .mo-primary-metrics { grid-template-columns: 1fr; }
+  .mo-primary-metrics .mo-indicator { grid-template-columns: 1fr minmax(88px,.8fr); align-items: center; }
+  .mo-primary-metrics .mo-indicator .mo-progress-label { grid-column: 1/-1; }
+  .mo-market-pair strong { font-size: 12px; }
+}

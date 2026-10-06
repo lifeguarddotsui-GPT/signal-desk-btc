@@ -1,6 +1,10 @@
 import {validWaterxProbabilityPair} from "./round-decision";
 import type {LockObservation} from "./lock-readiness";
-export const TIMED_STRATEGY="waterx-timed-baseline-v1";
+export const LEGACY_TIMED_STRATEGY="waterx-timed-baseline-v1";
+export const TIMED_STRATEGY="waterx-early-baseline-v2";
+export const isTimedStrategy=(value:string)=>value===TIMED_STRATEGY||value===LEGACY_TIMED_STRATEGY;
+export type PredictionLifecycle="OBSERVING"|"LEANING_UP"|"LEANING_DOWN"|"QUALIFIED"|"SAVING"|
+  "LOCKED_UP"|"LOCKED_DOWN"|"RESULT_PENDING"|"CORRECT"|"INCORRECT"|"DISPUTED";
 export type TimedRound={intervalMinutes:5|15;roundId:string;startMs:number;expiryMs:number};
 export type TimedDecision={
   id:string;strategyVersion:string;network:"sui:mainnet";intervalMinutes:5|15;roundId:string;
@@ -11,6 +15,7 @@ export type TimedDecision={
   ambiguous:boolean;coverage:{n:number;firstAtMs:number|null;lastAtMs:number|null;maxGapMs:number|null};
   committedAtMs:number|null;workerReceivedAtMs:number|null;onTime:boolean|null;
   operationalFailure:string|null;automaticExecutionAllowed:false;
+  acknowledgementStatus?:"JOURNALED"|"UNJOURNALED"|"UNKNOWN";
   evidence:Record<string,unknown>;
 };
 export type TimedState={
@@ -21,10 +26,15 @@ export type TimedState={
   persistence:"WAITING"|"SAVING"|"FAILED"|"COMMITTED";errorClass:string|null;saved:TimedDecision|null;
   components?:{sameSideMs:number;requiredSameSideMs:number;validCount:number;requiredCount:number;
     probabilityRange:number|null;maximumRange:number;strength:number;requiredStrength:number};
+  lifecycle?:PredictionLifecycle;remainingRequirement?:string;
 };
-export function timedWindow(interval:5|15){
-  return interval===5?{targetSeconds:120,hardSeconds:150}:{targetSeconds:300,hardSeconds:450};
+export function timedWindow(interval:5|15,strategyVersion=TIMED_STRATEGY){
+  if(!isTimedStrategy(strategyVersion))throw new Error("Unknown timed policy version");
+  if(strategyVersion===LEGACY_TIMED_STRATEGY)
+    return interval===5?{targetSeconds:120,hardSeconds:150}:{targetSeconds:300,hardSeconds:450};
+  return interval===5?{targetSeconds:60,hardSeconds:90}:{targetSeconds:180,hardSeconds:300};
 }
+export const earlyHorizons=(interval:5|15)=>interval===5?[30,45,60,75,90]:[60,120,180,240,300];
 /** Pinned independently of the legacy canonical/adaptive policy. This is not calibration. */
 export function timedPolicy(interval:5|15){
   return {version:TIMED_STRATEGY,maxAgeMs:10000,maxGapMs:12000,earlyStrength:.72,
@@ -55,11 +65,17 @@ export function evaluateTimedDecision(round:TimedRound,observations:readonly Loc
     strength<p.earlyStrength?"DIRECTIONAL_SEPARATION_BELOW_POLICY":!persistent?
     "SAME_SIDE_PERSISTENCE_INCOMPLETE":!stable?"STABILITY_WINDOW_INCOMPLETE":"CONDITIONS_SATISFIED";
   const qualified=fresh&&strength>=p.earlyStrength&&persistent&&stable;
+  const remainingRequirement=!latest?"Needs valid WaterX probabilities":!fresh?"Needs a fresh observation":
+    strength<p.earlyStrength?`Needs directional strength ${p.earlyStrength.toFixed(2)}; currently ${strength.toFixed(2)}`:
+    !persistent?`Needs ${Math.ceil((p.earlyPersistenceMs-(latest.receivedAtMs-since))/1000)} seconds more same-side evidence`:
+    !stable?recent.length<p.minObservations?`Needs ${p.minObservations-recent.length} more valid observations`:
+      `Needs probability range ≤ ${p.maxRange.toFixed(3)}`:now<targetAtMs?"Evidence qualifies; waiting for preferred target":"Evidence qualifies for an early lock";
   return {strategyVersion:TIMED_STRATEGY,targetAtMs,hardDeadlineAtMs,elapsedMs:Math.max(0,now-round.startMs),
     timeProgress:Math.max(0,Math.min(1,(now-round.startMs)/(hardDeadlineAtMs-round.startMs))),
     phase:now>=round.expiryMs?"EXPIRED":now>=hardDeadlineAtMs?"DEADLINE":now>=targetAtMs?"EVALUATING":"OBSERVING",
     readinessPercent:Math.round(25*Number(fresh)+25*Number(strength>=p.earlyStrength)+25*Number(persistent)+25*Number(stable)),
     qualified,blocker,liveSide:fresh?side:null,liveProbabilityUp:fresh?latest!.probabilityUp:null,sourceAgeMs:age,
+    lifecycle:qualified?"QUALIFIED":fresh?side==="UP"?"LEANING_UP":"LEANING_DOWN":"OBSERVING",remainingRequirement,
     components:{sameSideMs:latest?latest.receivedAtMs-since:0,requiredSameSideMs:p.earlyPersistenceMs,
       validCount:recent.length,requiredCount:p.minObservations,probabilityRange:range,maximumRange:p.maxRange,
       strength,requiredStrength:p.earlyStrength},

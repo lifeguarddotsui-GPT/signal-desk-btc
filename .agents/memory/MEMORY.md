@@ -16,5 +16,6 @@
 - [Checked npm registry](npm-checked-registry.md) — repeated mirror rewrites can double /npm; preserve the firewall and portable HTTPS lockfile integrity.
 - [Publish boolean CHECKs](publish-boolean-check-introspection.md) — compare stored predicates with generated SQL; bare boolean CHECKs can be double-wrapped.
 - [Open-wallet mainnet beta](open-wallet-mainnet-beta.md) — open wallet login is not trade authority; $5 all-in per wallet/round, no compounding, separate prospective early signals.
-- [Mainnet beta controls](single-order-pilot.md) — $5 all-in per order; exposure and turnover are separate owner controls; delegation needs independent proof and approval.
+- [Mainnet beta controls](single-order-pilot.md) — $5 aggregate all-in per exact round; exposure/turnover are separate controls; delegation requires independent proof and approval.
+- [Early-decision scope](early-decision-scope.md) — authoritative 60/90 and 180/300 timing; earlier horizons shadow only; meaningful acceptance includes bounded mainnet recovery.
 - [Production SQL evidence](production-sql-evidence.md) — success plus transaction markers is not query evidence; require actual expected result data.

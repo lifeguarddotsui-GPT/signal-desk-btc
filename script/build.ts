@@ -74,11 +74,13 @@ async function main() {
     target: "node22",
     logLevel: "info",
   });
+  await esbuild({entryPoints:["scripts/train-early-horizons.ts"],platform:"node",bundle:true,format:"esm",
+    outfile:"dist/early-training.mjs",packages:"external",target:"node22",logLevel:"info"});
 
   // Identify the packaged output and locked external runtime dependencies;
   // this is deliberately not a workspace Git revision.
   const files = [
-    "dist/index.mjs", "dist/waterx-worker.mjs",
+    "dist/index.mjs", "dist/waterx-worker.mjs","dist/early-training.mjs",
     ...(await clientFiles("dist/public")), "package-lock.json",
   ]
     .sort();

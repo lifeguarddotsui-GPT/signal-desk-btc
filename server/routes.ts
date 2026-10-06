@@ -1,4 +1,6 @@
-import {timedHistory} from "./waterx/timed-decision-store";
+import {scoredTimedHistory,timedHistoryQuery} from "./waterx/timed-history";
+import {earlyLearningReport} from "./waterx/early-training";
+import {usdcFundingPreview} from "./agent/funding-preview";
 import {resolve} from "node:path";
 import type { Express, Request, Response, NextFunction } from "express";
 import { z } from "zod";
@@ -194,12 +196,18 @@ export function registerRoutes(app: Express) {
     res.status(202).json({status:"diagnostic-only"});
   });
   app.get("/api/waterx/timed-history",async(req,res)=>{
-    const interval=Number(req.query.interval),limit=Number(req.query.limit??50);
-    if(![5,15].includes(interval)||!Number.isInteger(limit)||limit<1||limit>100){
-      res.status(400).json({error:"Invalid timed-history interval or limit"});return;
-    }
-    try{res.set("Cache-Control","no-store").json(await timedHistory(interval as 5|15,limit));}
+    const parsed=timedHistoryQuery.safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid timed-history filters"});return;}
+    try{res.set("Cache-Control","no-store").json(await scoredTimedHistory(parsed.data));}
     catch{res.status(503).json({error:"Timed strategy history unavailable; no outcome is fabricated."});}
+  });
+  app.get("/api/waterx/early-learning",async(_req,res)=>{
+    try{res.set("Cache-Control","no-store").json(await earlyLearningReport());}
+    catch{res.status(503).json({error:"Early-horizon learning data unavailable; no training status is fabricated."});}
+  });
+  app.get("/api/waterx/funding-preview",async(_req,res)=>{
+    try{res.set("Cache-Control","no-store").json(await usdcFundingPreview());}
+    catch{res.status(503).json({error:"USDC funding registration preview unavailable; no conversion is assumed."});}
   });
   // Coverage is intentionally separate from the high-frequency health route:
   // its bounded historical scan must not delay live market reads.

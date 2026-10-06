@@ -700,3 +700,17 @@ mtime_ms = 1791259623997
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/db18426e-74c6-474b-838d-f698ed63a096/9e8ff607-8230-4f1b-8e40-024bf1530aae"
 storage_version_token = "1791259653634460"
 content_type = "text/markdown"
+
+[[outputs]]
+id = "aI2zvww75hd8JdrFnJvVx"
+uri = "file://docs/single-wallet-pilot-operator-runbook.md"
+type = "text"
+title = "Operator-only deployment and security cutover"
+description = "Owner setup actions, credential removal/rotation, deployment and rollback commands, recovery and emergency procedures, and explicit unverified pilot blockers."
+logical_id = "446d402a-1876-4be8-958d-3dfc004c67fc"
+content_hash = "sha256:3b3c6eed605c51b55b161900413bf1b7fb54100c7c33e11474f301e50b5406f0"
+size = 11654
+mtime_ms = 1791300566326
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/446d402a-1876-4be8-958d-3dfc004c67fc/88e78e24-006d-4d8d-8fa6-48d4c5070639"
+storage_version_token = "1791300696885849"
+content_type = "text/markdown"

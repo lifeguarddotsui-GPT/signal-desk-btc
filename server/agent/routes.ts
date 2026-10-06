@@ -6,6 +6,7 @@ import { agentPool, agentTransaction, readAgent, ledger, blockers } from "./stor
 import { address, accountIds, assertAccountOwner, ownerTransaction, simulateOwnerTransaction, protocolClient, protocolStatus, rpc } from "./protocol";
 import { Transaction } from "@mysten/sui/transactions";
 import { matchesOwnerIntent } from "./intent";
+import {websiteControlPlaneStatus} from "../../infrastructure/agent-signer/control-plane";
 
 const hash = (s:string)=>createHash("sha256").update(s).digest("hex");
 const throttles = new Map<string,{count:number;until:number}>();
@@ -42,12 +43,17 @@ export function registerAgentRoutes(app:Express) {
     next();
   });
   app.get("/api/agent/capabilities",safe(async(_req,res)=>{
+    const controlPlane=websiteControlPlaneStatus(process.env);
     res.json({developmentOnly:false,sdkVersion:"6.1.0",network:"mainnet",globalExecutionDisabled:true,mainnetEnabled:false,
       capabilities:{authentication:true,accountReads:true,accountSelection:true,
         betaAuthorization:false,arming:false,execution:false,shadow:process.env.NODE_ENV==="development"},
       betaReleased:false,walletConnection:"OPEN",defaultRoundCollateralCents:500,roundLimitOwnerEditable:true,defaultCompounding:false,
       executableQuote:null,ownerOrderAvailable:false,delegatedOrderAvailable:false,
-      blockers,defaultPolicy:defaultAgentPolicy,permissions:{prediction:1,account:0},config:await protocolStatus()});
+      controlPlane,
+      blockers:[...blockers,controlPlane.administrationCredentialPresent
+        ?"Website still holds Cloudflare deployment authority. Funded signer invocation is blocked."
+        :"Signer control-plane separation still requires independent operator, connector and production verification."],
+      defaultPolicy:defaultAgentPolicy,permissions:{prediction:1,account:0},config:await protocolStatus()});
   }));
   app.post("/api/agent/challenge",safe(async(req,res)=>{
     const now=Date.now(),key=req.ip??"unknown";

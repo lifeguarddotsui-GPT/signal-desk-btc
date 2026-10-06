@@ -9,7 +9,7 @@ import {digestEarlySnapshot} from "./early-horizons";
 import {evaluateEarlyStopping} from "./early-stopping";
 import {trainPooledGates} from "./pooled-early-training";
 import {auditEarlyDataset} from "./early-dataset";
-import {compareEarlyModels} from "./early-model-comparison";
+import {compareEarlyModels,partitionEarlyRow} from "./early-model-comparison";
 export type EarlyTrainingRow={
   interval:5|15;roundId:string;startMs:number;expiryMs:number;horizon:number;probability:number;
    outcome:"UP"|"DOWN";labelAvailableAtMs:number;snapshotDigest:string;features?:Record<string,unknown>;
@@ -24,17 +24,20 @@ export function trainEarlyHorizon(rows:EarlyTrainingRow[],interval:5|15,horizon:
     r.expiryMs<=cutoff&&r.labelAvailableAtMs<=now&&Number.isFinite(r.probability)&&r.probability>=0&&r.probability<=1);
   const keys=new Set<string>(),unique=selected.filter(r=>{const key=r.roundId+":"+r.startMs+":"+r.expiryMs;
     if(keys.has(key))return false;keys.add(key);return true;});
-  const training=unique.filter(r=>r.expiryMs<=trainEnd&&r.labelAvailableAtMs<=trainEnd);
-  const calibration=unique.filter(r=>r.startMs>=trainEnd&&r.expiryMs<=calEnd&&r.labelAvailableAtMs<=calEnd);
-   const test=unique.filter(r=>r.startMs>=policyEnd&&r.expiryMs<=cutoff);
-  const rejected={duplicates:selected.length-unique.length,partitionBoundaryOrLabelEmbargo:unique.length-training.length-calibration.length-test.length};
+  const training=unique.filter(r=>partitionEarlyRow(r,now)==="TRAIN");
+  const calibration=unique.filter(r=>partitionEarlyRow(r,now)==="CALIBRATION");
+  const policySelection=unique.filter(r=>partitionEarlyRow(r,now)==="POLICY");
+   const test=unique.filter(r=>partitionEarlyRow(r,now)==="TEST");
+  const rejected={duplicates:selected.length-unique.length,partitionBoundaryOrLabelEmbargo:unique.length-training.length-calibration.length-policySelection.length-test.length};
    const base={interval,horizon,protocol:"early-chronological-10d-1d-1d-2d-label-embargo-v2",
      datasetCutoffMs:now,partitions:{trainEndMs:trainEnd,calibrationEndMs:calEnd,policyEndMs:policyEnd,testEndMs:cutoff},
-    counts:{eligible:unique.length,training:training.length,calibration:calibration.length,test:test.length},rejected,
+    counts:{eligible:unique.length,training:training.length,calibration:calibration.length,policy:policySelection.length,test:test.length},rejected,
     fingerprint:digestEarlySnapshot(unique.map(r=>[r.roundId,r.startMs,r.horizon,r.snapshotDigest,r.outcome]))};
   if(training.length<200||calibration.length<60||test.length<60||
     [training,calibration,test].some(part=>new Set(part.map(r=>r.outcome)).size<2))
-    return {...base,status:"INSUFFICIENT",reason:"Requires 200 training, 60 calibration, 60 untouched test rounds and both classes per partition.",artifact:null};
+    return {...base,status:"INSUFFICIENT",reason:"Requires 200 training, 60 calibration, 60 untouched test rounds and both classes per partition.",
+      nextEligibility:{training:Math.max(0,200-training.length),calibration:Math.max(0,60-calibration.length),
+        test:Math.max(0,60-test.length),bothClassesRequired:true},artifact:null};
   const y=(r:EarlyTrainingRow)=>r.outcome==="UP"?1:0;
   // Small ridge-regularized market calibration challenger, not a claim of
   // incremental non-market information. Features remain available for later ablation.
@@ -55,10 +58,11 @@ export async function runEarlyDailyTraining(now=Date.now(),db:LockDb=researchPoo
   const day=new Date(now).toISOString().slice(0,10);
   for(const interval of [5,15] as const){
      const previous=(await db.query(`SELECT id,status,attempt,started_at_ms,dataset_cutoff_ms,
-       report->'references' AS references,report->>'datasetDigest' AS dataset_digest FROM waterx_early_training_jobs
+        report->'references' AS references,report->>'datasetDigest' AS dataset_digest,
+        report->>'trainingProtocolVersion' AS protocol_version FROM waterx_early_training_jobs
       WHERE day=$1 AND interval_minutes=$2 AND strategy_version=$3 ORDER BY attempt DESC LIMIT 1`,
       [day,interval,TIMED_STRATEGY])).rows[0];
-     if(previous?.status==="EVALUATED"||previous?.status==="FAILED"&&!retryFailed||
+     if(previous?.status==="FAILED"&&!retryFailed||
        previous?.status==="RUNNING"&&now-Number(previous.started_at_ms)<600000)continue;
      if(previous?.status==="RUNNING"){
        await db.query(`UPDATE waterx_early_training_jobs SET status='FAILED',finished_at_ms=$2,error_class='STALE_RUNNING'
@@ -78,7 +82,8 @@ export async function runEarlyDailyTraining(now=Date.now(),db:LockDb=researchPoo
       // A smaller cap would permanently prevent a mature all-gate cohort fitting.
       if(selected.rows.length>40000)throw new Error("Early training explicit cohort bound exceeded");
      const dataset=auditEarlyDataset(selected.rows,interval,now);
-     if(previous?.status==="INSUFFICIENT"&&previous.dataset_digest===dataset.datasetDigest)continue;
+      if(["INSUFFICIENT","EVALUATED"].includes(String(previous?.status))&&
+        previous.dataset_digest===dataset.datasetDigest&&previous.protocol_version==="lean-lock-learning-v2")continue;
     const attempt=previous?Number(previous.attempt)+1:1;
     const id=randomUUID();
     const created=await db.query(`INSERT INTO waterx_early_training_jobs(id,day,interval_minutes,strategy_version,
@@ -97,13 +102,15 @@ export async function runEarlyDailyTraining(now=Date.now(),db:LockDb=researchPoo
       const stopping=evaluateEarlyStopping(rows,interval,forecasts,now);
       await db.query(`UPDATE waterx_early_training_jobs SET finished_at_ms=$2,status=$3,report=$4 WHERE id=$1`,
         [id,Date.now(),reports.some(r=>r.status==="EVALUATED")||pooled.status==="EVALUATED"?"EVALUATED":"INSUFFICIENT",
-           JSON.stringify({reports,pooled,stopping,digestRejected,selected:rows.length,
+            JSON.stringify({trainingProtocolVersion:"lean-lock-learning-v2",reports,pooled,stopping,digestRejected,selected:rows.length,
              funnel:dataset.funnel,datasetDigest:dataset.datasetDigest,
              modelComparison:compareEarlyModels(rows,interval,now),
              retainedBaselineStatus:"CANDIDATE_ONLY_BASELINE_RETAINED",
              newEligibleSincePreviousAttempt:rows.filter(r=>!priorReferences.has(referenceKey(r))).length,
             promotion:"RETAIN_BASELINE",
             stoppingPolicy:"SHADOW_FULL_SEQUENCE_EVALUATION",
+             nextEligibility:reports.filter(r=>r.status==="INSUFFICIENT").map(r=>({
+               horizon:r.horizon,reason:r.reason,...("nextEligibility" in r?r.nextEligibility:{})})),
             references:rows.map(r=>({roundId:r.roundId,startMs:r.startMs,expiryMs:r.expiryMs,
               horizon:r.horizon,outcome:r.outcome,snapshotDigest:r.snapshotDigest})),
             withdrawalPolicy:"No candidate is active. Requery verified labels on every run; retained artifact references enable outcome-withdrawal review."})]);
@@ -140,5 +147,9 @@ export async function earlyLearningReport(db:LockDb=researchPool){
       return {interval,day:today,status:!job?"MISSED_OR_NOT_STARTED":
         job.status==="RUNNING"&&Date.now()-Number(job.started_at_ms)>600000?"STALE_RUNNING":job.status};
     }),
-    stoppingPolicy:"Deterministic 30-second qualification gates v3; learned stopping promotion not qualified",automaticPromotion:false};
+    stoppingPolicy:"Deterministic 30-second qualification gates v3; learned stopping promotion not qualified",
+    scheduler:{browserIndependent:true,invocation:"Startup and six-hour UTC retry slots in existing server process",
+      autoscaleIndependent:false,limitation:"Cannot guarantee invocation while the existing Autoscale process is asleep; no new hosting provisioned."},
+    currentModel:{source:"WaterX market",modelVersion:null,calibrationVersion:null,trainedBluewaterModel:false},
+    automaticPromotion:false};
 }

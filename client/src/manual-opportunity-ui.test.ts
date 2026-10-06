@@ -4,22 +4,105 @@ import { test } from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { RoundDecision } from "../../shared/round-decision";
-import { lockPolicy } from "../../shared/lock-readiness";
+import type { TimedDecision, TimedState } from "../../shared/timed-decision";
 import type { WaterxDataHealth } from "../../shared/waterx-data-health";
 import { ManualOpportunity } from "./ManualOpportunity";
-import { getAtomicDecisionView, type LiveSnapshotEnvelope } from "./live-decision-contract";
+import { trainingEvidenceFacts } from "./EarlyLearningSummary";
+
+test("insufficient jobs are not reported as trained and zero fit rounds are explicit",()=>{
+  const insufficient={status:"INSUFFICIENT",started_at_ms:123,finished_at_ms:456,
+    report:{reports:[{counts:{training:0}},{counts:{training:0}}]}};
+  assert.deepEqual(trainingEvidenceFacts([insufficient]),{trainedAt:null,rounds:0});
+  const trained={...insufficient,status:"EVALUATED",report:{reports:[{counts:{training:210}},{counts:{training:200}}]}};
+  assert.deepEqual(trainingEvidenceFacts([insufficient,trained]),{trainedAt:456,rounds:210});
+});
+import type { AtomicDecisionView } from "./live-decision-contract";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("./ManualOpportunity.css", import.meta.url), "utf8");
 const source = readFileSync(new URL("./ManualOpportunity.tsx", import.meta.url), "utf8");
 const now = 1_700_000_020_000;
+const strategyVersion = "waterx-qualification-gates-v3";
 
-function snapshot(interval: 5 | 15 = 5, overrides: Partial<RoundDecision> = {}, probability = .72) {
-  const round = { id: `desk-${interval}`, startMs: now - 20_000, expiryMs: now + interval * 60_000 - 20_000 };
-  const decision: RoundDecision = {
+function savedChoice(interval: 5 | 15, side: "UP" | "DOWN", startMs: number, expiryMs: number): TimedDecision {
+  const probabilityUp = side === "UP" ? .72 : .38;
+  const gateIndex = 2;
+  const gateScheduledAtMs = startMs + gateIndex * 30_000;
+  return {
+    id: `timed-${interval}-${side}`,
+    strategyVersion,
+    network: "sui:mainnet",
+    intervalMinutes: interval,
+    roundId: `desk-${interval}`,
+    startMs,
+    expiryMs,
+    status: "LOCKED",
+    side,
+    probabilityUp,
+    probabilityDown: 1 - probabilityUp,
+    observationId: "waterx-observation-locked",
+    receivedAtMs: gateScheduledAtMs,
+    decisionAtMs: gateScheduledAtMs + 1_000,
+    elapsedMs: gateScheduledAtMs + 1_000 - startMs,
+    targetAtMs: gateScheduledAtMs,
+    hardDeadlineAtMs: gateScheduledAtMs + 2_000,
+    lockReason: "QUALIFIED_SCHEDULED_GATE",
+    earlyBlocker: "CONDITIONS_SATISFIED",
+    ambiguous: false,
+    coverage: { n: 7, firstAtMs: startMs + 1_000, lastAtMs: gateScheduledAtMs, maxGapMs: 9_000 },
+    committedAtMs: gateScheduledAtMs + 1_500,
+    workerReceivedAtMs: gateScheduledAtMs + 1_200,
+    onTime: true,
+    operationalFailure: null,
+    automaticExecutionAllowed: false,
+    gateIndex,
+    gateScheduledAtMs,
+    evidence: { probabilitySemantics: "experimental market-based policy; not a calibrated forecast", modelVersion: null },
+  };
+}
+
+function timedState(interval: 5 | 15, startMs: number, expiryMs: number, overrides: Partial<TimedState> = {}): TimedState {
+  const elapsedMs = Math.max(0, now - startMs);
+  const nextGateAtMs = startMs + (Math.floor(elapsedMs / 30_000) + 1) * 30_000;
+  return {
+    strategyVersion,
+    targetAtMs: startMs + (interval === 5 ? 60_000 : 180_000),
+    hardDeadlineAtMs: expiryMs,
+    elapsedMs,
+    timeProgress: Math.min(1, elapsedMs / (interval * 60_000)),
+    phase: elapsedMs >= (interval === 5 ? 60_000 : 180_000) ? "EVALUATING" : "OBSERVING",
+    readinessPercent: 50,
+    qualified: false,
+    blocker: "SAME_SIDE_PERSISTENCE_INCOMPLETE",
+    liveSide: "UP",
+    liveProbabilityUp: .72,
+    sourceAgeMs: 1_000,
+    persistence: "WAITING",
+    errorClass: null,
+    saved: null,
+    nextGateAtMs: nextGateAtMs < expiryMs ? nextGateAtMs : null,
+    lastGate: null,
+    requirementsMet: 2,
+    requirementsTotal: 4,
+    policySource: "experimental market-based policy",
+    executionCutoffAtMs: null,
+    remainingRequirement: "Needs more same-side evidence",
+    components: {
+      sameSideMs: 8_000, requiredSameSideMs: 24_000, validCount: 4, requiredCount: 3,
+      probabilityRange: .02, maximumRange: .045, strength: .72, requiredStrength: .72,
+      recentReversals: 0, trendKind: "FLAT_STABLE",
+    },
+    ...overrides,
+  };
+}
+
+function decision(interval: 5 | 15, overrides: Partial<RoundDecision> = {}, probability = .72, elapsedMs = 20_000) {
+  const round = { id: `desk-${interval}`, startMs: now - elapsedMs, expiryMs: now + interval * 60_000 - elapsedMs };
+  const timedDecision = timedState(interval, round.startMs, round.expiryMs);
+  const value: RoundDecision = {
     format: "waterx-live-decision-v2", streamId: `stream-${interval}`, network: "sui:mainnet",
     intervalMinutes: interval, roundId: round.id, startMs: round.startMs, expiryMs: round.expiryMs,
-    policyVersion: lockPolicy(interval).version, stateVersion: 4, updatedAtMs: now, publishedAtMs: now,
+    policyVersion: strategyVersion, strategyVersion, stateVersion: 4, updatedAtMs: now, publishedAtMs: now,
     readiness: {
       state: "LEANING", score: 61, side: "UP", probability, evaluatedAtMs: now,
       secondsRemaining: interval * 60 - 20, sameSideMs: 12_000, earliestPossibleAtMs: now,
@@ -32,16 +115,14 @@ function snapshot(interval: 5 | 15 = 5, overrides: Partial<RoundDecision> = {}, 
     },
     market: { probabilityUp: probability, probabilityDown: 1 - probability, observedAtMs: now, receivedAtMs: now, providerOddsAtMs: null },
     persistence: { status: "WAITING_CHECKPOINT", updatedAtMs: now, errorClass: null },
-    canonical: null, latestSafeOrderAtMs: null, executionWindowRemainingMs: null,
+    canonical: null, timedDecision, latestSafeOrderAtMs: null, executionWindowRemainingMs: null,
     executionBlocker: "Research only.", tradeAllowed: false,
     timestampSemantics: "Application timestamps; provider odds timestamp unknown.",
     ...overrides,
   };
-  const envelope: LiveSnapshotEnvelope = {
-    serverTime: new Date(now).toISOString(), intervalMinutes: interval, round, decision,
-  };
-  return { round, envelope, decision };
+  return { round, decision: value };
 }
+
 function health(status: WaterxDataHealth["probabilities"]["status"], lastValid: WaterxDataHealth["probabilities"]["lastValid"] = null): WaterxDataHealth {
   const primaryReason = status === "CURRENT" ? "CURRENT" : status;
   return {
@@ -51,7 +132,25 @@ function health(status: WaterxDataHealth["probabilities"]["status"], lastValid: 
     execution: { eligible: false, reason: "Research only." }, primaryReason,
   };
 }
-function render(interval: 5 | 15, view: ReturnType<typeof getAtomicDecisionView>, options: {
+
+function viewFor(value: RoundDecision | null, fresh: boolean, dataHealth?: WaterxDataHealth, interval: 5 | 15 | null = value?.intervalMinutes ?? null): AtomicDecisionView {
+  const exactRound = value ? { id: value.roundId, startMs: value.startMs, expiryMs: value.expiryMs } : null;
+  const timed = value?.timedDecision ?? null;
+  const savedDecision = timed?.saved ?? null;
+  const provisionalLean = fresh ? timed?.liveSide ?? null : null;
+  return {
+    decision: value, fresh, sourceAgeMs: fresh ? 1_000 : 15_000, lean: provisionalLean,
+    stage: provisionalLean ? `LEANING ${provisionalLean}` : "WATCHING", score: fresh ? 50 : null,
+    reason: fresh ? "Current same-round observation." : "Current round evidence is not fresh enough.",
+    dataHealth, projectionVersion: "waterx-exact-round-client-v1", sourceProjectionVersion: "test-v3",
+    intervalMinutes: interval, roundIdentity: exactRound, strategyVersion: timed?.strategyVersion ?? null,
+    snapshotVersion: value?.stateVersion ?? null, componentTimestamps: {},
+    provisionalLean, lastGate: timed?.lastGate ?? null, nextGateAtMs: timed?.nextGateAtMs ?? null,
+    savedDecision, persistenceState: value?.persistence.status ?? null,
+  };
+}
+
+function render(interval: 5 | 15, view: AtomicDecisionView, options: {
   pending?: boolean; error?: string; round?: { id: string; startMs: number; expiryMs: number } | null;
   fixtureName?: string;
 } = {}) {
@@ -63,106 +162,107 @@ function render(interval: 5 | 15, view: ReturnType<typeof getAtomicDecisionView>
   }));
 }
 
-test("normal 5m and 15m rounds share the compact exact-round decision projection", () => {
+test("fresh snapshots show current WaterX odds and the continuous provisional lean in both intervals", () => {
   for (const interval of [5, 15] as const) {
-    const { round, envelope } = snapshot(interval);
-    const view = getAtomicDecisionView(envelope, interval, round, now);
-    const markup = render(interval, view);
-    assert.match(markup, new RegExp(`· ${interval}m`));
-    assert.match(markup, /LEANING UP/);
-    assert.match(markup, /\$83,517\.25/);
-    assert.match(markup, /\$83,500\.00/);
-    assert.match(markup, /\+\$17\.25/);
-    assert.match(markup, /WaterX market/);
-    assert.equal(view.projectionVersion, "waterx-exact-round-client-v1");
-    assert.equal(view.snapshotVersion, 4);
-    assert.equal(view.roundIdentity?.id, round.id);
+    const { round, decision: current } = decision(interval);
+    const html = render(interval, viewFor(current, true, health("CURRENT")));
+    assert.match(html, new RegExp(`· ${interval}m`));
+    assert.match(html, /LEANING UP/);
+    assert.match(html, /WaterX market/);
+    assert.match(html, /\+0\.02% from reference/);
+    assert.match(html, /72\.0%/);
+    assert.match(html, /28\.0%/);
+    assert.match(html, /MARKET DATA<\/span><b>CURRENT/);
+    assert.match(html, /Qualification progress: 2 of 4 conditions met/);
   }
 });
 
-test("missing odds have one calm notice while comparison and exact price difference remain independent", () => {
-  const { round, envelope } = snapshot(5, { market: null });
-  const outage = health("PROBABILITIES_MISSING");
-  const withHealth = { ...envelope, dataHealth: outage, decision: { ...envelope.decision!, dataHealth: outage } };
-  const view = getAtomicDecisionView(withHealth, 5, round, now);
-  const markup = render(5, view);
-  assert.match(markup, /WAITING FOR ODDS/);
-  assert.equal(markup.match(/WaterX odds unavailable\. Live BTC chart remains available\./g)?.length, 1);
-  assert.match(markup, /\$83,517\.25/);
-  assert.match(markup, /\+\$17\.25/);
-  assert.doesNotMatch(markup, /0% confidence|0\.0%/);
-});
-
-test("last same-round odds are stale only in Details and never produce a current lean", () => {
-  const { round, envelope } = snapshot();
-  const outage = health("PROBABILITIES_STALE", {
-    up: .72, down: .28, receivedAtMs: now - 15_000, ageMs: 15_000,
-  });
-  const withHealth = { ...envelope, dataHealth: outage, decision: { ...envelope.decision!, dataHealth: outage } };
-  const view = getAtomicDecisionView(withHealth, 5, round, now);
-  const markup = render(5, view);
-  assert.match(markup, /WATCHING/);
-  assert.doesNotMatch(markup, /LEANING UP/);
-  assert.match(markup, /<summary>Details<\/summary>[\s\S]*Stale · UP 72\.0% · DOWN 28\.0%/);
-  assert.doesNotMatch(markup.slice(0, markup.indexOf("<details")), /72\.0%/);
-});
-
-test("a saved immutable choice remains prominent during a probability outage", () => {
-  const { round, envelope } = snapshot(15, {
-    market: null,
-    canonical: { side: "DOWN", probabilityUp: .39, decisionAtMs: now - 2_000, committedAtMs: null },
-    persistence: { status: "COMMITTED", updatedAtMs: now - 1_000, errorClass: null },
-    readiness: {
-      state: "WATCHING", score: 0, side: null, probability: null, evaluatedAtMs: now,
-      secondsRemaining: 880, sameSideMs: 0, earliestPossibleAtMs: null,
-      reason: "Waiting for current probability input.", health: "PROBABILITIES STALE",
-      components: {
-        strength: .7, requiredStrength: .6, persistenceMs: 0, requiredPersistenceMs: 10_000,
-        range: .02, reversals: 0, observationCount: 0, ageMs: 15_000, gapReset: false,
-        velocity: 0, acceleration: 0, sourceHealthy: false, withinWindow: true, fresh: false, stable: false,
-      },
-    },
-  });
+test("stale odds suppress provisional lean, retain permanent percentage positions and only label last same-round values stale in Details", () => {
+  const { round, decision: current } = decision(5);
   const outage = health("PROBABILITIES_STALE", { up: .72, down: .28, receivedAtMs: now - 15_000, ageMs: 15_000 });
-  const withHealth = { ...envelope, dataHealth: outage, decision: { ...envelope.decision!, dataHealth: outage } };
-  const view = getAtomicDecisionView(withHealth, 15, round, now);
-  const markup = render(15, view);
-  assert.match(markup, /LOCKED DOWN/);
-  assert.match(markup, /saved and remains unchanged/);
-  assert.doesNotMatch(markup, /LOCKED UP/);
-  assert.match(markup, /DOWN · immutable/);
+  const html = render(5, viewFor({ ...current, market: null }, false, outage));
+  assert.match(html, /WATCHING/);
+  assert.doesNotMatch(html, /LEANING UP/);
+  assert.match(html, /WaterX market/);
+  assert.match(html, /probability-up"><span>UP<\/span><strong>—<\/strong>/);
+  assert.match(html, /probability-down"><span>DOWN<\/span><strong>—<\/strong>/);
+  assert.match(html, /PROBABILITIES STALE/);
+  assert.match(html, /<summary>Details<\/summary>[\s\S]*Stale · UP 72\.0% · DOWN 28\.0%/);
+  assert.doesNotMatch(html.slice(0, html.indexOf("<details")), /72\.0%|28\.0%/);
+  assert.ok(round.expiryMs > now);
 });
 
-test("initial loading is neutral; request failure gets one functional retry control", () => {
-  const empty = { decision: null, fresh: false, sourceAgeMs: null, lean: null, stage: "WATCHING", score: null, reason: "Waiting for a valid active-round snapshot.", projectionVersion: "waterx-exact-round-client-v1", intervalMinutes: null, roundIdentity: null, strategyVersion: null, snapshotVersion: null, componentTimestamps: {}, provisionalLean: null, lastGate: null, nextGateAtMs: null, savedDecision: null, persistenceState: null } as const;
+test("saved timed lock survives a market-probability outage without being replaced by changing or stale odds", () => {
+  const { round, decision: current } = decision(15, { market: null }, .72, 100_000);
+  const saved = savedChoice(15, "DOWN", round.startMs, round.expiryMs);
+  const timedDecision = { ...current.timedDecision!, persistence: "COMMITTED" as const, saved };
+  const outage = health("PROBABILITIES_MISSING", { up: .72, down: .28, receivedAtMs: now - 15_000, ageMs: 15_000 });
+  const view = viewFor({ ...current, timedDecision }, false, outage);
+  const html = render(15, view);
+  assert.match(html, /LOCKED DOWN/);
+  assert.match(html, /WaterX market/);
+  assert.match(html, /probability-up"><span>UP<\/span><strong>—<\/strong>/);
+  assert.match(html, /probability-down"><span>DOWN<\/span><strong>—<\/strong>/);
+  assert.match(html, /Saved lock · DOWN/);
+  assert.match(html, /UP 38\.0%/);
+  assert.match(html, /DOWN 62\.0%/);
+  assert.match(html, /Saved decision is frozen/);
+  assert.doesNotMatch(html, /LOCKED UP/);
+});
+
+test("non-choice timed records never become a lock or invent a side", () => {
+  const { round, decision: current } = decision(5, {}, .72, 100_000);
+  const noChoice: TimedDecision = {
+    ...savedChoice(5, "UP", round.startMs, round.expiryMs),
+    status: "ABSTAINED_NO_QUALIFIED_SIGNAL",
+    side: null,
+    probabilityUp: null,
+    probabilityDown: null,
+    observationId: null,
+    receivedAtMs: null,
+    committedAtMs: now,
+    onTime: null,
+    lockReason: "NO_QUALIFIED_SIGNAL",
+  };
+  const timedDecision = { ...current.timedDecision!, persistence: "COMMITTED" as const, saved: noChoice };
+  const html = render(5, viewFor({ ...current, timedDecision }, false));
+  assert.match(html, /WATCHING/);
+  assert.doesNotMatch(html, /LOCKED (?:UP|DOWN)|Saved lock/);
+  assert.match(html, /No side · immutable/);
+  assert.match(html, /WaterX market/);
+});
+
+test("exact round and interval identity guard both the lean and saved lock projection", () => {
+  const { round, decision: current } = decision(5);
+  const view = viewFor(current, true, health("CURRENT"));
+  const wrongRound = render(5, view, { round: { ...round, id: "another-round" } });
+  const wrongInterval = render(15, view);
+  for (const html of [wrongRound, wrongInterval]) {
+    assert.doesNotMatch(html, /LEANING UP|LOCKED UP/);
+    assert.match(html, /Waiting for an exact active-round snapshot/);
+  }
+});
+
+test("refresh loading and errors remain honest, while research language makes no execution claim", () => {
+  const empty = viewFor(null, false, undefined, null);
   const loading = render(5, empty, { pending: true });
   assert.match(loading, /desk-skeleton/);
-  assert.doesNotMatch(loading, /role="status">WATCHING|DATA DELAYED|Legacy schedule/);
   const failed = render(5, empty, { error: "NETWORK_ERROR" });
   assert.match(failed, /Live snapshot could not refresh/);
   assert.match(failed, /Retry/);
+  assert.match(failed, /read-only market research/);
+  assert.match(failed, /Automatic execution is disabled/);
+  assert.doesNotMatch(failed, /place order|buy now|trade now/i);
 });
 
-test("rollover withholds old round state; visual lock fixture is marked development-only", () => {
-  const { round, envelope } = snapshot();
-  const view = getAtomicDecisionView(envelope, 5, round, now);
-  const nextRound = { ...round, id: "new-round", startMs: now, expiryMs: now + 300_000 };
-  const rollover = render(5, view, { round: nextRound });
-  assert.doesNotMatch(rollover, /LEANING UP|LOCKED UP/);
-  assert.match(rollover, /Waiting for an exact active-round snapshot/);
-  const visualLock = render(5, getAtomicDecisionView(null, 5, null, now), { fixtureName: "locked" });
-  assert.match(visualLock, /LOCKED UP/);
-  assert.match(visualLock, /Synthetic visual state only/);
-  assert.match(visualLock, /Development visual fixture/);
-});
-
-test("chart is the next live-desk area, archive coverage stays explicitly rolling, and layout is compact on mobile", () => {
+test("chart remains immediately after the shared live decision, and fixtures stay visibly development-only", () => {
   assert.ok(app.indexOf("<ManualOpportunity") < app.indexOf("<section className=\"chart-panel\">"));
   assert.match(app, /does not describe complete coverage of the current round/);
-  assert.match(app, /active-round window; archive coverage is separate/);
   assert.match(css, /@media \(max-width: 600px\)/);
   assert.match(css, /@media \(max-width: 350px\)/);
-  assert.match(source, /Qualification conditions/);
-  assert.doesNotMatch(source, /economics|expected return|NO EXECUTION/);
+  assert.match(source, /view\.savedDecision/);
+  assert.match(source, /view\.provisionalLean/);
+  assert.match(source, /WaterX market/);
+  assert.doesNotMatch(source, /exactDecision\?\.canonical|decision\?\.canonical/);
   assert.match(app, /import\.meta\.env\.DEV && fixtureNames\.includes/);
 });

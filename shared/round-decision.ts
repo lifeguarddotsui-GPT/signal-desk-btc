@@ -13,6 +13,13 @@ export type RoundDecision = {
   network:"sui:mainnet"; intervalMinutes:5|15; roundId:string; startMs:number; expiryMs:number;
   policyVersion:string; stateVersion:number; updatedAtMs:number; publishedAtMs:number;
   projectionVersion?:"waterx-timed-projection-v1";strategyVersion?:string;snapshotVersion?:number;
+   currentStrategy?:{
+     strategyVersion:string;modelVersion:null;calibrationVersion:null;
+     probabilitySource:"WaterX market";modelForecast:null;
+     leanVersion:string;provisionalLean:"UP"|"DOWN"|null;
+     state:"WATCHING"|"LEANING_UP"|"LEANING_DOWN"|"SAVING"|"LOCKED_UP"|"LOCKED_DOWN"|"ROUND_COMPLETE";
+     result:null;
+   };
   componentTimestamps?:{decisionSnapshotAtMs:number;probabilitiesReceivedAtMs:number|null;persistenceAtMs:number};
   readiness:LockReadiness;
   market:null|{probabilityUp:number;probabilityDown:number;observedAtMs:number;

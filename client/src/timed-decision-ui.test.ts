@@ -82,6 +82,12 @@ function gateTimed(interval: 5 | 15, elapsed: number): TimedState {
     requirementsTotal: 4,
     policySource: "experimental market-based policy",
     executionCutoffAtMs: null,
+    remainingRequirement: "Needs more same-side evidence",
+    components: {
+      sameSideMs: 15_000, requiredSameSideMs: 24_000, validCount: 4, requiredCount: 3,
+      probabilityRange: .02, maximumRange: .045, strength: .72, requiredStrength: .72,
+      recentReversals: 0, trendKind: "FLAT_STABLE",
+    },
   };
 }
 
@@ -109,32 +115,56 @@ function roundDecision(interval: 5 | 15, state: TimedState): RoundDecision {
   };
 }
 
-function renderDesk(decision: RoundDecision | null, fresh = true) {
-  const view: AtomicDecisionView = { decision, fresh, sourceAgeMs: fresh ? 1200 : 25_000,
-    lean: fresh ? "UP" : null, stage: "LEANING", score: fresh ? 50 : null,
-    reason: fresh ? "Current same-round observation." : "Source stale; frozen record retained." };
-  return renderToStaticMarkup(React.createElement(ManualOpportunity, { view, now }));
+function renderDesk(decision: RoundDecision | null, fresh = true, options: {
+  interval?: 5 | 15;
+  round?: { id: string; startMs: number; expiryMs: number } | null;
+  savedDecision?: AtomicDecisionView["savedDecision"];
+  overrideSavedDecision?: boolean;
+  provisionalLean?: "UP" | "DOWN" | null;
+} = {}) {
+  const state = decision?.timedDecision ?? null;
+  const interval = options.interval ?? decision?.intervalMinutes ?? 5;
+  const exactRound = decision ? { id: decision.roundId, startMs: decision.startMs, expiryMs: decision.expiryMs } : null;
+  const view: AtomicDecisionView = {
+    decision, fresh, sourceAgeMs: fresh ? 1_200 : 25_000,
+    lean: fresh ? state?.liveSide ?? null : null, stage: "LEANING", score: fresh ? 50 : null,
+    reason: fresh ? "Current same-round observation." : "Current round evidence is not fresh enough.",
+    projectionVersion: "waterx-exact-round-client-v1", sourceProjectionVersion: "test-v3",
+    intervalMinutes: decision?.intervalMinutes ?? null, roundIdentity: exactRound,
+    strategyVersion: state?.strategyVersion ?? null, snapshotVersion: decision?.stateVersion ?? null,
+    componentTimestamps: {}, provisionalLean: options.provisionalLean === undefined
+      ? fresh ? state?.liveSide ?? null : null
+      : options.provisionalLean,
+    lastGate: state?.lastGate ?? null, nextGateAtMs: state?.nextGateAtMs ?? null,
+    savedDecision: options.overrideSavedDecision ? options.savedDecision ?? null : state?.saved ?? null,
+    persistenceState: decision?.persistence.status ?? null,
+  };
+  return renderToStaticMarkup(React.createElement(ManualOpportunity, {
+    view, now, interval, round: options.round === undefined ? exactRound : options.round,
+  }));
 }
 
 function history(interval: 5 | 15, record: TimedDecision): TimedHistoryResponse {
   return { strategyVersion, entries: [record], metrics: { n: 1, onTimeLocks: 0, deadlineLocks: 1, missed: 0, noValidInput: 0, settledN: 0 } };
 }
 
-test("one compact live decision retains only the next server evaluation, not the legacy round timer", () => {
+test("a fresh lean updates continuously while the next qualification gate remains separately scheduled", () => {
   for (const interval of [5, 15] as const) {
     const state = gateTimed(interval, 45_000);
     const html = renderDesk(roundDecision(interval, state));
-    assert.match(html, /Next evaluation<\/span><strong>00:15/);
+    assert.match(html, /Next gate<\/span><strong>00:15/);
     assert.match(html, /LEANING UP/);
+    assert.match(html, /WaterX market/);
     assert.doesNotMatch(html, /MANDATORY DECISION|HARD DEADLINE|readinessPercent|02:20 \/ 05:00/);
   }
 });
 
-test("qualification indicators are exact-snapshot conditions and no readiness percentage is shown", () => {
+test("the four visible indicators represent timed qualification conditions, not win probability", () => {
   const markup = renderDesk(roundDecision(5, gateTimed(5, 48_000)));
-  assert.match(markup, /Qualification conditions/);
-  assert.match(markup, /aria-label="Stable: not met"/);
-  assert.doesNotMatch(markup, /readinessPercent|50%|strength|probability range/i);
+  assert.match(markup, /Qualification progress: 3 of 4 conditions met/);
+  for (const label of ["Fresh input", "Directional strength", "Same-side persistence", "Stable evidence"]) assert.match(markup, new RegExp(`title="${label}"`));
+  assert.match(markup, /WaterX market/);
+  assert.doesNotMatch(markup, /50% confidence|readinessPercent|win probability/i);
 });
 
 test("saved DOWN remains frozen in compact primary state without legacy evidence diagnostics", () => {
@@ -143,8 +173,10 @@ test("saved DOWN remains frozen in compact primary state without legacy evidence
   state.persistence = "COMMITTED";
   const markup = renderDesk(roundDecision(5, state), false);
   assert.match(markup, /LOCKED DOWN/);
-  assert.match(markup, /saved and remains unchanged/);
+  assert.match(markup, /Saved decision is frozen/);
   assert.match(markup, /Saved round choice/);
+  assert.match(markup, /WaterX market/);
+  assert.match(markup, /Frozen WaterX market probability/);
   assert.doesNotMatch(markup, /LOCKED UP/);
   assert.doesNotMatch(markup, /observation-immutable-7|timed-decision-5-shared/);
 });
@@ -155,11 +187,11 @@ test("saved late choice is immutable and does not imply a current opposite lean"
   state.persistence="COMMITTED";
   const markup=renderDesk(roundDecision(5,state));
   assert.match(markup,/LOCKED DOWN/);
-  assert.match(markup,/saved and remains unchanged/);
+  assert.match(markup,/Saved decision is frozen/);
   assert.doesNotMatch(markup,/LOCKED UP/);
 });
 
-test("non-choice timed outcomes do not fabricate a side or a deadline countdown", () => {
+test("non-choice timed outcomes remain watching and do not fabricate a lock side", () => {
   const noInput = timed(15, 450_000, "DEADLINE");
   noInput.persistence = "COMMITTED";
   noInput.saved = savedRecord(15, "NO_VALID_INPUT");
@@ -169,10 +201,68 @@ test("non-choice timed outcomes do not fabricate a side or a deadline countdown"
   const noInputMarkup = renderDesk(roundDecision(15, noInput), false);
   const missedMarkup = renderDesk(roundDecision(5, missed), false);
   assert.match(noInputMarkup, /WATCHING/);
-  assert.match(noInputMarkup, /Current round evidence is not fresh enough/);
-  assert.doesNotMatch(noInputMarkup, /UP LOCKED|DOWN LOCKED/);
+  assert.match(noInputMarkup, /SAME SIDE PERSISTENCE INCOMPLETE/);
+  assert.doesNotMatch(noInputMarkup, /LOCKED (?:UP|DOWN)|Saved lock/);
   assert.match(missedMarkup, /WATCHING/);
-  assert.doesNotMatch(missedMarkup, /MISSED GATE|MISSED_DEADLINE/);
+  assert.doesNotMatch(missedMarkup, /LOCKED (?:UP|DOWN)|Saved lock/);
+});
+
+test("a legacy canonical choice cannot override the current strategy's timed saved lock", () => {
+  const state = gateTimed(5, 121_000);
+  const currentSaved = {
+    ...savedRecord(5),
+    strategyVersion: gateStrategyVersion,
+    side: "DOWN" as const,
+    probabilityUp: .38,
+    probabilityDown: .62,
+    startMs: now - state.elapsedMs,
+    expiryMs: now - state.elapsedMs + 5 * 60_000,
+    decisionAtMs: now - 1_000,
+    elapsedMs: state.elapsedMs - 1_000,
+    committedAtMs: now - 500,
+    targetAtMs: now - 1_000,
+    hardDeadlineAtMs: now + 1_000,
+    gateIndex: 4,
+    gateScheduledAtMs: now - 1_000,
+  };
+  state.saved = currentSaved;
+  state.persistence = "COMMITTED";
+  const current = roundDecision(5, state);
+  current.canonical = { side: "UP", probabilityUp: .81, decisionAtMs: now - 3_000, committedAtMs: now - 2_000 };
+  const markup = renderDesk(current, true, {
+    overrideSavedDecision: true,
+    savedDecision: currentSaved,
+    provisionalLean: "UP",
+  });
+  assert.match(markup, /LOCKED DOWN/);
+  assert.match(markup, /Saved lock · DOWN/);
+  assert.match(markup, /UP 38\.0%/);
+  assert.match(markup, /DOWN 62\.0%/);
+  assert.match(markup, /WaterX market/);
+  assert.doesNotMatch(markup, /LOCKED UP/);
+});
+
+test("stale provisional lean is withheld while current odds retain permanent placeholder positions", () => {
+  const state = gateTimed(5, 80_000);
+  const html = renderDesk(roundDecision(5, state), false, { provisionalLean: null });
+  assert.match(html, /WATCHING/);
+  assert.doesNotMatch(html, /LEANING UP/);
+  assert.match(html, /WaterX market/);
+  assert.match(html, /probability-up"><span>UP<\/span><strong>—<\/strong>/);
+  assert.match(html, /probability-down"><span>DOWN<\/span><strong>—<\/strong>/);
+  assert.match(html, /MARKET DATA/);
+});
+
+test("exact round and selected interval are required to show a current lean", () => {
+  const current = roundDecision(5, gateTimed(5, 45_000));
+  const mismatchRound = renderDesk(current, true, {
+    round: { id: "different-round", startMs: current.startMs, expiryMs: current.expiryMs },
+  });
+  const mismatchInterval = renderDesk(current, true, { interval: 15 });
+  for (const html of [mismatchRound, mismatchInterval]) {
+    assert.doesNotMatch(html, /LEANING UP|LOCKED UP/);
+    assert.match(html, /Waiting for an exact active-round snapshot/);
+  }
 });
 
 test("history renders both intervals and repeats the exact authoritative desk decision ID", () => {
@@ -260,6 +350,8 @@ test("Agent uses the same ManualOpportunity and corrected server clock; history 
   assert.match(agent, /projectServerClock\(timedServerTime, timedLive\.atomicUpdated, now\)/);
   assert.match(agent, /<details className="agent-benchmarks">/);
   assert.match(historyPage, /<TimedDecisionHistory \/>/);
+  assert.match(historyPage, /<TimedStrategyHistory interval=/);
+  assert.match(historyPage, /Full gate audit and historical strategy filters/);
   assert.match(historyComponent, /timed-history\?\$\{query\}/);
   assert.match(historyComponent, /new URLSearchParams\(\{ interval: String\(interval\), strategy, window, limit: String\(limit\) \}\)/);
   assert.match(historyComponent, /correct\?: number/);

@@ -32,6 +32,8 @@ test("sequential replay abstains on weak gates, including the former forced dead
  const forecasts=earlyHorizons(5).map(horizon=>({horizon,artifact:{
    parameters:{intercept:0,coefficients:[1]},calibration:{intercept:0,coefficients:[1]}}}));
  const report=evaluateEarlyStopping(data,5,forecasts,now);
- assert.equal(report.status,"EVALUATED");
- if("test" in report){assert.equal(report.test.decisionN,0);assert.equal(report.test.coverage,0);}
+ assert.equal(report.status,"INSUFFICIENT");
+ assert("policyCandidates" in report);
+ assert(report.policyCandidates.every(candidate=>candidate.decisionN===0&&candidate.coverage===0));
+ assert.equal(report.promotion,"RETAIN_BASELINE");
 });

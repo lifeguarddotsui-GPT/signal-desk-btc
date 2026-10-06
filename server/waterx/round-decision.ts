@@ -6,9 +6,12 @@ import {WATERX_RESEARCH_CONFIG} from "../../shared/waterx-research";
 import type {EarlyDecision,OpportunityContext} from "../../shared/manual-opportunity";
 import {evaluateLockReadiness} from "./lock-readiness";
 import {evaluateTimedDecision,type TimedDecision,type GateJournal} from "../../shared/timed-decision";
+import {provisionalLean,LEAN_VERSION} from "../../shared/provisional-lean";
 
 type Identity={intervalMinutes:5|15;roundId:string;startMs:number;expiryMs:number};
 type Entry={identity:Identity;observations:LockObservation[];updatedAtMs:number;
+  lean:ReturnType<typeof provisionalLean>;
+  qualificationSinceMs:number;
   canonical:RoundDecision["canonical"];persistence:RoundDecision["persistence"];
   early:EarlyDecision|null;earlyError:string|null;opportunity:OpportunityContext|null;sourceUnavailable?:boolean};
 type TimedResult={saved:TimedDecision|null;error:string|null;saving:boolean;lastGate?:GateJournal|null};
@@ -29,6 +32,8 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
     if(entry&&identity.startMs===entry.identity.startMs&&key(entry.identity)!==key(identity))return null;
     if(!entry||key(entry.identity)!==key(identity)){
       entry={identity:{...identity},observations:[],updatedAtMs:now,canonical:null,
+        lean:provisionalLean([],now,identity.startMs),
+        qualificationSinceMs:identity.startMs,
         early:null,earlyError:null,opportunity:null,
         persistence:{status:"WAITING_CHECKPOINT",updatedAtMs:now,errorClass:null}};
       entries.set(identity.intervalMinutes,entry);
@@ -71,6 +76,10 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
            previous.purchase.down.askCents!==context.purchase.down.askCents)?
           context.receivedAtMs:previous?.priceLastChangedAtMs??null;
         entry.opportunity=context;
+        if(context.probabilityEvidence!=="available"){
+          entry.qualificationSinceMs=Math.max(entry.qualificationSinceMs,context.receivedAtMs+1);
+          entry.lean=provisionalLean([],identity.expiryMs,identity.startMs);
+        }
       }
     },
     earlyFailed(identity:Identity,errorClass:string){
@@ -95,7 +104,10 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
     },
     sourceUnavailable(identity:Identity){
       const entry=entries.get(identity.intervalMinutes);
-      if(entry&&key(entry.identity)===key(identity))entry.sourceUnavailable=true;
+      if(entry&&key(entry.identity)===key(identity)){
+        entry.sourceUnavailable=true;entry.lean=provisionalLean([],identity.expiryMs,identity.startMs);
+        entry.qualificationSinceMs=Math.max(entry.qualificationSinceMs,(entry.observations.at(-1)?.receivedAtMs??identity.startMs)+1);
+      }
     },
     observe(identity:Identity,observation:LockObservation){
       if(!Number.isSafeInteger(observation.atMs)||!Number.isSafeInteger(observation.receivedAtMs)||
@@ -106,6 +118,7 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
       const last=entry.observations.at(-1);
       if(last&&(last.atMs>=observation.atMs||last.receivedAtMs>=observation.receivedAtMs))return;
        entry.sourceUnavailable=false;
+       entry.lean=provisionalLean([observation],observation.atMs,identity.startMs,entry.lean);
       entry.observations.push({...observation});
       entry.observations=entry.observations.filter(o=>o.atMs>=observation.atMs-120000).slice(-180);
       entry.updatedAtMs=observation.atMs;
@@ -139,12 +152,16 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
       if(!entry||key(entry.identity)!==key(identity)||now<identity.startMs||now>=identity.expiryMs)return null;
       const policy=lockPolicy(identity.intervalMinutes);
       // Age is based on actual HTTP receipt, not replay of a cached response.
-      const observations=entry.observations.map(o=>({...o,atMs:o.receivedAtMs}));
+      const observations=entry.observations.filter(o=>o.receivedAtMs>=entry.qualificationSinceMs)
+        .map(o=>({...o,atMs:o.receivedAtMs}));
       const last=entry.observations.at(-1);
        const inputUnavailable=entry.sourceUnavailable||!!entry.opportunity&&entry.opportunity.probabilityEvidence!=="available"&&
          entry.opportunity.receivedAtMs>=(last?.receivedAtMs??0);
        const readiness=evaluateLockReadiness(policy,identity.startMs,identity.expiryMs,inputUnavailable?[]:observations,now);
       const timing=evaluateTimedDecision(identity,observations,now),saved=timed.get(key(identity));
+      const lean=inputUnavailable||entry.lean.receivedAtMs===null||now-entry.lean.receivedAtMs>10000?null:entry.lean.side;
+      timing.liveSide=lean;
+      if(lean===null)timing.liveProbabilityUp=null;
       timing.lastGate=saved?.lastGate??null;
       if(inputUnavailable){
         timing.qualified=false;timing.readinessPercent=0;timing.liveSide=null;timing.liveProbabilityUp=null;
@@ -162,6 +179,11 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
        return {...identity,format:"waterx-live-decision-v2",streamId,network:"sui:mainnet",
          policyVersion:policy.version,stateVersion:snapshotVersion,snapshotVersion,updatedAtMs:entry.updatedAtMs,publishedAtMs:now,
          projectionVersion:"waterx-timed-projection-v1",strategyVersion:timing.strategyVersion,
+          currentStrategy:{strategyVersion:timing.strategyVersion,modelVersion:null,calibrationVersion:null,
+            probabilitySource:"WaterX market",modelForecast:null,leanVersion:LEAN_VERSION,provisionalLean:lean,
+            state:timing.saved?.status==="LOCKED"?(timing.saved.side==="UP"?"LOCKED_UP":"LOCKED_DOWN"):
+              timing.persistence==="SAVING"?"SAVING":lean==="UP"?"LEANING_UP":lean==="DOWN"?"LEANING_DOWN":"WATCHING",
+            result:null},
          componentTimestamps:{decisionSnapshotAtMs:entry.updatedAtMs,
            probabilitiesReceivedAtMs:last?.receivedAtMs??null,
            persistenceAtMs:timing.saved?.committedAtMs??timing.lastGate?.evaluatedAtMs??entry.updatedAtMs},

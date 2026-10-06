@@ -3,9 +3,9 @@ name: Small-phone signal hierarchy
 description: Visual verification rule for time-sensitive WaterX BTC round screens
 ---
 
-On the Live Desk, keep WaterX reference, clearly labeled Coinbase comparison, distance and countdown visible, then put deterministic readiness progress and its exact blocker directly above the chart on phones. Put extended choice history, model explanations and diagnostics after the chart.
+On the Live Desk, prioritize interval/countdown, permanent live UP/DOWN percentages, provisional lean or saved lock, qualification progress and one blocker, followed by current BTC/reference/difference and chart. Extended choice history, explanations and diagnostics must not displace the main flow.
 
-**Why:** The user explicitly requires readiness progress and blocker above the mobile chart so users can see timely round state. This supersedes the older chart-first priority, but does not justify burying the chart beneath extended diagnostics. A passing build and desktop screenshot missed mobile failures.
+**Why:** The user's lean-to-lock brief explicitly restored this hierarchy. Readiness is not win probability; missing odds retain both percentage positions. A passing build and desktop screenshot previously missed mobile failures.
 
 **How to apply:** After any Live layout change, render at 320, 375, 390 and 430 CSS-pixel viewport widths and read the visible content. Keep source labels legible and stale/withheld states explicit rather than assuming the desktop layout survives.
 

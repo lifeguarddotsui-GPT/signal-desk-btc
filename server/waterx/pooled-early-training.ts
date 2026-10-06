@@ -5,6 +5,7 @@ import {logit,sigmoid} from "./bluewater-fast";
 import {metrics} from "./bluewater-metrics";
 import {earlyHorizons,TIMED_STRATEGY} from "../../shared/timed-decision";
 import {digestEarlySnapshot} from "./early-horizons";
+import {partitionEarlyRow} from "./early-model-comparison";
 
 /** Pool elapsed-aware evidence without calling correlated gates independent outcomes.
  * A predeclared hash, never an outcome/probability, selects ONE gate per training round.
@@ -28,9 +29,9 @@ export function trainPooledGates(rows:EarlyTrainingRow[],interval:5|15,now:numbe
    selected.push(g[n%g.length]);
  }
  selected.sort((a,b)=>a.startMs-b.startMs||a.roundId.localeCompare(b.roundId));
- const training=selected.filter(r=>r.expiryMs<=trainEnd&&r.labelAvailableAtMs<=trainEnd);
- const calibration=selected.filter(r=>r.startMs>=trainEnd&&r.expiryMs<=calEnd&&r.labelAvailableAtMs<=calEnd);
-  const test=selected.filter(r=>r.startMs>=policyEnd&&r.expiryMs<=cutoff);
+ const training=selected.filter(r=>partitionEarlyRow(r,now)==="TRAIN");
+ const calibration=selected.filter(r=>partitionEarlyRow(r,now)==="CALIBRATION");
+  const test=selected.filter(r=>partitionEarlyRow(r,now)==="TEST");
  const base={interval,protocol:"elapsed-pooled-one-hash-selected-gate-per-round-v1",strategyVersion:TIMED_STRATEGY,
    statisticalUnit:"distinct exact round; one outcome per partition",
    features:["market_logit","elapsed_fraction"],counts:{eligible:selected.length,training:training.length,

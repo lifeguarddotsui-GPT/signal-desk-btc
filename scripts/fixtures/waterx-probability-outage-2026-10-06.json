@@ -1,0 +1,50 @@
+[
+  {
+    "interval": 5,
+    "response": {
+      "success": true,
+      "data": {
+        "detail": {
+          "market": {"id": "9129d50d-6e9c-4c1d-b4af-a76b5993bf85", "slug": "crypto-btc-updown-5m"},
+          "round": {
+            "id": "136afaea-2c46-40b1-abf6-9de6263a302e",
+            "marketId": "9129d50d-6e9c-4c1d-b4af-a76b5993bf85",
+            "startsAt": 1791322800, "endsAt": 1791323100, "createdAt": 1791319506,
+            "sides": [
+              {"key": "up", "oddsCents": null, "trade": {"marketId": "0x0dfc2dfdf377681e727689e2c4b9ea8d1c7a0728589acc7ca1afe490f97cd3cd", "selection": "YES"}},
+              {"key": "down", "oddsCents": null, "trade": {"marketId": "0x0dfc2dfdf377681e727689e2c4b9ea8d1c7a0728589acc7ca1afe490f97cd3cd", "selection": "NO"}}
+            ],
+            "volumeUsd": 3.921569, "chart": {"kind": "probability", "series": []},
+            "phase": "live", "indicativeOdds": false,
+            "anchorPrice": 85595.06148119824, "anchorPriceConfirmed": false
+          },
+          "neighbors": {"past": [], "upcoming": []}
+        }
+      }
+    }
+  },
+  {
+    "interval": 15,
+    "response": {
+      "success": true,
+      "data": {
+        "detail": {
+          "market": {"id": "3bad357c-3e20-4533-b8c4-e4938dfe30b6", "slug": "crypto-btc-updown-15m"},
+          "round": {
+            "id": "f7793cf4-225a-479e-87ed-c96f0c5898f5",
+            "marketId": "3bad357c-3e20-4533-b8c4-e4938dfe30b6",
+            "startsAt": 1791322200, "endsAt": 1791323100, "createdAt": 1791319508,
+            "sides": [
+              {"key": "up", "oddsCents": null, "trade": {"marketId": "0x733b6355372638407aadc3aa1b996338256915cc4c8971841043b8cd65f2a9d5", "selection": "YES"}},
+              {"key": "down", "oddsCents": null, "trade": {"marketId": "0x733b6355372638407aadc3aa1b996338256915cc4c8971841043b8cd65f2a9d5", "selection": "NO"}}
+            ],
+            "volumeUsd": 7842.784191, "chart": {"kind": "probability", "series": []},
+            "phase": "live", "indicativeOdds": false,
+            "anchorPrice": 85560.42062450614, "anchorPriceConfirmed": false
+          },
+          "neighbors": {"past": [], "upcoming": []}
+        }
+      }
+    }
+  }
+]

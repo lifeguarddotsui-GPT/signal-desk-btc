@@ -221,7 +221,9 @@ test("fresh metadata with both or one probability side missing reports probabili
       dataHealth: view.dataHealth,
       marketOdds: { up: "Unavailable", down: "Unavailable", current: false, source: "WaterX" },
     }));
-    assert.match(manual, /LOCKED UP/);
+    // Older adaptive locks are not current-strategy saved decisions.
+    assert.match(manual, /WATCHING/);
+    assert.doesNotMatch(manual, /LOCKED UP/);
     assert.match(manual, /PROBABILITIES MISSING/);
     assert.match(cards, /WaterX probabilities missing; active round metadata is available/);
   }

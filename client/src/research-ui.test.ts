@@ -40,7 +40,8 @@ test("current state cannot be sourced from database reports; historical results 
   assert.match(choice, /no wallet, transaction, order or execution status/i);
   assert.doesNotMatch(choice, /report\.currentChoice|report\.liveProbabilities|report\.liveModelEstimate|report\?\.lifecycle/);
   const manual = readFileSync(new URL("./ManualOpportunity.tsx", import.meta.url), "utf8");
-  assert.match(manual, /exactDecision\?\.canonical/);
+  assert.match(manual, /view\.savedDecision/);
+  assert.doesNotMatch(manual, /exactDecision\?\.canonical/);
   assert.doesNotMatch(app.slice(0, app.indexOf("function HealthPage")), /<ResearchChoiceCard/);
 });
 

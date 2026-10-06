@@ -20,6 +20,7 @@ import "./ManualOpportunity.css";
 import { projectExactRoundDecision, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
 import { useLiveSnapshot } from "./useLiveSnapshot";
 import AgentPage from "./AgentPage";
+import EarlyLearningSummary from "./EarlyLearningSummary";
 
 type Interval = 5 | 15;
 type Point = { at: number | string; price: number | null; source?: string; sourceAt?: number | string | null; eventId?: string | number; gap?: boolean; reason?: string };
@@ -590,7 +591,7 @@ function LivePage() {
         }}
         refresh={{ pending: snapshotRefreshState.pending, error: snapshotRefreshState.error }}
         onRetry={fixtureMode ? () => { window.location.href = window.location.pathname; } : live.reload}
-      />
+      >
       <div className="chart-market-layout">
         <section className="chart-panel">
         <div className="section-head chart-head"><div><div className="eyebrow">PRICE OBSERVATIONS</div><h2>BTC / USD</h2><p>Observed prices only · missing intervals remain blank.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
@@ -604,6 +605,7 @@ function LivePage() {
         <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live observations{typeof chartWindow === "number" ? ` · rolling archive coverage ${chartPayload?.coverage?.percent == null ? "not reported" : `${chartPayload.coverage.percent}%`}` : " · active-round window; archive coverage is separate"}</span></div>
       </section>
       </div>
+      </ManualOpportunity>
   </div>;
 }
 
@@ -800,6 +802,7 @@ function LearningPage() {
   return <div className="page inner-page">
     <PageTitle index="03" title="Learning evidence"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
     <div className="learning-lede"><BookOpen size={19} /><p>Evidence is assessed separately for each WaterX market duration. WaterX odds are market probabilities, not a BluewaterAI forecast. Only verified settlement labels enter evaluation.</p></div>
+    <EarlyLearningSummary interval={interval} />
     <EarlyLearningJobsPanel />
     <BluewaterResearchPanel
       report={bluewater.loadedUrl === bluewaterUrl && bluewater.data?.intervalMinutes === interval ? bluewater.data : null}

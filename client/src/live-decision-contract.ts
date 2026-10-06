@@ -326,9 +326,11 @@ export function getAtomicDecisionView(p:LiveSnapshotEnvelope|null,interval:5|15,
     if(dataHealth.primaryReason==="CURRENT")dataHealth.primaryReason="PROBABILITIES_STALE";
   }
   const age=d.market?Math.max(now-d.market.receivedAtMs,now-d.market.observedAtMs):null;
+  const timed=d.timedDecision??null;
   const healthAllowsFresh=!dataHealth||(dataHealth.transport.status==="HEALTHY"&&dataHealth.probabilities.status==="CURRENT");
   const fresh=healthAllowsFresh&&age!==null&&age>=0&&age<=DECISION_FRESH_MS&&now-d.publishedAtMs>=0&&
-    now-d.publishedAtMs<=DECISION_FRESH_MS&&d.readiness.components.fresh;
+    now-d.publishedAtMs<=DECISION_FRESH_MS&&
+      (timed?.strategyVersion===TIMED_STRATEGY?timed.sourceAgeMs!==null&&timed.sourceAgeMs<=DECISION_FRESH_MS:d.readiness.components.fresh);
   const reason=dataHealth&&dataHealth.primaryReason!=="CURRENT"?dataHealthReason(dataHealth):
     d.persistence.status==="FAILED"?`Database write failed (${d.persistence.errorClass??"UNKNOWN"}); research choice not committed.`:
      d.persistence.status==="AWAITING_CHOICE"?
@@ -339,7 +341,6 @@ export function getAtomicDecisionView(p:LiveSnapshotEnvelope|null,interval:5|15,
     `Source stale (${Math.max(0,Math.floor((age??0)/1000))}s); last same-round record retained, live lean withheld.`:
     d.persistence.status==="WRITING"?"Database write pending; no committed choice is asserted.":
     d.persistence.status==="QUEUED"?"Checkpoint capture queued; waiting for database persistence.":d.readiness.reason;
-  const timed=d.timedDecision??null;
   const componentTimestamps:Record<string,number|null>={
     roundStartMs:r.startMs,
     snapshotPublishedAtMs:d.publishedAtMs,
@@ -352,15 +353,23 @@ export function getAtomicDecisionView(p:LiveSnapshotEnvelope|null,interval:5|15,
     ...(d.componentTimestamps??{}),
     ...(p.componentTimestamps??{}),
   };
-  return {decision:d,fresh,sourceAgeMs:age,lean:fresh?d.readiness.side:null,
-    stage:fresh?d.readiness.state:"WATCHING",score:fresh?Math.round(d.readiness.score):null,reason,dataHealth,
+   const current=timed?.strategyVersion===TIMED_STRATEGY;
+   const lean=fresh?(current?timed.liveSide:d.readiness.side):null;
+   return {decision:d,fresh,sourceAgeMs:age,lean,
+     stage:fresh?(current?(timed.qualified?"READY":lean?"DEVELOPING":"WATCHING"):d.readiness.state):"WATCHING",
+     score:fresh?(current?timed.readinessPercent:Math.round(d.readiness.score)):null,
+     reason:current?(!fresh?reason:dataHealth&&dataHealth.primaryReason!=="CURRENT"?dataHealthReason(dataHealth):
+       timed.persistence==="FAILED"?`Lock write failed (${timed.errorClass??"UNKNOWN"}); no new saved lock.`:
+       timed.remainingRequirement??timed.blocker):reason,dataHealth,
      projectionVersion:"waterx-exact-round-client-v1",sourceProjectionVersion:p.projectionVersion??d.projectionVersion??null,
      intervalMinutes:d.intervalMinutes,
     roundIdentity:{id:r.id,startMs:r.startMs,expiryMs:r.expiryMs},
      strategyVersion:d.strategyVersion??timed?.strategyVersion??d.policyVersion,
      snapshotVersion:p.snapshotVersion??d.snapshotVersion??d.stateVersion,componentTimestamps,
-    provisionalLean:fresh?d.readiness.side:null,lastGate:timed?.lastGate??null,nextGateAtMs:timed?.nextGateAtMs??null,
-    savedDecision:d.canonical??timed?.saved??null,persistenceState:d.persistence.status};
+     provisionalLean:lean,lastGate:timed?.lastGate??null,nextGateAtMs:timed?.nextGateAtMs??null,
+     savedDecision:current?timed.saved:timed?.saved??d.canonical??null,
+     persistenceState:current?(timed.persistence==="COMMITTED"?"COMMITTED":
+       timed.persistence==="SAVING"?"WRITING":timed.persistence==="FAILED"?"FAILED":"WAITING_CHECKPOINT"):d.persistence.status};
 }
 
 /**

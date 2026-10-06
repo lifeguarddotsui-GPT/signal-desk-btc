@@ -52,7 +52,9 @@ export function observeTimedStrategy(input:TimedInput){
        comparison:cmp?.price??null,comparisonAtMs:cmp?.asOf?Date.parse(cmp.asOf):null};
    };
    const other=active.get(input.intervalMinutes===5?15:5)?.input;
+   const projection=roundDecisions.read(input,acceptedAt)?.currentStrategy;
    input={...input,features:{...input.features,contextAvailableAtMs:acceptedAt,
+     provisionalSide:projection?.provisionalLean??null,leanVersion:projection?.leanVersion??null,
      crossInterval:crossIntervalContext(toObservation(input),other?toObservation(other):undefined,acceptedAt)}};
   const previous=active.get(input.intervalMinutes);
   if(previous&&previous.input.startMs>input.startMs)return;

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import "./beta-interface.css";
 import TimedDecisionHistory from "./TimedDecisionHistory";
+import TimedStrategyHistory from "./TimedStrategyHistory";
 
 type IntervalFilter = "all" | "5" | "15";
 type WindowFilter = "lifetime" | "100" | "50" | "20" | "24h" | "7d";
@@ -150,7 +151,12 @@ function CanonicalHistory() {
       </div>
     </section>
 
-    <TimedDecisionHistory />
+    <TimedStrategyHistory interval={interval === "15" ? 15 : 5} />
+    {interval === "all" && <TimedStrategyHistory interval={15} />}
+    <details className="history-old-benchmarks">
+      <summary>Full gate audit and historical strategy filters</summary>
+      <TimedDecisionHistory />
+    </details>
 
     <p className="history-source-note">
       {baseline

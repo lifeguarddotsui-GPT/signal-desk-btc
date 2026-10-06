@@ -13,6 +13,8 @@ import {enqueueGateResearch} from "./gate-research-queue";
 export type TimedInput=TimedRound&{receivedAtMs?:number;observedAt:string;probabilityUp:number|null;
  probabilityDown:number|null;discoveredAtMs?:number;anchorPrice?:number|null;anchorConfirmed?:boolean;features?:Record<string,unknown>};
 const values=(r:TimedRound)=>["sui:mainnet",TIMED_STRATEGY,r.intervalMinutes,r.roundId];
+type Progress={startMs:number;expiryMs:number;seen:Set<number>;saved:TimedDecision|null;lastGate:GateJournal|null;inputDigest:string};
+const progressByDb=new WeakMap<object,Map<string,Progress>>();
 const selectSaved=`SELECT d.decision,o.committed_ack_at_ms,o.worker_received_at_ms
  FROM waterx_timed_decisions d JOIN waterx_timed_outbox o ON o.decision_id=d.id`;
 function unpack(row:Record<string,unknown>):TimedDecision{
@@ -54,13 +56,17 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
    throw new Error("Invalid timed source receipt");
  if(input.expiryMs-input.startMs!==input.intervalMinutes*60000)throw new Error("Invalid timed exact round");
  const acquire=performance.now();
+ const cache=progressByDb.get(db)??new Map<string,Progress>();progressByDb.set(db,cache);
+ const cacheKey=values(input).join(":"),progress=cache.get(cacheKey);
+ if(progress&&(progress.startMs!==input.startMs||progress.expiryMs!==input.expiryMs))
+   throw new Error("Cached timed round identity mismatch");
   const client=await db.connect().catch(error=>{
    recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_ACQUISITION",performance.now()-acquire,"error");
    throw error;
  });let committed=false,inserted:TimedDecision|null=null;
   const emitted:GateJournal[]=[];let saved:TimedDecision|null=null;
   const research:{seconds:number;frozen:ReturnType<typeof freezeEarlyHorizon>}[]=[];
-  let transactionAt:number|null=null,phase="PREPARATION";
+  let transactionAt:number|null=null,phase="PREPARATION",began=false;
   const c:LockDb={query:async(sql,params)=>{
     const at=performance.now();let outcome:"ok"|"error"="ok";
     try{return await client.query(sql,params);}
@@ -73,17 +79,34 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
  try{
  const discovered=input.discoveredAtMs??received!;
  if(!Number.isSafeInteger(discovered)||discovered<input.startMs||discovered>now)throw new Error("Invalid discovery clock");
+ if(!progress){
  await c.query(`INSERT INTO waterx_timed_rounds(network,strategy_version,interval_minutes,round_id,start_ms,expiry_ms,discovered_at_ms)
  VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,[...values(input),input.startMs,input.expiryMs,discovered]);
  const identity=(await c.query(`SELECT start_ms,expiry_ms FROM waterx_timed_rounds
  WHERE network=$1 AND strategy_version=$2 AND interval_minutes=$3 AND round_id=$4`,values(input))).rows[0];
  if(!identity||Number(identity.start_ms)!==input.startMs||Number(identity.expiry_ms)!==input.expiryMs)throw new Error("Persisted round identity mismatch");
+ }
  // Evidence ingestion is independent of the final gate transaction and remains live after lock.
+ const inputDigest=digestEarlySnapshot(input);
+ if(progress?.inputDigest!==inputDigest){
  await c.query(`INSERT INTO waterx_timed_observations(network,strategy_version,interval_minutes,round_id,received_at_ms,input)
  VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,[...values(input),received,JSON.stringify(input)]);
+ if(progress)progress.inputDigest=inputDigest;
+ }
   recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_PREPARATION",performance.now()-acquire,"ok");
+  const pendingDue=Math.min(input.intervalMinutes*2-1,Math.floor((Date.now()-input.startMs)/GATE_MS));
+  // Immutable progress only skips already-committed gates. Every new accepted
+  // observation above is still persisted with its database availability clock.
+  // Restart starts empty and loads authoritative PostgreSQL records again.
+  if(progress&&Date.now()<input.expiryMs&&
+    Array.from({length:pendingDue},(_,i)=>i+1).every(i=>progress.seen.has(i))){
+    if(progress.lastGate)onGate?.(progress.lastGate);
+    recordEarlyDelivery(input.intervalMinutes,input.roundId,"COMMITTED_PROGRESS_REUSE",null,"ok");
+    return progress.saved;
+  }
   phase="GATE";transactionAt=performance.now();
   await c.query("BEGIN");
+  began=true;
  await c.query("SELECT pg_advisory_xact_lock(hashtext($1))",[values(input).join(":")]);
  saved=await loadTimedDecision(input,c);
  const existing=await loadGateJournals(input,c),seen=new Set(existing.map(g=>g.gateIndex));
@@ -105,23 +128,30 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
        AND accepted_at_ms<=$6 ORDER BY received_at_ms DESC LIMIT 513`,[...values(input),Math.max(input.startMs,at-75000),at]);
    if(data.rows.length>512)throw new Error("Gate evidence bound exceeded");
    const inputs=data.rows.map(r=>r.input as TimedInput).reverse(),latest=inputs.at(-1);
-   const obs:LockObservation[]=inputs.filter(v=>validWaterxProbabilityPair(v.probabilityUp,v.probabilityDown)).map(v=>({
+   const interruptedAt=inputs.filter(v=>!validWaterxProbabilityPair(v.probabilityUp,v.probabilityDown)).at(-1)?.receivedAtMs??-Infinity;
+   const obs:LockObservation[]=inputs.filter(v=>v.receivedAtMs!>interruptedAt&&validWaterxProbabilityPair(v.probabilityUp,v.probabilityDown)).map(v=>({
      atMs:v.receivedAtMs!,receivedAtMs:v.receivedAtMs!,providerSourceAtMs:null,
      probabilityUp:v.probabilityUp!,probabilityDown:v.probabilityDown!,sourceHealthy:true}));
    const evaluatedAt=Date.now(),valid=!!latest&&validWaterxProbabilityPair(latest.probabilityUp,latest.probabilityDown);
    let gate=evaluateQualificationGate(input,obs,index,evaluatedAt,valid);
+   const previouslyLocked=saved?.status==="LOCKED";
    const candidate=!saved&&gate.result==="QUALIFIED"?buildTimedDecision(input,obs,discovered,evaluatedAt,valid,
      {reference:latest?.anchorPrice??null,referenceConfirmed:latest?.anchorConfirmed??false,
        features:latest?.features??{},observationHistory:inputs,executionCutoffAtMs:null}):null;
    if(candidate){
-      candidate.evidence={...candidate.evidence,persistenceFailureCount:Number(input.features?.persistenceFailureCount??0)};
+      candidate.evidence={...candidate.evidence,persistenceFailureCount:Number(input.features?.persistenceFailureCount??0),
+        modelVersion:null,calibrationVersion:null,probabilitySource:"WATERX_MARKET",
+        projectionVersion:"waterx-current-strategy-v1"};
      onSelected?.();
      await c.query(`INSERT INTO waterx_timed_decisions(id,network,strategy_version,interval_minutes,round_id,decision_at_ms,status,decision)
      VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[candidate.id,...values(input),candidate.decisionAtMs,candidate.status,JSON.stringify(candidate)]);
      await c.query("INSERT INTO waterx_timed_outbox(decision_id) VALUES($1)",[candidate.id]);
      await c.query("SELECT pg_notify('bluewater_timed_decision',$1)",[candidate.id]);saved=inserted=candidate;
    }
-    const horizon=freezeEarlyHorizon(input,index*30,inputs,evaluatedAt,saved?.status==="LOCKED");
+    const horizon=freezeEarlyHorizon(input,index*30,inputs,evaluatedAt,previouslyLocked);
+    horizon.snapshot.gateEvaluation={result:candidate?"LOCKED":gate.result,reason:gate.reason,
+      evaluatedAtMs:evaluatedAt,scheduledAtMs:at,primaryDecisionId:saved?.id??null};
+    horizon.digest=digestEarlySnapshot(horizon.snapshot);
     const {snapshotDigest:_digest,...body}=gate;
     const frozen={...body,captureVersion:"atomic-gate-capture-v1",decisionId:candidate?.id??null,evidenceSnapshot:{
      schema:"waterx-gate-evidence-v1",availableByMs:at,observations:inputs,
@@ -155,11 +185,14 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
      operationalFailure:inserted.status==="LOCKED"&&ack>inserted.hardDeadlineAtMs?"COMMIT_AFTER_GATE_GRACE":null};
  }
   emitted.sort((a,b)=>a.gateIndex-b.gateIndex).forEach(g=>onGate?.(g));
+  cache.set(cacheKey,{startMs:input.startMs,expiryMs:input.expiryMs,
+    seen:new Set(existing.map(g=>g.gateIndex)),saved,lastGate:existing.sort((a,b)=>a.gateIndex-b.gateIndex).at(-1)??null,inputDigest});
+  if(cache.size>32)cache.delete(cache.keys().next().value!);
   if(!emitted.length&&existing.length)onGate?.(existing.at(-1)!);return saved;
- }catch(error){recordEarlyDelivery(input.intervalMinutes,input.roundId,"CAPTURE_ATTEMPT",performance.now()-acquire,"error");throw error;}
+ }catch(error){cache.delete(cacheKey);recordEarlyDelivery(input.intervalMinutes,input.roundId,"CAPTURE_ATTEMPT",performance.now()-acquire,"error");throw error;}
   finally{
     if(transactionAt!==null)recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_TRANSACTION",performance.now()-transactionAt,"error");
-    if(!committed)await c.query("ROLLBACK").catch(()=>{});
+    if(began&&!committed)await c.query("ROLLBACK").catch(()=>{});
     client.release();
     if(committed)enqueueGateResearch(input,research,db===timedPool?undefined:db);
   }

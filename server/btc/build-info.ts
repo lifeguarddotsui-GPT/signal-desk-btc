@@ -11,6 +11,8 @@ export type BuildInfo = {
   schemaVersion: string | null;
   configurationVersion: string | null;
   modelArtifactVersion: string;
+  sourceSnapshotSha256?:string|null;
+  sourceArchiveSha256?:string|null;
 };
 
 const buildDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -33,7 +35,7 @@ export function buildInfo(): BuildInfo {
       readFileSync(path.join(buildDirectory, "build-info.json"), "utf8"),
     ) as { id?: unknown; format?: unknown; sourceCommit?: unknown;
       builtAt?: unknown; schemaVersion?: unknown; configurationVersion?: unknown;
-      modelArtifactVersion?: unknown };
+      modelArtifactVersion?: unknown;sourceSnapshotSha256?:unknown;sourceArchiveSha256?:unknown };
     if (manifest.format === 3 &&
       typeof manifest.id === "string" &&
       /^sha256:[a-f0-9]{64}$/.test(manifest.id) &&
@@ -53,6 +55,8 @@ export function buildInfo(): BuildInfo {
         schemaVersion: manifest.schemaVersion,
         configurationVersion: manifest.configurationVersion,
         modelArtifactVersion,
+        sourceSnapshotSha256:typeof manifest.sourceSnapshotSha256==="string"&&/^[a-f0-9]{64}$/.test(manifest.sourceSnapshotSha256)?manifest.sourceSnapshotSha256:null,
+        sourceArchiveSha256:typeof manifest.sourceArchiveSha256==="string"&&/^[a-f0-9]{64}$/.test(manifest.sourceArchiveSha256)?manifest.sourceArchiveSha256:null,
       };
       return cachedBuildInfo;
     }

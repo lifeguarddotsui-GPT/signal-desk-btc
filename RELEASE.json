@@ -1,0 +1,1197 @@
+{
+  "build": {
+    "id": "sha256:e8c8231a9d6db0157d094ce66329081b62536e0d9da3a24dbef9a2760e6f5c15",
+    "format": 3,
+    "builtAt": "2026-10-06T17:19:41.366Z",
+    "sourceCommit": null,
+    "schemaVersion": "schema-sha256:5854c06ac7d0a7361ca117ae8e1ee078897cf3590de08ed77c524915369f5709",
+    "configurationVersion": "policy-sha256:08c857703efb855e0c06ead8017d0afdacc6695c34d316f678766d91be1f7db2",
+    "modelArtifactVersion": "btc-logistic-artifact/v1",
+    "sourceSnapshotSha256": "038396a861125cb7f82d08ba109767c243bd7901f82d78fbadf8667cce74a179",
+    "sourceArchiveUrl": "/source-release.tar.gz"
+  },
+  "sourceDigest": "038396a861125cb7f82d08ba109767c243bd7901f82d78fbadf8667cce74a179",
+  "scope": "Source-only current release. No workspace Git history, uploads, runtime keys or database data.",
+  "files": [
+    {
+      "file": "client/index.html",
+      "sha256": "b2544f34f2cbbbece79c252538053e8c358200c706689ad455e419f75c8d75ad"
+    },
+    {
+      "file": "client/public/favicon-mono.svg",
+      "sha256": "fe8ffe3c73532492b9e09cfb5847fb48f8d9dd0d627697e8307281f13083673b"
+    },
+    {
+      "file": "client/public/favicon.svg",
+      "sha256": "674c08030cda916d88489e2d9c176de0f15a44adee2bca6044738f4abc603f6d"
+    },
+    {
+      "file": "client/src/AdvisoryCards.tsx",
+      "sha256": "a8cfc1b25f99c4bccdea61223278ee9ebca89a37357f77f70ef43a78444b91b1"
+    },
+    {
+      "file": "client/src/AgentCurrentRound.tsx",
+      "sha256": "5bbadc2e4f3e0eb6e2ec7c0bae5f11bbf25f61a7751e2a8b2320eb48d8616685"
+    },
+    {
+      "file": "client/src/AgentFundingPreview.tsx",
+      "sha256": "0141b70df3c7d7f8e3e653b370e1a04e7185fc66789facea81a8c08d3f797f3a"
+    },
+    {
+      "file": "client/src/AgentPage.tsx",
+      "sha256": "e4a25ba9b4523c29ace8fcbff2d0083204a8a5a23a7b34beb4eca29774c3b7f1"
+    },
+    {
+      "file": "client/src/App.tsx",
+      "sha256": "e5f64c942973006e6b29a64f73e758e0fb77fff00da56526cf96e23f326f6f6a"
+    },
+    {
+      "file": "client/src/BluewaterResearchPanel.tsx",
+      "sha256": "9bf65f29fa367fad519d4fea9a59315501ca1d4f5a5e0016354972576ffef2e0"
+    },
+    {
+      "file": "client/src/CanonicalHistory.tsx",
+      "sha256": "31336c8e5fc1ddb3de3bb45e301755c2ce8927b9221e505c59e758efb4de6e6d"
+    },
+    {
+      "file": "client/src/EarlyLearningJobsPanel.tsx",
+      "sha256": "578dd3da96fb16379eb504ce1a459bf973c6774d3606a618a5555115b3de006b"
+    },
+    {
+      "file": "client/src/IndicativeEstimate.tsx",
+      "sha256": "0ff131856c5dd37a94e4c376dcb1340256704826d09e4dcf2f82e0c9397b23e0"
+    },
+    {
+      "file": "client/src/LockReadinessPanel.tsx",
+      "sha256": "3d3312d49a9825b4eff9ea0b5aadd60cd39f0b40e6b663c22110200f6774e48f"
+    },
+    {
+      "file": "client/src/ManualOpportunity.css",
+      "sha256": "a9815c79329344393f4862708bc04142e9fc1c3a92e744675797ddd482e4ac76"
+    },
+    {
+      "file": "client/src/ManualOpportunity.tsx",
+      "sha256": "e89c5eb1c2f55f64c55ee658491f3bbd271cf75c862d2ee21a8ba1476d146050"
+    },
+    {
+      "file": "client/src/ResearchChoiceCard.tsx",
+      "sha256": "cef7cf4b7da3c4a801f7b316095516384d521fe024d7a20b1cbc2c7978923d6b"
+    },
+    {
+      "file": "client/src/ResearchLearningPanel.tsx",
+      "sha256": "9325c829cb2f5a4ed3911dc0bbcd23e285d2969b2bdcfe312ae5ea947a3f99f5"
+    },
+    {
+      "file": "client/src/TimedDecisionHistory.tsx",
+      "sha256": "528bc2ec9fe95dbeb00cf81d3fecc9dca4d527f359bee6ecef6780fafdc6918a"
+    },
+    {
+      "file": "client/src/advisory-contract.test.ts",
+      "sha256": "7a64f3926655d7dfbc32a54d9150d41afaeb4b64b8275043010c164086f20bff"
+    },
+    {
+      "file": "client/src/advisory-contract.ts",
+      "sha256": "adce0460854d2fa1e65bdfa9065ddfcd30d0006492efe5309f03d773cb735367"
+    },
+    {
+      "file": "client/src/agent-format.test.ts",
+      "sha256": "66496466c12211f86895a30677b9c9b13071a4f577dc91f1d05cd4a5afc0d078"
+    },
+    {
+      "file": "client/src/agent-format.ts",
+      "sha256": "1131ade7a07d48fa75dd517098f2c025aa653270d4e30dfff9d88fdd3fc42e05"
+    },
+    {
+      "file": "client/src/agent-funding-preview-ui.test.ts",
+      "sha256": "ea530b80b1f690f314e879ad680d87d00e23d7469fde33230cc911644c7c13c1"
+    },
+    {
+      "file": "client/src/agent-page-ui.test.ts",
+      "sha256": "15bc2d809c0ad83df248c2758c8c08a67e25f06a2139869890cb779965e21bcf"
+    },
+    {
+      "file": "client/src/agent-round-contract.test.ts",
+      "sha256": "d49b4f95d734c00aa1440a084dc99e12fcb27dba5df4670cf497569148fafe82"
+    },
+    {
+      "file": "client/src/agent-round-contract.ts",
+      "sha256": "4403797fa1539e5ec30b812eb11afe8b4ee8ee008d8342a64736dc8860a2ca7d"
+    },
+    {
+      "file": "client/src/beta-interface.css",
+      "sha256": "c9302721945ab2f0e6835342fbaab669b63eb8ff338bc14679c9047812ddd0ea"
+    },
+    {
+      "file": "client/src/bluewater-research-ui.test.ts",
+      "sha256": "c21e498105f187264faa87715654aa001ff9d75bc73e95e7bf5cc72cbad0a685"
+    },
+    {
+      "file": "client/src/browser-latency.ts",
+      "sha256": "3ab4ddd5ed9c19288816dafe66afce1d87b4821af3cac4650d5e2ed35e5cad9b"
+    },
+    {
+      "file": "client/src/canonical-history-source-ui.test.ts",
+      "sha256": "d5b421c439c4af16cd9c06fc8da84c6d01015930352777c61dcdd015617cb6f5"
+    },
+    {
+      "file": "client/src/chart-contract.test.ts",
+      "sha256": "fc61a3e78c40e61b9eabc0e45cd288262e53d0c817f7ed408eca3876db3976d8"
+    },
+    {
+      "file": "client/src/chart-contract.ts",
+      "sha256": "368dd4cf9bcca3d42ff4d352717d777912f3650a73d2584f7bb609829b21e689"
+    },
+    {
+      "file": "client/src/early-learning-jobs-ui.test.ts",
+      "sha256": "a53f881642f0a094f0941d00fdcaaba398b3c4d3f5884c1943d5405aa9bd1c08"
+    },
+    {
+      "file": "client/src/economics-contract.ts",
+      "sha256": "72dd871d53102f87eb636549ba92314bef97c7cf3dda9b7b74a82372f9e76f21"
+    },
+    {
+      "file": "client/src/index.css",
+      "sha256": "1cccbd37685a1b13cbaee75bbe1072264bb6b6ab61ac4e7845f9f6335a15013f"
+    },
+    {
+      "file": "client/src/live-decision-contract.ts",
+      "sha256": "21c00548489c9bdac59812edb77a0d9fd75ff6254a7adff32d87ac516603cdb0"
+    },
+    {
+      "file": "client/src/live-desk-ui.test.ts",
+      "sha256": "8cc082d2fef9ac0537d7fcf8a5f311109f3ad279a5c0172895f92b501a778e0c"
+    },
+    {
+      "file": "client/src/lock-readiness-ui.test.ts",
+      "sha256": "a649f331b6f17b68619fbcf58019bd7069da591c6da5ea387e3469804aca6bfb"
+    },
+    {
+      "file": "client/src/main.tsx",
+      "sha256": "f0b72336f29412cb1b6f75bd8bdba47d1187ca5c2878f4dbfcdc718f6c391254"
+    },
+    {
+      "file": "client/src/manual-opportunity-ui.test.ts",
+      "sha256": "37de8a4a97c6fb3ee11921dab12d90d1ee6a377b4b421aaf7eb459612b3c2154"
+    },
+    {
+      "file": "client/src/research-lifecycle.test.ts",
+      "sha256": "4f82bd4ce48f4822f3e5065ec25bb6fde47f8b4949366df0815e34bc623f2c59"
+    },
+    {
+      "file": "client/src/research-ui.test.ts",
+      "sha256": "e641f111c2d9f6c3c1f6778ff8108b89281781ef52e0337001bb92c929f460ad"
+    },
+    {
+      "file": "client/src/timed-decision-ui.test.ts",
+      "sha256": "69024ae0c948a86d79e830e38789a57c40a128df701c9132daee0787affe5891"
+    },
+    {
+      "file": "client/src/useLiveSnapshot.ts",
+      "sha256": "b185a3980c1aadf8e26534c381d63106a64ae7820a019c397580e4de4f559f80"
+    },
+    {
+      "file": "client/src/waterx-ui-contract.test.ts",
+      "sha256": "734506bc3c401b084bab2110e76cc4c8b8e620b377f7e1358b0f8be8b6a99d1a"
+    },
+    {
+      "file": "client/src/waterx-ui-contract.ts",
+      "sha256": "99dcd2d35fe484b056615bf1e9ef26fe22245365946486d67f15eaeaa00ec3cf"
+    },
+    {
+      "file": "edge/0001_schema.sql",
+      "sha256": "fb23702d94edd6c3603e5dc00cb71ab2c33f97d4ea91f0b6de1b418320e224e6"
+    },
+    {
+      "file": "edge/execution-feasibility.ts",
+      "sha256": "42da6349f7a37cb7a57331aedd21a2648ffbe24f12376af7cf6986b97f489d8f"
+    },
+    {
+      "file": "edge/worker.ts",
+      "sha256": "16f6e8d9463af4488f93063d725c016391b9084f7c8fbed25074994faf9fd0a0"
+    },
+    {
+      "file": "edge/wrangler.toml",
+      "sha256": "6c41660d2e27260443ef43821852fbcfbc7e171862923694e33c23c6ff432314"
+    },
+    {
+      "file": "infrastructure/agent-signer/control-plane.ts",
+      "sha256": "2821e7752ef07c3536cd50fdc8bb1abec5d7e3fd5cc5abc830e2e526f1ac24a0"
+    },
+    {
+      "file": "infrastructure/agent-signer/protection.ts",
+      "sha256": "c178ca77d7645be088b00a927915e5dfbdd1a945ac261d23c21666cce985a2df"
+    },
+    {
+      "file": "migrations/0001_accumulation_foundation.sql",
+      "sha256": "dddd78f2dfca0f09b9839e20670e8fa2821b7a56bec241ca4783911f17262cbc"
+    },
+    {
+      "file": "migrations/0002_collector_checkpoint.sql",
+      "sha256": "6d8a4887ef4bc290dda8888e42592670ee6347f272940ae3f7a72bbe7ce82b72"
+    },
+    {
+      "file": "migrations/0003_wallet_auth_challenges.sql",
+      "sha256": "96fc7967bfe068f546e956a20b394393d925902b28f2f1cd1312631f2a02a3cb"
+    },
+    {
+      "file": "migrations/0004_operational_trading_foundation.sql",
+      "sha256": "038d5a7891f1acb773bb6c60eb4edfa84a758d1a8e47200af58751925a2ffcd3"
+    },
+    {
+      "file": "migrations/0005_durable_event_replay.sql",
+      "sha256": "8fa44188f62153560d33d9a1254cd71fb67cfaaaf858d1ea8ee0b02ff18b6f5f"
+    },
+    {
+      "file": "migrations/0006_turnkey_custody.sql",
+      "sha256": "2187bdfe53d5908d8050b4a58536528605000976f62e870f0a71cc29da1110f5"
+    },
+    {
+      "file": "migrations/agent-durable-auth.sql",
+      "sha256": "2ed4729a3b0b3c8ed27d7c0ca9221a32deb4145ff30e1e13ee44cd1aecd70aa1"
+    },
+    {
+      "file": "migrations/agent-execution-intents.sql",
+      "sha256": "c8a77e121ade6b48b79ba8d7e4dfafb9154f5b6c2162021b8f2227606944bd52"
+    },
+    {
+      "file": "migrations/bluewater-agent-control-check-development.sql",
+      "sha256": "41e822d18229093b5e34c7c9cc3b39a93f1fd4b910075f6c71d4134a6f9d4bdd"
+    },
+    {
+      "file": "migrations/bluewater-agent-development.sql",
+      "sha256": "17631558201d342f8535906610e88b7c70adfbf06afb7874bc16e62f8b37ffb3"
+    },
+    {
+      "file": "migrations/bluewater-agent-mainnet-session-development.sql",
+      "sha256": "a6209538a12ce8e969a3a906ed675ea51539c88af314e1a30cc8b673cecd7140"
+    },
+    {
+      "file": "migrations/bluewater-early-outbox.sql",
+      "sha256": "c441942e422942af3c730baffcb42c7ca620371ddd8a92bc0abc8024e4fa6ab0"
+    },
+    {
+      "file": "migrations/bluewater-lock-readiness.sql",
+      "sha256": "1727f9a586e3febd9d94f20a55d447779bfc21ac07db257363ebe67c18574ac8"
+    },
+    {
+      "file": "migrations/bluewater-research-architecture.sql",
+      "sha256": "f60badd11850d3564c713f6859ce3bb76faeb82763cd38e8ac601ef8efd10ad0"
+    },
+    {
+      "file": "migrations/btc-learning.sql",
+      "sha256": "5144217a30f08e9897631b113901c2e1dfd6b69f488f0f8d37b3cb3a79378f1d"
+    },
+    {
+      "file": "migrations/early-training-retry.sql",
+      "sha256": "591ebbbb14ea4617270ae1641002613fe985e3bbb4644aa6f971097888251374"
+    },
+    {
+      "file": "migrations/waterx-accepted-default-publish.sql",
+      "sha256": "695ec02e2da249c7312a3ed425dc18c1c05ae48d625bd67785ba414e2494614f"
+    },
+    {
+      "file": "migrations/waterx-candidate.sql",
+      "sha256": "ae3b29e28be4246c9643f99c5305165bb1149e9f4ff89fdcbe21c77c5948c7c5"
+    },
+    {
+      "file": "migrations/waterx-comparison-ticks.sql",
+      "sha256": "7a9d407c3f31c30ba16d5a7c527d8b1ee91503a0fed59cc98e06bbf22d2359f2"
+    },
+    {
+      "file": "migrations/waterx-early-horizons.sql",
+      "sha256": "9f20175a57ad4c7647fb3e218a5a03a4f835b1bf838f34cca9ff617031008bfe"
+    },
+    {
+      "file": "migrations/waterx-gate-horizons.sql",
+      "sha256": "425089efa8a5b1ddc03ee47251a3cbe2c3a2a3d95c927f08c8ade926084d5a9f"
+    },
+    {
+      "file": "migrations/waterx-learning.sql",
+      "sha256": "8a1a886e88da81325152a11f9a43cbca55f5d44c5365bf8ed034f612a75da4c3"
+    },
+    {
+      "file": "migrations/waterx-qualification-gates.sql",
+      "sha256": "55ba63623f76130e769763847ebb14b077134012db08a2450a5476f654953909"
+    },
+    {
+      "file": "migrations/waterx-reference-confirmations.sql",
+      "sha256": "90a2a53cdd0303629009c6d35808b6fe3536339c91d5218dfed285f50510f005"
+    },
+    {
+      "file": "migrations/waterx-research-features.sql",
+      "sha256": "7c7037467e0472df5f1fccb87286f6e7f83fca82d92630ea8a5d9c0bf860a064"
+    },
+    {
+      "file": "migrations/waterx-research-lifecycle.sql",
+      "sha256": "31fa03efc1981eb744d182e61af6dc4963ccf14f42d8ba588f2cec040d9d949e"
+    },
+    {
+      "file": "migrations/waterx-research-shadow.sql",
+      "sha256": "f8571b9e6a22c31c0309c9d91247266ebcb80310adf93692e025309aaf289d3a"
+    },
+    {
+      "file": "migrations/waterx-research.sql",
+      "sha256": "0aeeb96fcd65579c6a2fac4df8930c1404bd134ec31c56ccb825122fe1ed515d"
+    },
+    {
+      "file": "migrations/waterx-timed-decisions.sql",
+      "sha256": "2b7d9b9657b18bb46620e57b564a7616b27ff9d0e70d9fbce650ef0c0e1efcf4"
+    },
+    {
+      "file": "package-lock.json",
+      "sha256": "dc6d4d0759f17e47e2f00894246b247e2c4caf6ade5ddb664427e5aa591a4141"
+    },
+    {
+      "file": "package.json",
+      "sha256": "ab54e7335d0ef9b0b77b0db05722fad1c79b60aa4cc795ea71dc85ec0061dca6"
+    },
+    {
+      "file": "script/build.ts",
+      "sha256": "3c60cce7c736c8782022cff3241228425009a9b78eb46908d621432006e41491"
+    },
+    {
+      "file": "script/source-snapshot.ts",
+      "sha256": "7565ed8f85ee87dcfafec65d7f59ae40a11842697f289b909709a529721f7b94"
+    },
+    {
+      "file": "scripts/advisor.test.ts",
+      "sha256": "e726e02609fab0feaf824465634c77894eb4b963045c5ff6b94860ce8092d505"
+    },
+    {
+      "file": "scripts/agent-control-plane.test.ts",
+      "sha256": "307fe69690419d523d4f67c9ff631ee6511b6b2fccbb94af5c1c381dc0cc7f22"
+    },
+    {
+      "file": "scripts/agent-delegate.test.ts",
+      "sha256": "552868d46c1aecaa0dfa5c17585ad2403e04d6afeacb21c593e8f5bae1fee30f"
+    },
+    {
+      "file": "scripts/agent-intent.test.ts",
+      "sha256": "dd503ff634278d5622dac10c9b94a95dce77a117383c863e78c18d68a72a562a"
+    },
+    {
+      "file": "scripts/agent-postgres.test.ts",
+      "sha256": "f4a35f659002e2df2775f3884e7dca9fa4e644b38bad0f859874ddf67841d987"
+    },
+    {
+      "file": "scripts/agent-risk.test.ts",
+      "sha256": "0b36634d52c7897e67cdeb14524ff24ef5d9fed7492e768122e662641bf7f8c9"
+    },
+    {
+      "file": "scripts/agent-signer-protection.test.ts",
+      "sha256": "990473015e2bd45214ca267a2a27096eac3bb41f030b6e32cc1793914c1be0e1"
+    },
+    {
+      "file": "scripts/artifact.test.ts",
+      "sha256": "10a5a45e2e737325ad2cc45bd5179e35b2de959aba817c9c45fb744768d95095"
+    },
+    {
+      "file": "scripts/audit-waterx-prior-day.ts",
+      "sha256": "f6f8e06af20986998628560ab2212d3652a93eeb45a806ee27301391276b1f36"
+    },
+    {
+      "file": "scripts/backfill.ts",
+      "sha256": "fc995b4e653ac4f0016f2eb568632cf5d82dc7f073bd71f7578c1c8965cd533d"
+    },
+    {
+      "file": "scripts/bluewater-fast.test.ts",
+      "sha256": "772a33e22ccf101fd7168f205ef2a59e8c2d5e18854efa65da5e5f7685e11ae8"
+    },
+    {
+      "file": "scripts/bluewater-postgres.test.ts",
+      "sha256": "41a9f9bb9f0dabb7abfbfc76eacaa9727cb8281783ef90dbb52376c9877bef7d"
+    },
+    {
+      "file": "scripts/bluewater-research.test.ts",
+      "sha256": "242653c6376f6f37ad0af6a499a7ed70dc3ff060b239726618bc1dfc10484f8a"
+    },
+    {
+      "file": "scripts/bluewater-research.ts",
+      "sha256": "fecdde808d6f563ae62c02383abcb03c09b394240e82b31737a105004923f411"
+    },
+    {
+      "file": "scripts/btc.test.ts",
+      "sha256": "2f984fba65b7762873333484e4a37b57d4751a1e4f4033abe46306f1038013c7"
+    },
+    {
+      "file": "scripts/chart-contract.test.ts",
+      "sha256": "77271775d93ea3b56fea1067480825c2bd7d1ca2787c1d060dc5274e7a3a0417"
+    },
+    {
+      "file": "scripts/chart-stream-integration.test.ts",
+      "sha256": "d063dd050b64681a3ee61d2270d5cbfc2d9519e19b07592592396ef0dd29bd93"
+    },
+    {
+      "file": "scripts/chart.test.ts",
+      "sha256": "b1711208e96058254c3e2e6459074a581276db3135d94bb148cbcc0c795aa4a4"
+    },
+    {
+      "file": "scripts/check-waterx-availability.mjs",
+      "sha256": "9cd65125a8f0ccf3e13ffc6033f27a4c7306ca33b78d4c99af5130dc3a21fb74"
+    },
+    {
+      "file": "scripts/cloudflare-execution-feasibility.mjs",
+      "sha256": "d093b894aee073f890ce393e8942f75fe1a6d37171acc0cccca10d1bd4875d1d"
+    },
+    {
+      "file": "scripts/cloudflare-execution-watch.mjs",
+      "sha256": "3ebf2a5c7096c3d63d96158a4a9da48eb42bf761ff68eb96bf8d4ad5b34bcb9b"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-metrics.mjs",
+      "sha256": "980423ec1d9878b480d419f45e0d2bf557efa4a248d5f4e43be71fe629450754"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report-assessment.mjs",
+      "sha256": "e17ed20a25fed8615c5a99783461404a7ea919191ee0723abf8f9db0b61b622c"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report-cloudflare.mjs",
+      "sha256": "b3a7dab6dde19a59453ca881c8237d9dcc2f10cfa34096eb2cc868f160f7660b"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report-coverage.mjs",
+      "sha256": "17bd5dcf8db337739ed7cb199cbd44d1221a520e5700d537734df338f0b2dad2"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report-resources.mjs",
+      "sha256": "6e80e2a1a591e6e25fbdc8bc8f5af26f92d994a8cabcfe39baf7eabd4a794e98"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report-settlements.mjs",
+      "sha256": "c4a032c189d33a499f38b095e4af7dd632da413a83e8c80334ccbb642374eb51"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report-watch.mjs",
+      "sha256": "af6e7868e2ac416dba7937f18e0188534397c1a7046e88b8595d83951adee8da"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report-watch.test.mjs",
+      "sha256": "7de39a19c89bd26d0056280ef5da8340c34ded5e04c6eb0b237a940f9db2807c"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report.mjs",
+      "sha256": "1b523464787b7148c06594f8908afb3aebf8e11b360fd9512d37fa37d046edd3"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-report.test.mjs",
+      "sha256": "fbd2d5d2d0b3b92dc1b2146727e3360ffb601bff27475289385de62dc891c2a5"
+    },
+    {
+      "file": "scripts/cloudflare-waterx-trial.mjs",
+      "sha256": "fd6153dbc20c799c57fcca55cdafdb7f99586a0d871028b58b0e3c9b3ef89d48"
+    },
+    {
+      "file": "scripts/coinbase-stream.test.ts",
+      "sha256": "9c8594d859d980a9c99615c87d3cf9d153a9db4e2b2d6c556fddde8b2f9abc7a"
+    },
+    {
+      "file": "scripts/early-decision-release.test.ts",
+      "sha256": "47cdeca0ff2872b56a3de735900e76bae8e4db0d69ae2dbf18febc9414886745"
+    },
+    {
+      "file": "scripts/early-engine.test.ts",
+      "sha256": "2141ae1afe571f98a5a0edacf5edaded011fcf4a2b4d34fa8c4d4aacf2ff651f"
+    },
+    {
+      "file": "scripts/economics-client.test.ts",
+      "sha256": "efd80dd7b948e184ce64aaf26c4f91cf7f64af70cc7a56635bc486744e6c6804"
+    },
+    {
+      "file": "scripts/economics-feed.test.ts",
+      "sha256": "53c7e28d075da47709278327b787d2b1727a7be1c3e24f7c39bcfff9054ee867"
+    },
+    {
+      "file": "scripts/economics.test.ts",
+      "sha256": "a41f96c5a143105e1c0703786162df8b5192e15e6de32b10bbbd20d319b4d766"
+    },
+    {
+      "file": "scripts/evidence.test.ts",
+      "sha256": "6ee74304f36af0dde94283341cbe1eb01ebc15e8a7c2d3396afd58281a542576"
+    },
+    {
+      "file": "scripts/export-agent-report.mjs",
+      "sha256": "28ee9baf0d4e62b8b75d7ac56edd2541783833d426771d6646629e39b533d871"
+    },
+    {
+      "file": "scripts/export-agent-sdk-evidence.ts",
+      "sha256": "65312f2b5bf8156b35fd0d00bb84226fd4c2ef334adca6ff1dd138a63f08cd3a"
+    },
+    {
+      "file": "scripts/export-lock-readiness-report.mjs",
+      "sha256": "134e2f23cefa08ea32629098d1af6270f66d668ed1818f5ea7f6448cb1e5126b"
+    },
+    {
+      "file": "scripts/export-public.ts",
+      "sha256": "d51564bb089fe9e881e7b5dbcbff4e5a2ecac1012058ab013ce3605680b0619c"
+    },
+    {
+      "file": "scripts/live-snapshot-contract.test.ts",
+      "sha256": "f3ffda71b3f85ee007b1a03c072802535f908d863a1d67b2932eef4b27d94147"
+    },
+    {
+      "file": "scripts/lock-postgres.test.ts",
+      "sha256": "303d456ffb59e9f30f23bbef2d90a2bbfc18d1d7f8fa671801d33d461495f969"
+    },
+    {
+      "file": "scripts/lock-readiness.test.ts",
+      "sha256": "16cdc5957402b540bea6ff97e1497b6fc27fe5739b47fe2b808756ff90dc81b1"
+    },
+    {
+      "file": "scripts/lockfile.test.ts",
+      "sha256": "474a99059dd53be9fc6adc0ae9689b4e042ac0e3ff8912e6a945c5f5c09e0af5"
+    },
+    {
+      "file": "scripts/mainnet-beta-boundaries.test.ts",
+      "sha256": "904ada2eb43577a904f581fe9122f27c3220cd3f250ca7e5ea21ad9a067f3e48"
+    },
+    {
+      "file": "scripts/model.test.ts",
+      "sha256": "46aef96c9e8c1d913cad1305cd9dca0089a94c4a9d3433288435a8ce9478e94b"
+    },
+    {
+      "file": "scripts/operator-environment.mjs",
+      "sha256": "7e8a64a62611861f1142ecdb1c531252e40ad0ee7f4884564164870581e0da38"
+    },
+    {
+      "file": "scripts/operator-signer.mjs",
+      "sha256": "e9350923864a4552edf971f74b3719197337cf4b8ddaea0d450a6189d76cab42"
+    },
+    {
+      "file": "scripts/pipeline.test.ts",
+      "sha256": "5f5ee1f3ba1a53448dbb3eed9c4df8762a3e92bfe04bb47b2814abe442e212b8"
+    },
+    {
+      "file": "scripts/policy.test.ts",
+      "sha256": "90c1cdb3d625033b46cd5b703e2dea025c98394cee37bc340e1ff3f82ff4ced3"
+    },
+    {
+      "file": "scripts/pooled-gate-training.test.ts",
+      "sha256": "c66654d652c114a7221f9d9381a42dbb981a201085ef286fa1af2ffefefa028a"
+    },
+    {
+      "file": "scripts/probe-mainnet-rounds.ts",
+      "sha256": "1c8869bfff8a3facd6d5b7a2b6eb4b99edcb16ef7872b3a69e7b0dd83618a76c"
+    },
+    {
+      "file": "scripts/refresh-health-retry.test.ts",
+      "sha256": "dc0e4990ba2902eeb0d94cf1cf2c3f62ee7df20f537e796449055567aa48dee5"
+    },
+    {
+      "file": "scripts/reliable-early-dataset.test.ts",
+      "sha256": "ff1ea3aaf30735482f0fa9f1e24316501af64a62984286b304e9b7a541f3c4b0"
+    },
+    {
+      "file": "scripts/replay-backup-research.ts",
+      "sha256": "70ed7a395e1ee14ea88d9ab3a36e9507a5a0785e94e9f2f4d70f9324c1ac269e"
+    },
+    {
+      "file": "scripts/reporting.test.ts",
+      "sha256": "f179c6e575f147d6f25cdf197c96c0654204cfcc7d7a0842503593ee7fcbfc61"
+    },
+    {
+      "file": "scripts/round-decision-state.test.ts",
+      "sha256": "d52475106e2c8f56c0e2c17f879b6bf6ee5ad41418435edefcb6da1215f9fab5"
+    },
+    {
+      "file": "scripts/round-repair.test.ts",
+      "sha256": "8755e980d5819c97d81036860352411c32e1ddcd9e8f051898772422ea96bdf2"
+    },
+    {
+      "file": "scripts/server-startup-failsoft.test.ts",
+      "sha256": "8ca28a7c06f5b050eace560e81212b27aa0d3778401809ca23621488cc7addfd"
+    },
+    {
+      "file": "scripts/source-snapshot.test.ts",
+      "sha256": "b81e31f463f119e6482211d5ec21423e4c78aa1a44184b051e71c0b5552425b3"
+    },
+    {
+      "file": "scripts/timed-completion.test.ts",
+      "sha256": "6daa266bee23d1032c94b355319c64d6a5adde885cb12771e022798fcf763b4c"
+    },
+    {
+      "file": "scripts/timed-decision-policy.test.ts",
+      "sha256": "d81a38379b56400aac5029683cc053a2f0242053271145937c787eea8c497c07"
+    },
+    {
+      "file": "scripts/timed-decision-postgres.test.ts",
+      "sha256": "bec3b115004ba6bc0a17b522baf5e3bf95f9553b844060e8c73a6141b25fcc71"
+    },
+    {
+      "file": "scripts/train-early-horizons.ts",
+      "sha256": "f7c47a45de99b49c24129c876dc6c327939566101117a17854ee120135bcdf2e"
+    },
+    {
+      "file": "scripts/train-waterx-candidate.ts",
+      "sha256": "6a2a480dbc2aea59d278cb2c078404278624d24e781cefc47248dde886f0cc17"
+    },
+    {
+      "file": "scripts/verify-production-backup.ts",
+      "sha256": "64ee042b5102bfec2fc7ecf602a484a15468a6a07b2556a741c1f4d0d1562447"
+    },
+    {
+      "file": "scripts/vm-production-supervisor.mjs",
+      "sha256": "247e6658a6f06889e37bcf59804c40befe818c50317c15bb17137297ca071910"
+    },
+    {
+      "file": "scripts/vm-production-supervisor.test.ts",
+      "sha256": "e0ae6aba00a9e6a8df73f75ddca61ece1509e4b8cc84790e556d5879c0f294c2"
+    },
+    {
+      "file": "scripts/waterx-advisory.test.ts",
+      "sha256": "2f78d469203f7b134c1d8c62e729f950a737e7066aeb5f3dcb54d0a831173eb1"
+    },
+    {
+      "file": "scripts/waterx-availability.test.ts",
+      "sha256": "1c8bebd2fb87bbad29573f051b8c0d70c433ea959caf974af3973dbfe5dfdeff"
+    },
+    {
+      "file": "scripts/waterx-browser-latency.test.ts",
+      "sha256": "c67223b4db6c783ef5de86f3586f5991a577f28503a8776e4d828a06e2c33f23"
+    },
+    {
+      "file": "scripts/waterx-candidate-runtime.test.ts",
+      "sha256": "e2aae20605b5a9cf6cbbb51cd706eae46669ed5dd4d62c9e28eedbdad762468b"
+    },
+    {
+      "file": "scripts/waterx-candidate-status.test.ts",
+      "sha256": "dab02c8baeee1647f42d72dd9db26fe8fb1a6b3eba42a87831dc76727e2ff318"
+    },
+    {
+      "file": "scripts/waterx-candidate-training.test.ts",
+      "sha256": "31f712dd2ada13ae9639c673cb359952054ff90c15b41cb4e80686795b4a8317"
+    },
+    {
+      "file": "scripts/waterx-chart-history.test.ts",
+      "sha256": "707715bc1444b7506651587dd8fc1f97d394f181ff12e07eceb544f8fea51ef8"
+    },
+    {
+      "file": "scripts/waterx-collector-continuity.test.ts",
+      "sha256": "7acf2b8c2775c55f977e4f8237b4a981a938283c508cc5ad1177bb552ce8b507"
+    },
+    {
+      "file": "scripts/waterx-coverage.test.ts",
+      "sha256": "7c9c2e4b17b6a4451bc95536338b6327d1ab18987e1f162a2695db33d3588753"
+    },
+    {
+      "file": "scripts/waterx-daily-audit.test.ts",
+      "sha256": "0b2c1ce37ac2c1aaa46ccb8890b610ce70800d8cd6d50301b6b9b26f969f2516"
+    },
+    {
+      "file": "scripts/waterx-diagnostics.test.ts",
+      "sha256": "b91cbb07b46a37ba32d923e51aaa8df331653a4c7a8bb4588f2f5532b24231c3"
+    },
+    {
+      "file": "scripts/waterx-edge.test.ts",
+      "sha256": "7ba82604e9d586e4bdd7dbe69facb53a9357f7e85dbae01635cbf7c7ce2e1f4e"
+    },
+    {
+      "file": "scripts/waterx-indicative-price.test.ts",
+      "sha256": "3b9d89c140de1512c3891fac13d06b0069079547a5d383fe5d38736f4c04a8dc"
+    },
+    {
+      "file": "scripts/waterx-latency.test.ts",
+      "sha256": "dec6b0e575fa031673a94a385224d7a27043195089197a1be4dab3e094b98b13"
+    },
+    {
+      "file": "scripts/waterx-layout-capture.mjs",
+      "sha256": "030fbe85f7110b3b40088c5ec1691079395090c62ef33679a129751909a5524e"
+    },
+    {
+      "file": "scripts/waterx-learning.test.ts",
+      "sha256": "e672821058d4aaef2e4aa57f7e3caa99e4acee95f59e4686742b163cdfcf1cbb"
+    },
+    {
+      "file": "scripts/waterx-passive-state.test.ts",
+      "sha256": "c0694c8f1139d192688ac3003ce977375bb0e40937168416b5bedf6544eb3795"
+    },
+    {
+      "file": "scripts/waterx-reference-confirmations.test.ts",
+      "sha256": "5ce1d1e162cb77295510a13c91f0af53d29de4838a01cfd16180a8ba1917bf53"
+    },
+    {
+      "file": "scripts/waterx-refresh-timeout.test.ts",
+      "sha256": "cfe262510c34183b0fa8fd5ff0723528cca88aca7c4989a7d887b60d875a0aea"
+    },
+    {
+      "file": "scripts/waterx-research-audit.test.ts",
+      "sha256": "c96e990cced3fd9e038bc05d866009a32f5723a499464fd63e377da4b21ef14a"
+    },
+    {
+      "file": "scripts/waterx-research-feature-supplement.test.ts",
+      "sha256": "ea37787fddb2a6f1770cc0632cc052a07b738eb491ab878042f4a69de1b2f4d8"
+    },
+    {
+      "file": "scripts/waterx-research-inclusive-training.test.ts",
+      "sha256": "34565182ffca77264d0eae8cdf974dd4f78295b416a2b73bedb816b4a02d3dac"
+    },
+    {
+      "file": "scripts/waterx-research-lifecycle.test.ts",
+      "sha256": "cb3106c505a64df44c5b7cbc5c2a9792ae989d9f10254fa34cdc889166bb2060"
+    },
+    {
+      "file": "scripts/waterx-research-loop.test.ts",
+      "sha256": "de29911bf2a5eee80c6bfa3ed9caea18d1b3f718739eab44041d1268351ba0f5"
+    },
+    {
+      "file": "scripts/waterx-research-round-examples.test.ts",
+      "sha256": "c41216ddd24b2ea272d30fc37f532cc5b3bf6abad3bfee193acad734b2d4c562"
+    },
+    {
+      "file": "scripts/waterx-research-shadow.test.ts",
+      "sha256": "7dd73a9ad41ef39efefb4d721879708ad62aa7249e082890690779ed0e0ddabf"
+    },
+    {
+      "file": "scripts/waterx-research-training.test.ts",
+      "sha256": "b198ba652997d5cfe9fbc1138466dbdc3ad7b47850b14baeaf0ee5744ed2d6d2"
+    },
+    {
+      "file": "scripts/waterx-round-guard.test.ts",
+      "sha256": "5cf8f692a389665937de719d5765869d3799df53e55226b0e270701b70339545"
+    },
+    {
+      "file": "scripts/waterx-source.test.ts",
+      "sha256": "d9e0d57a6d7db8def72007d557867d5c2d7f99bbab29fdad005f1a6da6dc800a"
+    },
+    {
+      "file": "scripts/waterx-ui.test.ts",
+      "sha256": "20d40834ab30dbf50124bedd3a14d921dee667fb73cfe5c50ed1e83203d4a593"
+    },
+    {
+      "file": "scripts/waterx-worker-lifecycle.test.ts",
+      "sha256": "da01b662f2448bdc42307e6ed04e7bb301b22e273afcec3892480da4de054d98"
+    },
+    {
+      "file": "server/agent/delegate.ts",
+      "sha256": "40796b68c1ae0b9697b057097425bbee6a7e59f3db81c1a4e03199d2457e69c6"
+    },
+    {
+      "file": "server/agent/execution-store.ts",
+      "sha256": "72f778dd741572407bca267e3c079e3244aecead91dd4fdd7cea0e4f3af6a3a9"
+    },
+    {
+      "file": "server/agent/final-signal.ts",
+      "sha256": "638225a2a5aa5b8cb63e2c202fe12ee35c674e52aec25b509532f91fb5220b49"
+    },
+    {
+      "file": "server/agent/funding-preview.ts",
+      "sha256": "79661546e0384f612489637fdfffe1b18c6ffd6f046d0d5bc572f5925317a805"
+    },
+    {
+      "file": "server/agent/intent.ts",
+      "sha256": "ef1b1baa8248c638840cbc07657a75d540b14ae4c2daa3aaf4c4687985c99281"
+    },
+    {
+      "file": "server/agent/order-adapter.ts",
+      "sha256": "2bfebc4d1559ff2d67108baafbb1bfd4fd0c549230a4451f705d360b09a47061"
+    },
+    {
+      "file": "server/agent/protocol.ts",
+      "sha256": "936b29fa70cbe19b8d3f45a6b4d834c678e11736ec5fc67d5166bf24fa9f271f"
+    },
+    {
+      "file": "server/agent/risk.ts",
+      "sha256": "a21143b4930fa0cdaa0f9799364d28a5e68ed1f2a3ec89ae733e3c72d561506c"
+    },
+    {
+      "file": "server/agent/routes.ts",
+      "sha256": "efc69d750e8a12c162cd89129a75801661f0075ba0813a990dfdb34ebdface48"
+    },
+    {
+      "file": "server/agent/store.ts",
+      "sha256": "ab75481df1d7e1784a1a88739368c17ab7bb3f3849c0a39c808344eeaeb53dfd"
+    },
+    {
+      "file": "server/agent/worker.ts",
+      "sha256": "60077963115beb44c59b6b5943406ad450185d72c840f4d5a960b6d6f3c74da1"
+    },
+    {
+      "file": "server/btc/advisor.ts",
+      "sha256": "cad49819ae19674634ceb5f05e7af5e28fdeedbcfd645392590027f8132075d4"
+    },
+    {
+      "file": "server/btc/artifact.ts",
+      "sha256": "1f30f77be96d0f454806c52fc51414d75f513570f1d1de336f6dc7b606d9f4ad"
+    },
+    {
+      "file": "server/btc/build-info.ts",
+      "sha256": "a5add234c15434ad98540dc63143bd99039e3697e5b463a57dde5a3500c92056"
+    },
+    {
+      "file": "server/btc/chart-history.ts",
+      "sha256": "15355ff82d95d043f39ca586d77e75560b4e478eb0195573164343266109e0b3"
+    },
+    {
+      "file": "server/btc/chart.ts",
+      "sha256": "b4024f0238f172babf5452cf918042aa84c403fdf7bf12a72ba0ba576829a751"
+    },
+    {
+      "file": "server/btc/coinbase-stream.ts",
+      "sha256": "b4677800822b17f3844d400627a1b043412ddba7f4d6af548da2405369c29b43"
+    },
+    {
+      "file": "server/btc/economics-feed.ts",
+      "sha256": "f5de081caca174c21970aecd01abbc02709d0c35c155b30d15781dc2964deb30"
+    },
+    {
+      "file": "server/btc/economics.ts",
+      "sha256": "187539606a9c896c07f4c8afc8844011b308927969871855f160dca897d2e532"
+    },
+    {
+      "file": "server/btc/engine.ts",
+      "sha256": "b9317506ffc422d8225c7c17e925b6cf86ad2f88f8691e358301e9ef24bf23a1"
+    },
+    {
+      "file": "server/btc/evidence.ts",
+      "sha256": "aaf96957d8fb7bcdd9cd00be3d1b14dd6a99992c5f0c567237b3b7bd6b6bf56b"
+    },
+    {
+      "file": "server/btc/model.ts",
+      "sha256": "ce849a10f5fd5afc6d1132ad9d14140e40591e9491dfc5143f4955e7400866e7"
+    },
+    {
+      "file": "server/btc/policy.ts",
+      "sha256": "31aa81ed7bc812863e8f68da1f3ed26da0135c8351a1292baacd79055c1ce349"
+    },
+    {
+      "file": "server/btc/reporting.ts",
+      "sha256": "2929ffcc38e0b942f531959cf9e38a3cd388afed2a513192d6decd23943bf412"
+    },
+    {
+      "file": "server/btc/service.ts",
+      "sha256": "ffcc0db3e68fa645df06e3e80c8412834fb83c9a9bf0aca576cfe883bf2b26f8"
+    },
+    {
+      "file": "server/btc/source.ts",
+      "sha256": "3709c8d72af2c6ff12fcfe9a65b5143148db2979c4c6651092173a5834e79633"
+    },
+    {
+      "file": "server/btc/store.ts",
+      "sha256": "e814ac9abf904593e70d695d5ca7e8abcef252471521602b2419d5c93a65ce7a"
+    },
+    {
+      "file": "server/index.ts",
+      "sha256": "79897b8a715e47bbf83d9c0b8f34ffb2e73396647ea1641020e251705a66d161"
+    },
+    {
+      "file": "server/routes.ts",
+      "sha256": "2765cc2ecca58ff815c0412f676d9293276eda611dff55dc591cf23902b4f2e4"
+    },
+    {
+      "file": "server/static.ts",
+      "sha256": "72e40aba8a02f8cd0d56cd2b5af63f473b6bcb932efc99f5c43985975fd65fd9"
+    },
+    {
+      "file": "server/vite.ts",
+      "sha256": "b0cb1b92c272cb0c2698f633c47139c1d1ee8e4ea68a99455c3802c838a0d5f4"
+    },
+    {
+      "file": "server/waterx/advisory.ts",
+      "sha256": "f62e54dc5c4255c987efc6766c630d6f4cc7933700075121b26003de5b6d35b1"
+    },
+    {
+      "file": "server/waterx/background-queue.ts",
+      "sha256": "09f46a6a7c40db5198c80521e08b98df0dcc4412f200f1dcc5fb59f2b007c303"
+    },
+    {
+      "file": "server/waterx/bluewater-agent.ts",
+      "sha256": "58f68cd4deaa6f1c2cf81b9401f75bdfdaa0307fdf6936a2b44eed76970114e2"
+    },
+    {
+      "file": "server/waterx/bluewater-cohort.ts",
+      "sha256": "865eaa42cafb29ce490ee6bc0e0b568c4b4f5ab5b115ae09e78c359ea590b5ac"
+    },
+    {
+      "file": "server/waterx/bluewater-experiments.ts",
+      "sha256": "1e709184d6b5f2fd5bf6b924d0fb13a45a1030989cd1c1e625ac6dbc0a9d00ac"
+    },
+    {
+      "file": "server/waterx/bluewater-fast.ts",
+      "sha256": "14a6c972a3dc3d861c486eb335c88be25cc864c688aaca3f2eabf1f819d61692"
+    },
+    {
+      "file": "server/waterx/bluewater-metrics.ts",
+      "sha256": "0f3f26bc94c8a0b486befb2127a8541fa54707e03dc0e288e8096b288f8e6c0c"
+    },
+    {
+      "file": "server/waterx/bluewater-report.ts",
+      "sha256": "31a0f28a11b519b3d066faad19e7db6304b60d7aea2b0459603aa697ba92a6c2"
+    },
+    {
+      "file": "server/waterx/bluewater-store.ts",
+      "sha256": "b287057a8fdeba0f439416e87a87af2d9979811a6217b90a48e5c68dff721355"
+    },
+    {
+      "file": "server/waterx/bluewater-training.ts",
+      "sha256": "56d64d982e618a03db4e4787c0db61312d76176a0a2840ab1b1a58e660d57909"
+    },
+    {
+      "file": "server/waterx/bounded-retry.ts",
+      "sha256": "c7686eac717e6432ca83cf6b3b0aacb302d431cfe789a04736f5284b99e151ce"
+    },
+    {
+      "file": "server/waterx/candidate-capture.ts",
+      "sha256": "855ef2ab4ed3fc650d16663a7ff0cbb4ae98d19115a86e2e37277e2093017220"
+    },
+    {
+      "file": "server/waterx/candidate-runtime.ts",
+      "sha256": "99a220fddf07961dc33746e25efe58d06abb2802c3655eaf3a41acfba747b8bc"
+    },
+    {
+      "file": "server/waterx/candidate-status.ts",
+      "sha256": "0bc4fd0e359ec95a81654c072fc2d73b35bbf95dfdcda0dfdb322d55527cba89"
+    },
+    {
+      "file": "server/waterx/candidate-training.ts",
+      "sha256": "74c326f44e084aa51e1f38eef60bbc570b5c57aec2a44a89d57d895cd99426c7"
+    },
+    {
+      "file": "server/waterx/canonical-history.ts",
+      "sha256": "de8b1147886c0c5817854e8a4c55b36afd584be64f161ea6e301224167077665"
+    },
+    {
+      "file": "server/waterx/coverage.ts",
+      "sha256": "3cd938cb6b5325bdc21bb459a796b6fde768defd0257952299a9d8e62cb93c71"
+    },
+    {
+      "file": "server/waterx/daily-audit.ts",
+      "sha256": "8edb69cd8d00372d3d7a5db4dd5b5b8f524bef6cc31c804fa5f69e1aa0007efd"
+    },
+    {
+      "file": "server/waterx/diagnostics.ts",
+      "sha256": "bcf4faa8447b4a6195ec535931136cb849e1408d8c149d8ecfe93038c8059261"
+    },
+    {
+      "file": "server/waterx/early-dataset.ts",
+      "sha256": "a9dbb30772f5637faf110017ba664d1ca55ba2e6e62630ed821e93b575b445ef"
+    },
+    {
+      "file": "server/waterx/early-delivery-metrics.ts",
+      "sha256": "7b6f6fd95d5596c8d109bb13ab1357d640c7e1411c39585c599296893f4fb0fc"
+    },
+    {
+      "file": "server/waterx/early-horizons.ts",
+      "sha256": "acb9e2f3480aad694d77ffc4c613e1e008b5f7954041ab9d218caaa12971c475"
+    },
+    {
+      "file": "server/waterx/early-model-comparison.ts",
+      "sha256": "ddc0cdc9d9f20792831c8a571b9436aeecea9c95b5de4e351b038e6c28a09269"
+    },
+    {
+      "file": "server/waterx/early-operations.ts",
+      "sha256": "886af7b02912dc4a4da2004d33a5a34fb119024086bf80696fa0c191aa49c773"
+    },
+    {
+      "file": "server/waterx/early-shadow-runtime.ts",
+      "sha256": "85d6c9198b354a9e85988e56d5270c4fc4b235fa2d61d3ef888a7c2ab2614a93"
+    },
+    {
+      "file": "server/waterx/early-stopping.ts",
+      "sha256": "9913e4c9e4d91a1365ff0c1b8ec7679dd1b9b0b247e596104913b01418830cf1"
+    },
+    {
+      "file": "server/waterx/early-training.ts",
+      "sha256": "f63a117d1190f761f408f56a5ae3e2007f4a7f2d848ee9a37859567a00acebcd"
+    },
+    {
+      "file": "server/waterx/final-events.ts",
+      "sha256": "efd98173cc5ebd8f294dba0fc4e2f8c01c2943e3fe3738721c9c51e72860268e"
+    },
+    {
+      "file": "server/waterx/gate-history.ts",
+      "sha256": "371dcc9cb51d52d7ed7a54e016c7879814dcd1b0e9a852ba697893708020ba1e"
+    },
+    {
+      "file": "server/waterx/latency.ts",
+      "sha256": "7f074439888d9ba036d4dac304be327e3c78a58299e58018c62bdc6f02752f8a"
+    },
+    {
+      "file": "server/waterx/learning.ts",
+      "sha256": "4d82bd399d670724f133b818eefbd2c03b4bc244cade99b516ebaa21d1f983bc"
+    },
+    {
+      "file": "server/waterx/lock-maintenance.ts",
+      "sha256": "49ca116b99aec86879029075d8985bd705da9c80885da5d8593fa58828b0ef1b"
+    },
+    {
+      "file": "server/waterx/lock-readiness.ts",
+      "sha256": "7fe41b28594b2b2e80d450364fb0fccb435e828ca0d122a1dd4258f1543b3c6f"
+    },
+    {
+      "file": "server/waterx/lock-report.ts",
+      "sha256": "0579095a541b43f71a02364bc193ac23ad100681e85c916013de02a534b98ce3"
+    },
+    {
+      "file": "server/waterx/lock-store.ts",
+      "sha256": "b2a4291ad42e13909e7c91b9fa1e7d733f55d5b013db01a489509fd88077f7f7"
+    },
+    {
+      "file": "server/waterx/lock-timers.ts",
+      "sha256": "12a9d94657ef0ecdf5e9487a522cc7f7a7c74315b162b7f35a34f0b469d26ca4"
+    },
+    {
+      "file": "server/waterx/observation-provenance.ts",
+      "sha256": "b8ca8db68b3e195a85ceb1a585341471fd9b89c5285ce5bb06c97c321c7706be"
+    },
+    {
+      "file": "server/waterx/pooled-early-training.ts",
+      "sha256": "0088dbab50d2eaab1671deb138e48c93741a22fad61ab766c20807dab08ed981"
+    },
+    {
+      "file": "server/waterx/refresh-health.ts",
+      "sha256": "6174c878b5efb7588f74f083521a24b27c262c947e5e244955fac64de7e8ac32"
+    },
+    {
+      "file": "server/waterx/research-audit.ts",
+      "sha256": "5217f66d4d79e6260ea8896d7a2fafd36064acb17fbf8995729d94e0da7fbdc9"
+    },
+    {
+      "file": "server/waterx/research-baseline-training.ts",
+      "sha256": "e2e832f0647706ece1a65697dda116792d5f04734037de1683e3b6394c0bc2c2"
+    },
+    {
+      "file": "server/waterx/research-decision.ts",
+      "sha256": "37e61022be6fe86d3fad63a65b9596cb96b5f16699720b6b95917dbd784473a5"
+    },
+    {
+      "file": "server/waterx/research-feature-supplement.ts",
+      "sha256": "6e317c67a6b32b2c6bd054f4cb24845b2cab30c82e5963559b1e1f4c9e16c9c3"
+    },
+    {
+      "file": "server/waterx/research-lifecycle.ts",
+      "sha256": "83773a3e58819c37fceeffb3ac3ae73db7bb934a5efe4098660ab0b71cc51d31"
+    },
+    {
+      "file": "server/waterx/research-maintenance.ts",
+      "sha256": "79d77d954a1975a9247f183b3b684e65196c1220b966de598a71604d7fa6e6c1"
+    },
+    {
+      "file": "server/waterx/research-operations.ts",
+      "sha256": "e75c88821980bca97e6b3c655c1f09f755eb4592382ce704ba392362165b258a"
+    },
+    {
+      "file": "server/waterx/research-report.ts",
+      "sha256": "1f3279a29b2958107d23930a26cca3cab99149e77a9a239c8901ce0fc99ce931"
+    },
+    {
+      "file": "server/waterx/research-shadow.ts",
+      "sha256": "3e48d58c72b836418a99c71786726badf0329bb386f4ba08a16723e5da7cc6ee"
+    },
+    {
+      "file": "server/waterx/research-store.ts",
+      "sha256": "b6da4727c90135987f01b46e2156a7bb8f35bad6d0b12bf38c242ee0fe56270e"
+    },
+    {
+      "file": "server/waterx/research-training-model.ts",
+      "sha256": "1a8454e1e61fd40c01458670e7204ec31147a996ba9b086d7b96ff6b65097411"
+    },
+    {
+      "file": "server/waterx/research-training.ts",
+      "sha256": "8416111540278ea10bd9b5fa41f67c4a0967737ce031e54946dc48d035f52c23"
+    },
+    {
+      "file": "server/waterx/round-decision.ts",
+      "sha256": "a6e7bbd70d87be2459827a927bc334ac9cd8e214b0c3f21cc26cd0fc65b57747"
+    },
+    {
+      "file": "server/waterx/service.ts",
+      "sha256": "dd32406a2eea049cc55fcc7ea51208dd5edac8706ede4f4df6a368333198fe4e"
+    },
+    {
+      "file": "server/waterx/source.ts",
+      "sha256": "ca93ce14b504bc0cd182de315acdd316b5d77f274e7db562d1f45bab853c7bca"
+    },
+    {
+      "file": "server/waterx/timed-acknowledgement.ts",
+      "sha256": "540fb7a18b90682e219944e90b351022eb624f6cd1f9c02f1132820045101d52"
+    },
+    {
+      "file": "server/waterx/timed-db.ts",
+      "sha256": "a9a9574a9fd080ad84f0555609b256fccb89cd1a345187d2c6214446985c1b82"
+    },
+    {
+      "file": "server/waterx/timed-decision-builder.ts",
+      "sha256": "82d6912cfd6d67bf060d262f04f1b586d2f2d16893d6d48cc97f579965008053"
+    },
+    {
+      "file": "server/waterx/timed-decision-coordinator.ts",
+      "sha256": "e95c5b1441171883c64f4255b893b88f09601815293308922b95965559b133c5"
+    },
+    {
+      "file": "server/waterx/timed-decision-store.ts",
+      "sha256": "ceb335f2e10879aaf23253eda0d1aba9327f69d830a53301ec5d6b724a83edca"
+    },
+    {
+      "file": "server/waterx/timed-history.ts",
+      "sha256": "65263240c6ac4f2950d353cb163a28fc98fbb5e0969d5d33a09bea53cc1e5e6f"
+    },
+    {
+      "file": "server/waterx/types.ts",
+      "sha256": "bd00e73591396dcca9ce924d2d8f65444ca3853e7a79fafb220da4e5f4a2c5ea"
+    },
+    {
+      "file": "server/waterx/worker.ts",
+      "sha256": "7723cfdbe4f1c1b4347e9a6f16a8e8b53394121a3b79aa9771fb9e0b9e4fde33"
+    },
+    {
+      "file": "shared/agent-policy.ts",
+      "sha256": "63d284ff25382aef3948f21ac056c43f230897991df539d847e7ba21c1a0350e"
+    },
+    {
+      "file": "shared/bluewater-display.ts",
+      "sha256": "b1f406ba5eecfc9b6d30c0350d0852449961492b743b63e113b9de1e4d1f10a3"
+    },
+    {
+      "file": "shared/bluewater-paper-boundary.ts",
+      "sha256": "cff7de8725c95bb4e5cf3e0160095f63df47f99c6e79767a33a0090c47210706"
+    },
+    {
+      "file": "shared/bluewater-research.ts",
+      "sha256": "eccb6121df8996a2952949b71f96b3b317026e4c6739634ad8afde417a8d2971"
+    },
+    {
+      "file": "shared/canonical-history.ts",
+      "sha256": "72d669fa28704e76d10c13350b6e81d95936a50f2fff91881c6c48ca18d7afcb"
+    },
+    {
+      "file": "shared/early-features.ts",
+      "sha256": "d2e3b2ea96137f68a0dd56272f56aebf7518dc12b1e6203515ca73e354cc4ba9"
+    },
+    {
+      "file": "shared/lock-readiness.ts",
+      "sha256": "b08e9c644fbc873f940892935dff1a386554623157724b94418b3827ce87ebe4"
+    },
+    {
+      "file": "shared/manual-opportunity.ts",
+      "sha256": "b3cfd5a7d18e6d4ff0bb70dfa16b005f23fbf44b878ca0bb2104d128e07ef35f"
+    },
+    {
+      "file": "shared/round-decision.ts",
+      "sha256": "16d254713f5427111d3664f870b97ec575be7205997ce00ae951ea46505ba8af"
+    },
+    {
+      "file": "shared/timed-completion.ts",
+      "sha256": "9f84321815773cbd9cd4af4dc841298d32ea77a9b16a23fa15fb48a1add64ba9"
+    },
+    {
+      "file": "shared/timed-decision.ts",
+      "sha256": "4babfd11c4c3d977ef33d4ce64e6f688799f9caeb6b815635ddf44acb0c72dce"
+    },
+    {
+      "file": "shared/waterx-research.ts",
+      "sha256": "f546fada82ca1481fbaafc6a51b26b5caa83adbcd6b8927102046ff6f84c0b08"
+    },
+    {
+      "file": "shared/waterx-value-policy.ts",
+      "sha256": "bae11794c9784f4025526a1179d98cd614b9c23d45c746222d7feb8b4dd00038"
+    },
+    {
+      "file": "tsconfig.json",
+      "sha256": "43f2c9c68a2c51490e355c75a056ebf8984207622f33c79e6fdfb975a7deb38f"
+    },
+    {
+      "file": "vite.config.ts",
+      "sha256": "be332c9f4a6ff0fe5e8dbe55124d2cd6836d8cde572248438bd63a1156a848ad"
+    }
+  ]
+}

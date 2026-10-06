@@ -19,4 +19,5 @@
 - [Mainnet beta controls](single-order-pilot.md) — $5 aggregate all-in per exact round; exposure/turnover are separate controls; delegation requires independent proof and approval.
 - [Qualification-gate scope](early-decision-scope.md) — 30-second gates replace forced choices; do not ease thresholds for locks; acceptance still includes bounded mainnet recovery.
 - [Gate evidence availability](gate-evidence-availability.md) — receipt timestamps alone cannot prove pre-gate availability; test complete live schema constraints too.
+- [Publish default serialization](publish-default-serialization.md) — compare valid stored defaults with actual generated DDL; nested casts can truncate Publish expressions.
 - [Production SQL evidence](production-sql-evidence.md) — success plus transaction markers is not query evidence; require actual expected result data.

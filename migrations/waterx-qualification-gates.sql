@@ -1,7 +1,9 @@
 -- Additive policy rollout. Never alter old immutable decisions; production backup gate applies.
 BEGIN;
 ALTER TABLE waterx_timed_observations ADD COLUMN accepted_at_ms bigint NOT NULL
- DEFAULT floor(extract(epoch FROM clock_timestamp())*1000)::bigint;
+ -- Decimal division preserves floor-to-milliseconds without an internal cast
+ -- that publish-time default introspection can truncate.
+ DEFAULT floor(extract(epoch FROM clock_timestamp())/0.001)::bigint;
 DO $$ DECLARE n text; BEGIN
  SELECT conname INTO STRICT n FROM pg_constraint
  WHERE conrelid='waterx_timed_decisions'::regclass AND contype='c'

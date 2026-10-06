@@ -24,6 +24,14 @@ test("isolated PostgreSQL proves serialized immutable timed lock/outbox, rollbac
     await pool.query(readFileSync(new URL("../migrations/early-training-retry.sql",import.meta.url),"utf8"));
     await pool.query(readFileSync(new URL("../migrations/waterx-qualification-gates.sql",import.meta.url),"utf8"));
     await pool.query(readFileSync(new URL("../migrations/waterx-gate-horizons.sql",import.meta.url),"utf8"));
+    await pool.query(readFileSync(new URL("../migrations/waterx-accepted-default-publish.sql",import.meta.url),"utf8"));
+    const storedDefault=(await pool.query(`SELECT pg_get_expr(d.adbin,d.adrelid) AS expression FROM pg_attrdef d
+      JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum
+      WHERE d.adrelid='waterx_timed_observations'::regclass AND a.attname='accepted_at_ms'`)).rows[0].expression as string;
+    // Keep casts out of nested defaults: Publish truncated the original numeric
+    // cast inside epoch*1000, producing an unbalanced ADD COLUMN statement.
+    assert.equal((storedDefault.match(/::/g)??[]).length,1);
+    assert.match(storedDefault,/\/ 0\.001/);assert.match(storedDefault,/::bigint$/);
     const nonce="0".repeat(64);
     await pool.query(`INSERT INTO bluewater_agent_challenges(token_hash,owner,origin,network,expires_at)
       VALUES($1,'test-owner','https://qa.invalid','sui:mainnet',clock_timestamp()+interval '2 minutes')`,[nonce]);

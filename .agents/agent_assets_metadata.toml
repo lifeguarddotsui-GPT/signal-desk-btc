@@ -686,3 +686,17 @@ mtime_ms = 1791247674651
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/3c3420b5-75d4-4c6d-aea0-9da3c8d4eb8f/ee3e139c-7449-4f4e-9067-a8d1057aa3e0"
 storage_version_token = "1791247676465800"
 content_type = "text/html"
+
+[[outputs]]
+id = "Zz4A7ROxWjVnnKXBIQPxF"
+uri = "file://docs/cloudflare-execution-feasibility-pass.md"
+type = "text"
+title = "Cloudflare feasibility results and cost comparison"
+description = "Completed 31-minute unfunded pass: measured results, failed and unproven execution stages, Free/Paid/VM cost boundaries, and signer security prerequisite."
+logical_id = "db18426e-74c6-474b-838d-f698ed63a096"
+content_hash = "sha256:a601db59d87362e80a4ec62d24d3229ee5035fea5bac4fecee9a23c5c2a2a9dc"
+size = 13412
+mtime_ms = 1791259623997
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/db18426e-74c6-474b-838d-f698ed63a096/9e8ff607-8230-4f1b-8e40-024bf1530aae"
+storage_version_token = "1791259653634460"
+content_type = "text/markdown"

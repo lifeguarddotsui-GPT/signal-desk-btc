@@ -2,8 +2,9 @@
 // Credentials are used only in request headers and are never included in output.
 const API = "https://api.cloudflare.com/client/v4";
 const GRAPHQL = `${API}/graphql`;
-const SCRIPT = "waterx-edge-prototype";
-const DATABASE = "waterx-edge-prototype";
+const EXECUTION_PROBE = process.argv.includes("--execution-probe");
+const SCRIPT = EXECUTION_PROBE ? "waterx-execution-feasibility" : "waterx-edge-prototype";
+const DATABASE = SCRIPT;
 const env = process.env;
 
 if (!env.CLOUDFLARE_API_KEY || !env.CLOUDFLARE_EMAIL) {
@@ -329,8 +330,8 @@ function resolveMetricsWindow(args, nowMs = Date.now()) {
         throw new Error(`${argument} requires a timestamp.`);
       if (argument === "--from") from = value;
       else to = value;
-    } else {
-      throw new Error("Supported options are --from <ISO timestamp> and --to <ISO timestamp>.");
+    } else if (argument !== "--execution-probe") {
+      throw new Error("Supported options are --from <ISO timestamp>, --to <ISO timestamp>, and --execution-probe.");
     }
   }
   if ((from === undefined) !== (to === undefined))
@@ -378,7 +379,7 @@ async function main(args = process.argv.slice(2)) {
   const namespaces = namespacesResult.status === "fulfilled" ? namespacesResult.value : [];
   const database = Array.isArray(databases) ? databases.find(item => item.name === DATABASE) : null;
   const binding = (settings?.bindings ?? []).find(item =>
-    item.name === "WATERX_COLLECTOR" && item.type === "durable_object_namespace");
+    item.name === (EXECUTION_PROBE ? "EXECUTION_PROBE" : "WATERX_COLLECTOR") && item.type === "durable_object_namespace");
   const bindingNamespaceId = binding?.namespace_id ?? binding?.id;
   const namespace = bindingNamespaceId && Array.isArray(namespaces)
     ? namespaces.find(item => item.id === bindingNamespaceId)

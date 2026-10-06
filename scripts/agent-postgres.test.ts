@@ -60,7 +60,7 @@ test("isolated Agent PostgreSQL: wallet signatures, replay/CSRF/isolation, versi
     assert.equal((await call("/delegate",{},ac.cookie)).status,409);
     const policy={...defaultAgentPolicy,frequency:"EVERY_ELIGIBLE_ROUND",edgeEnabled:false,dailyTurnoverCents:500,reserveCents:0,targetCents:5000};
     assert.equal((await call("/policy",{policy:{...policy,dailyTurnoverCents:null}},ac.cookie)).status,400);
-    const saved=await call("/policy",{owner:b.toSuiAddress(),policy},ac.cookie);assert.equal(saved.status,200);assert.equal(saved.body.owner,a.toSuiAddress());assert.equal(saved.body.policyVersion,2);
+    const saved=await call("/policy",{owner:b.toSuiAddress(),policy,acknowledged:true},ac.cookie);assert.equal(saved.status,200);assert.equal(saved.body.owner,a.toSuiAddress());assert.equal(saved.body.policyVersion,2);
     assert.equal((await call("/state",undefined,bc.cookie)).body.policyVersion,1);
     assert.equal((await call("/policy",{policy:{...policy,privateKey:"not allowed"}},ac.cookie)).status,400);
     assert.equal((await call("/control",{action:"ARM_SHADOW",paperCapitalCents:1000,acknowledged:true},ac.cookie)).status,400);

@@ -15,12 +15,12 @@ test("capture percentage points are not multiplied by 100 a second time",()=>{
   assert.equal(captureRateLabel(8909.5),"Not reported");
 });
 
-test("mainnet per-order ceiling is independent from explicitly owner-set turnover and exposure",()=>{
+test("mainnet owner-approved aggregate round ceiling is separate from turnover, sizing and exposure",()=>{
   const p={...defaultAgentPolicy,network:"mainnet" as const};
   assert.equal(agentPolicySchema.safeParse(p).success,true);
-  for(const patch of [{maxOrderCents:501},{fixedCents:501},{compound:true}]){
-    assert.equal(agentPolicySchema.safeParse({...p,...patch}).success,false);
-  }
+  assert.equal(agentPolicySchema.safeParse({...p,fixedCents:501}).success,false);
+  for(const patch of [{maxOrderCents:501},{fixedCents:700,roundCollateralCents:1000},{compound:true}])
+    assert.equal(agentPolicySchema.safeParse({...p,...patch}).success,true);
   assert.equal(agentPolicySchema.safeParse({...p,dailyTurnoverCents:501,
     maxUnresolved:{mode:"AMOUNT",value:501}}).success,true);
 });

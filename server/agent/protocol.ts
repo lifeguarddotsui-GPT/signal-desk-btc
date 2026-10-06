@@ -3,6 +3,10 @@ import { PredictClient, getAccountIds, createAccount, deposit, withdraw, addDele
 import { Transaction } from "@mysten/sui/transactions";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
+import {mintCreditToAccount,routeNative,requestCreditWithdraw,enqueueWithdrawal,resolveCreditStack} from "@waterx/sdk/account";
+import {PerpClient} from "@waterx/sdk/perp";
+
+export const NATIVE_USDC="0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC";
 
 export const configUrl = "https://main-v2.waterx-config.pages.dev/mainnet.json";
 export const MAINNET_IDENTITY = {
@@ -54,7 +58,7 @@ export function protocolClient() {
 export async function protocolStatus() {
   try {
     const c = await protocolClient();
-    return {status:"VERIFIED_IDENTITY_ONLY",reason:"Mainnet package/registry identities and settlement metadata verified. BTC market mapping, executable economics and USD funding conversion remain unqualified; no order adapter.",
+    return {status:"VERIFIED_IDENTITY_ONLY",reason:"Mainnet identities verified. SDK order and native-USDC funding/redemption builders are implemented; owned-account simulation, credited balances, fee-inclusive economics and recovery are not yet verified.",
       source:configUrl,network:"mainnet",chainIdentifier:MAINNET_IDENTITY.chainIdentifier,
       decimals:6,settlementCoinType:c.settlementCoinType(),marketSemanticsVerified:false,
       settlements:c.config.objects.prediction.settlement_coin_types,
@@ -94,7 +98,7 @@ export async function ownerTransaction(owner: string, body: Record<string, unkno
     } else if (body.action === "REVOKE") {
       removeDelegate(c,tx,{accountId,delegate:address(body.delegateAddress)});
       description="Owner revokes this delegate on mainnet; any existing positions remain. Gas budget capped at 0.1 SUI.";
-    } else if (body.action === "FUND") {
+    } else if (body.action === "FUND" || body.action === "FUND_USDC") {
       if (!Array.isArray(body.coinObjectIds) || body.coinObjectIds.length < 1 || body.coinObjectIds.length > 20 ||
         typeof body.amountAtomic !== "string" || !/^[1-9]\d*$/.test(body.amountAtomic) || BigInt(body.amountAtomic) > BigInt("18446744073709551615")) throw new Error("Provide coin objects and a positive settlement-native atomic amount");
       const ids = body.coinObjectIds.map(address);
@@ -102,8 +106,34 @@ export async function ownerTransaction(owner: string, body: Record<string, unkno
       const first = tx.object(ids[0]);
       if (ids.length > 1) tx.mergeCoins(first,ids.slice(1).map(id=>tx.object(id)));
       const [coin] = tx.splitCoins(first,[tx.pure.u64(body.amountAtomic)]);
-      deposit(c,tx,{accountId,coin,coinType});
-      description=`Deposit ${body.amountAtomic} atomic units (${(BigInt(body.amountAtomic)/BigInt(1000000)).toString()}.${(BigInt(body.amountAtomic)%BigInt(1000000)).toString().padStart(6,"0")}) of ${coinType} into YOUR WaterX mainnet account. This is WaterX USD, not wallet USDC; no conversion is performed. Gas budget capped at 0.1 SUI.`;
+      if(body.action==="FUND_USDC"){
+        const stack=resolveCreditStack(c.config,"USD");
+        if(stack.creditType!==MAINNET_IDENTITY.settlementCoin||!stack.assets.some(a=>a.type===NATIVE_USDC&&a.decimal===6))
+          throw new Error("Native USDC is not registered for the pinned USD custody stack");
+        // The custody mint and direct-rule deposit are consumed in the same PTB.
+        // Never put a USDC Coin into the settlement-native deposit entrypoint.
+        const fundingClient=new PerpClient("MAINNET",c.config,{});
+        mintCreditToAccount(fundingClient,tx,{accountId,assetCoin:coin,assetType:NATIVE_USDC,creditType:"USD"});
+        description=`Convert and deposit ${body.amountAtomic} atomic native USDC into your selected WaterX USD account via the official custody mint and direct deposit. These are different assets. Current fees and credited balance must be verified by simulation and confirmed effects. Gas budget capped at 0.1 SUI.`;
+      }else{
+        deposit(c,tx,{accountId,coin,coinType});
+        description=`Deposit ${body.amountAtomic} atomic WaterX USD into your owned mainnet account. This does not convert USDC. Gas budget capped at 0.1 SUI.`;
+      }
+    } else if (body.action === "REDEEM_USDC") {
+      if(typeof body.amountAtomic!=="string"||!/^[1-9]\d*$/.test(body.amountAtomic)||
+        BigInt(body.amountAtomic)>BigInt("18446744073709551615")||
+        typeof body.minOutputAtomic!=="string"||!/^[1-9]\d*$/.test(body.minOutputAtomic)||
+        BigInt(body.minOutputAtomic)>BigInt("18446744073709551615"))
+        throw new Error("Positive USD redemption amount and owner-approved minimum USDC output are required");
+      const stack=resolveCreditStack(c.config,"USD");
+      if(!stack.assets.some(a=>a.type===NATIVE_USDC&&a.decimal===6)||!stack.executors.length)
+        throw new Error("Native USDC redemption asset or registered withdrawal keeper unavailable");
+      const fundingClient=new PerpClient("MAINNET",c.config,{});
+      const route=routeNative(fundingClient,tx,{assetType:NATIVE_USDC,minOutput:BigInt(body.minOutputAtomic)});
+      const request=requestCreditWithdraw(fundingClient,tx,{accountId,amount:BigInt(body.amountAtomic),
+        recipient:owner,route,creditType:"USD"});
+      enqueueWithdrawal(fundingClient,tx,{withdrawRequest:request,creditType:"USD"});
+      description=`Request ${body.amountAtomic} atomic WaterX USD redemption through the native USDC withdrawal queue, to your wallet only, with minimum output ${body.minOutputAtomic}. A registered keeper must process it; this transaction is a queued request, not receipt of USDC. Gas budget capped at 0.1 SUI.`;
     } else if (body.action === "WITHDRAW") {
       if (typeof body.amountAtomic !== "string" || !/^[1-9]\d*$/.test(body.amountAtomic) || BigInt(body.amountAtomic)>BigInt("18446744073709551615")) throw new Error("Invalid withdrawal amount");
       withdraw(c,tx,{accountId,amount:body.amountAtomic,recipient:owner,coinType});
@@ -111,4 +141,14 @@ export async function ownerTransaction(owner: string, body: Record<string, unkno
     } else throw new Error("Unsupported owner action");
   }
   return {transaction:await tx.toJSON(),description,network:"mainnet",gasBudgetMist:100_000_000,permissions:{account:0,prediction:1}};
+}
+export async function simulateOwnerTransaction(owner:string,body:Record<string,unknown>) {
+  const prepared=await ownerTransaction(owner,body);
+  const bytes=await Transaction.from(prepared.transaction).build({client:rpc});
+  const result=await rpc.core.simulateTransaction({transaction:bytes,checksEnabled:true,
+    include:{effects:true,events:true,balanceChanges:true}});
+  if(result.$kind!=="Transaction"||!result.Transaction.status.success)
+    throw new Error("Owner transaction simulation failed with validation enabled; no funds moved");
+  return {success:true,checksEnabled:true,gasBudgetMist:prepared.gasBudgetMist,network:"mainnet",
+    description:prepared.description};
 }

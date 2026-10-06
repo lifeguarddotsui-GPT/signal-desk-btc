@@ -15,8 +15,8 @@
 - [Lock latency definitions](lock-latency-definitions.md) — separate final-write timing from outer BEGIN; never merge incompatible timing versions or invent provider odds timestamps.
 - [Checked npm registry](npm-checked-registry.md) — repeated mirror rewrites can double /npm; preserve the firewall and portable HTTPS lockfile integrity.
 - [Publish boolean CHECKs](publish-boolean-check-introspection.md) — compare stored predicates with generated SQL; bare boolean CHECKs can be double-wrapped.
-- [Open-wallet mainnet beta](open-wallet-mainnet-beta.md) — open wallet login is not trade authority; $5 all-in per wallet/round, no compounding, separate prospective early signals.
-- [Mainnet beta controls](single-order-pilot.md) — $5 aggregate all-in per exact round; exposure/turnover are separate controls; delegation requires independent proof and approval.
+- [Open-wallet mainnet beta](open-wallet-mainnet-beta.md) — login is not authority; $5 is owner-editable; consented experimental gates need no champion or profitability proof.
+- [Mainnet beta controls](single-order-pilot.md) — owner-approved aggregate round/session limits; complete software before one bounded autonomous pilot; no automatic compounding.
 - [Qualification-gate scope](early-decision-scope.md) — 30-second gates replace forced choices; do not ease thresholds for locks; acceptance still includes bounded mainnet recovery.
 - [Gate evidence availability](gate-evidence-availability.md) — receipt timestamps alone cannot prove pre-gate availability; test complete live schema constraints too.
 - [Publish default serialization](publish-default-serialization.md) — compare valid stored defaults with actual generated DDL; nested casts can truncate Publish expressions.

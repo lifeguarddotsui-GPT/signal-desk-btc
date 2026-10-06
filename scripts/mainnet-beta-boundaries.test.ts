@@ -5,18 +5,19 @@ import { projectHistory, historySummary, type HistoryFact } from "../shared/cano
 import { historyQuerySchema } from "../server/waterx/canonical-history";
 import { evaluateRisk, type ExecutionEvidence, type Equity } from "../server/agent/risk";
 
-test("mainnet beta defaults are fixed <= $5, no compounding, bounded turnover and overlapping exposure",()=>{
+test("mainnet beta prefills $5 without compounding; explicitly reviewed limits are owner-editable",()=>{
   const p=agentPolicySchema.parse(defaultAgentPolicy);
   assert.equal(p.network,"mainnet");assert.equal(p.sizingMode,"FIXED");assert.equal(p.compound,false);
   assert.equal(p.maxOrderCents,500);assert.deepEqual(p.intervals,[5,15]);
-  for(const patch of [{fixedCents:501},{sizingMode:"AVAILABLE_PERCENT"},{sizingMode:"ALLOCATION_PERCENT"},
+  assert.equal(agentPolicySchema.safeParse({...p,fixedCents:501}).success,false);
+  for(const patch of [{fixedCents:700,roundCollateralCents:1000},{sizingMode:"AVAILABLE_PERCENT"},{sizingMode:"ALLOCATION_PERCENT"},
     {compound:true},{maxOrderCents:null},{maxOrderCents:501}])
-    assert.equal(agentPolicySchema.safeParse({...p,...patch}).success,false,JSON.stringify(patch));
+    assert.equal(agentPolicySchema.safeParse({...p,...patch}).success,true,JSON.stringify(patch));
   assert.equal(agentPolicySchema.safeParse({...p,fixedCents:100,maxOrderCents:100}).success,true);
   for(const patch of [{dailyTurnoverCents:null},{dailyTurnoverCents:2500},
     {maxUnresolved:{mode:"PERCENT",value:30}},{maxUnresolved:{mode:"AMOUNT",value:1001}}])
     assert.equal(agentPolicySchema.safeParse({...p,...patch}).success,true);
-  assert.equal(p.dailyTurnoverCents,500);assert.deepEqual(p.maxUnresolved,{mode:"AMOUNT",value:500});
+  assert.equal(p.dailyTurnoverCents,1000);assert.deepEqual(p.maxUnresolved,{mode:"AMOUNT",value:500});
 });
 test("mainnet risk ceiling includes settlement fees, independently from the order-sizing cap",()=>{
   const now=290000;

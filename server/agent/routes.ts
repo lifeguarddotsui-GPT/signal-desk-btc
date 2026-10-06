@@ -3,7 +3,7 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { agentPolicySchema, defaultAgentPolicy } from "../../shared/agent-policy";
 import { agentPool, agentTransaction, readAgent, ledger, blockers } from "./store";
-import { address, accountIds, assertAccountOwner, ownerTransaction, protocolClient, protocolStatus, rpc } from "./protocol";
+import { address, accountIds, assertAccountOwner, ownerTransaction, simulateOwnerTransaction, protocolClient, protocolStatus, rpc } from "./protocol";
 import { Transaction } from "@mysten/sui/transactions";
 import { matchesOwnerIntent } from "./intent";
 
@@ -37,10 +37,6 @@ async function authenticate(req: OwnerRequest,res: Response,next: NextFunction) 
 }
 export function registerAgentRoutes(app:Express) {
   app.use("/api/agent", (req,res,next)=>{
-    const identityPaths=["/capabilities","/challenge","/auth","/logout","/state","/accounts","/account","/control"];
-    if(process.env.NODE_ENV!=="development"&&!identityPaths.includes(req.path)){
-      res.status(409).json({error:"This production capability is not released. Identity/account reads do not grant funding, delegation or order authority."});return;
-    }
     res.set("Cache-Control","no-store");
     if(req.method!=="GET")try{origin(req);}catch{res.status(403).json({error:"Same-origin request required."});return;}
     next();
@@ -49,7 +45,7 @@ export function registerAgentRoutes(app:Express) {
     res.json({developmentOnly:false,sdkVersion:"6.1.0",network:"mainnet",globalExecutionDisabled:true,mainnetEnabled:false,
       capabilities:{authentication:true,accountReads:true,accountSelection:true,
         betaAuthorization:false,arming:false,execution:false,shadow:process.env.NODE_ENV==="development"},
-      betaReleased:false,walletConnection:"OPEN",maxCollateralSpendCentsPerWalletRound:500,compounding:false,
+      betaReleased:false,walletConnection:"OPEN",defaultRoundCollateralCents:500,roundLimitOwnerEditable:true,defaultCompounding:false,
       executableQuote:null,ownerOrderAvailable:false,delegatedOrderAvailable:false,
       blockers,defaultPolicy:defaultAgentPolicy,permissions:{prediction:1,account:0},config:await protocolStatus()});
   }));
@@ -116,6 +112,10 @@ export function registerAgentRoutes(app:Express) {
   app.post("/api/agent/policy",safe(async(req,res)=>{
     const p=agentPolicySchema.parse(req.body?.policy);
     if(p.network!=="mainnet")throw new Error("This beta accepts mainnet policies only");
+    if(req.body?.acknowledged!==true)throw new Error("Explicit review and approval of the session limits required");
+    if(p.signalSource==="EXPERIMENTAL_QUALIFICATION_GATES"&&req.body?.experimentalConfirmed!==true)
+      throw new Error("Explicit consent to the uncalibrated experimental gate strategy required");
+    if(p.compound&&req.body?.compoundingConfirmed!==true)throw new Error("Explicit compounding authorization required");
     await agentTransaction(req.agentOwner!,async(c,row)=>{
       const version=Number(row.policy_version)+1;
       await c.query("INSERT INTO bluewater_agent_policies(owner,version,policy) VALUES($1,$2,$3)",[req.agentOwner,version,JSON.stringify(p)]);
@@ -160,7 +160,15 @@ export function registerAgentRoutes(app:Express) {
     });res.json(await readAgent(req.agentOwner!));
   }));
   app.post("/api/agent/delegate",safe(async(req,res)=>{
-    res.status(409).json({error:"Mainnet delegates are unavailable until production signer review and negative permission proofs. No key generated."});
+    res.status(409).json({error:"Isolated encrypted mainnet signer service is not provisioned. No key generated."});
+  }));
+  app.post("/api/agent/owner-simulation",safe(async(req,res)=>{
+    if(req.body?.action!=="CREATE_ACCOUNT"){
+      const row=await readAgent(req.agentOwner!);
+      if(row.policyAcceptanceRequired||!row.accountId||address(req.body?.accountId)!==row.accountId)
+        throw new Error("Select this owned WaterX mainnet account before simulation");
+    }
+    res.json(await simulateOwnerTransaction(req.agentOwner!,req.body??{}));
   }));
   app.post("/api/agent/owner-transaction",safe(async(req,res)=>{
     if(req.body?.action==="AUTHORIZE"){

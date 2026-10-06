@@ -6,10 +6,10 @@ import AgentPage from "./AgentPage";
 
 test("public agent SSR is observation-only and never claims execution readiness", () => {
   const html = renderToStaticMarkup(createElement(AgentPage));
-  assert.match(html, /SHADOW OBSERVATION ONLY/);
-  assert.match(html, /no executable adapter is verified/i);
-  assert.match(html, /No hypothetical fills, trade outcomes, or compounding results are generated here/i);
-  assert.match(html, /RELEASE UNAVAILABLE/);
-  assert.match(html, /Balance not reported/);
+  assert.match(html, /IDENTITY IS NOT AUTHORITY/);
+  assert.match(html, /Experimental qualification gates/i);
+  assert.match(html, /USDC/);
+  assert.match(html, /not reported/i);
+  assert.match(html, /simulate owner actions before a transaction payload is prepared/i);
   assert.doesNotMatch(html, /qualified for live execution/i);
 });

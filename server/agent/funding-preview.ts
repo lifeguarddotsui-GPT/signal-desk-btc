@@ -1,6 +1,5 @@
 import {resolveCreditStack} from "@waterx/sdk/account";
-import {protocolClient,rpc,MAINNET_IDENTITY} from "./protocol";
-const NATIVE_USDC="0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC";
+import {protocolClient,rpc,MAINNET_IDENTITY,NATIVE_USDC} from "./protocol";
 /** Read-only registration/metadata preview, not an executable valuation or
  * custody redemption promise. No owner funds, signature or gas are consumed. */
 export async function usdcFundingPreview(){

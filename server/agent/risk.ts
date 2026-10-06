@@ -55,7 +55,8 @@ export function evaluateRisk(raw: AgentPolicy, e: Equity, v: ExecutionEvidence):
   if (p.maxDrawdownPercent !== null && e.highWaterCents > 0 && (e.highWaterCents - equity) / e.highWaterCents * 100 >= p.maxDrawdownPercent) return hold("DRAWDOWN_STOP");
   if (p.maxConsecutiveLosses !== null && e.consecutiveLosses >= p.maxConsecutiveLosses) return hold("CONSECUTIVE_LOSS_STOP");
   const s = v.signal, m = v.market, q = v.quote;
-  if (!s || s.source !== p.signalSource || !s.qualified || !s.frozen) return hold("NO_QUALIFIED_CHAMPION_FINAL_CHOICE");
+  if (!s || s.source !== p.signalSource || !s.qualified || !s.frozen)
+    return hold(p.signalSource==="BLUEWATER_CHAMPION"?"NO_QUALIFIED_CHAMPION_FINAL_CHOICE":"NO_COMMITTED_QUALIFICATION_GATE_DECISION");
   if (!Number.isFinite(s.probability) || s.probability < 0 || s.probability > 1 || !Number.isSafeInteger(s.atMs) ||
     s.atMs > v.nowMs || v.nowMs - s.atMs > p.maxSignalAgeMs || s.atMs >= s.expiryMs) return hold("STALE_OR_INVALID_SIGNAL");
   if (!p.intervals.includes(s.interval)) return hold("INTERVAL_NOT_AUTHORIZED");
@@ -70,7 +71,7 @@ export function evaluateRisk(raw: AgentPolicy, e: Equity, v: ExecutionEvidence):
   d.stakeCents = sizePosition(p, e);
   if (d.stakeCents <= 0) return hold("BALANCE_RESERVE_TURNOVER_OR_EXPOSURE_LIMIT");
   if (!q || !q.economicsVerified) return hold("EXECUTABLE_ECONOMICS_UNVERIFIED");
-  if(p.network==="mainnet"&&q.spendCents+q.totalFeeCents>500)return hold("BETA_ALL_IN_COLLATERAL_CAP");
+  if(p.network==="mainnet"&&q.spendCents+q.totalFeeCents>p.roundCollateralCents)return hold("BETA_ALL_IN_COLLATERAL_CAP");
   if (!Number.isSafeInteger(q.atMs) || q.atMs > v.nowMs || v.nowMs - q.atMs > p.maxQuoteAgeMs) return hold("STALE_QUOTE");
   if (q.marketId !== m.id || q.selection !== d.selection) return hold("QUOTE_IDENTITY_MISMATCH");
   const exposureLimit=p.maxUnresolved.mode==="AMOUNT"?p.maxUnresolved.value:

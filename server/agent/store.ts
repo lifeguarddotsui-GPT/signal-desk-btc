@@ -1,13 +1,13 @@
 import pg from "pg";
 import type { PoolClient } from "pg";
-import { defaultAgentPolicy, policySummary, type AgentPolicy } from "../../shared/agent-policy";
+import { defaultAgentPolicy, agentPolicySchema, policySummary, type AgentPolicy } from "../../shared/agent-policy";
 export const agentPool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 2, connectionTimeoutMillis: 5000, query_timeout: 5000, statement_timeout: 5000 });
 export const blockers = [
-  "Public mainnet autonomous execution disabled: no owner/release approval.",
-  "No qualified Bluewater champion: WaterX baseline is not an independent model.",
-  "Executable quote, fees, net payout and exact YES/NO market mapping not yet verified.",
-  "Delegated place-order, withdrawal denial, delegate-management denial and revoke require reviewed mainnet on-chain proof.",
-  "Production signer/key-management architecture not yet approved; no live signer configured.",
+  "Isolated encrypted mainnet signer service is not provisioned.",
+  "Production final-decision dispatch, wallet-wide reservations and UNKNOWN reconciliation are not connected.",
+  "Order limits can be built, but fee-inclusive economics and permission simulations have not been verified with an owned account.",
+  "Restricted delegate authorization, withdrawal/delegate-management denial and revocation require mainnet verification.",
+  "Browser-independent production worker is not activated; current publication uses Autoscale.",
   "Auto claim unavailable pending explicit claim-permission and contract verification.",
 ];
 export async function ledger(c: PoolClient, owner: string, event: string, version: number, details: unknown, roundKey: string | null = null) {
@@ -28,9 +28,10 @@ export async function readAgent(owner: string, sessionExpiresAtMs: number | null
   const row = (await agentPool.query("SELECT * FROM bluewater_agents WHERE owner=$1", [owner])).rows[0];
   if (!row) throw new Error("Authenticated agent is missing");
   const events = (await agentPool.query("SELECT id,event,at,details FROM bluewater_agent_ledger WHERE owner=$1 ORDER BY id DESC LIMIT 100", [owner])).rows;
-  return {owner,policy:row.policy as AgentPolicy,policyVersion:Number(row.policy_version),status:row.status,
+  const policy=agentPolicySchema.parse(row.policy);
+  return {owner,policy,policyVersion:Number(row.policy_version),status:row.status,
     accountId:row.account_id,delegateAddress:row.delegate_address,delegateExpiresAtMs:row.delegate_expires_at_ms == null ? null : Number(row.delegate_expires_at_ms),
-    paper:row.paper,ledger:events,summary:policySummary(row.policy),blockers,balances:null,
+    paper:row.paper,ledger:events,summary:policySummary(policy),blockers,balances:null,
     network:"mainnet",mainnetEnabled:false,signingSessionActive:false,
     policyAcceptanceRequired:row.policy?.network!=="mainnet",
     combinedOpenExposureCents:null,exposureVerification:"UNAVAILABLE",

@@ -3,6 +3,7 @@ import { RefreshCw } from "lucide-react";
 import type { RoundDecision } from "../../shared/round-decision";
 import type { AtomicDecisionView } from "./live-decision-contract";
 import type { AdvisoryPayload } from "./advisory-contract";
+import { EventChallengerPanel } from "./EventChallengerPanel";
 
 type Interval = 5 | 15;
 type RoundIdentity = { id: string; startMs: number; expiryMs: number };
@@ -41,6 +42,7 @@ export function ManualOpportunity({
 }: Props) {
   const [compactPrices,setCompactPrices]=React.useState(()=>typeof window!=="undefined"&&window.matchMedia("(max-width: 900px)").matches);
   const [pricesExpanded,setPricesExpanded]=React.useState(false);
+  const [researchDisplay,setResearchDisplay]=React.useState<"benchmark"|"event">("benchmark");
   React.useEffect(()=>{
     const media=window.matchMedia("(max-width: 900px)");
     const update=()=>setCompactPrices(media.matches);
@@ -72,7 +74,6 @@ export function ManualOpportunity({
   const roundRemaining = exactRound && exactRound.expiryMs > now ? clock(exactRound.expiryMs - now) : null;
   const roundComplete = !!exactRound && now >= exactRound.expiryMs;
   const nextGateAtMs = exactDecision ? view.nextGateAtMs ?? timed?.nextGateAtMs ?? null : null;
-  const nextGate = nextGateAtMs != null ? clock(nextGateAtMs - now) : null;
   const saving = !!exactDecision && !locked && (timed?.persistence === "SAVING" || view.persistenceState === "WRITING" || view.persistenceState === "QUEUED");
   const state = fixtureLocked ? "LOCKED UP"
     : locked ? `LOCKED ${savedSide}`
@@ -165,7 +166,7 @@ export function ManualOpportunity({
     </div>
 
     <div className={`desk-decision-card${locked ? " locked" : ""}`}>
-      <h3 className="desk-section-title">Bluewater decision</h3>
+      <h3 className="desk-section-title">Bluewater decision <span className="desk-active-policy">ACTIVE · 30-SECOND BENCHMARK</span></h3>
       <div className="desk-decision-main">
         <div className="desk-state-line">
           {!loading && <span className={`desk-state-tag${locked ? " locked" : currentSide ? " leaning" : ""}`} role="status">{state}</span>}
@@ -176,7 +177,7 @@ export function ManualOpportunity({
         {failed && <p className="desk-error" role="status">Live snapshot could not refresh. {onRetry && <button type="button" onClick={onRetry}><RefreshCw size={13} /> Retry</button>}</p>}
       </div>
       <div className="desk-decision-side">
-        <div className="desk-next-evaluation"><span>{locked ? "Saved choice" : "Next gate"}</span><strong>{fixtureLocked ? "Preview only" : locked ? time(saved?.committedAtMs ?? saved?.decisionAtMs) : nextGate ?? "Not scheduled"}</strong></div>
+        {locked && <div className="desk-next-evaluation"><span>Benchmark saved choice</span><strong>{time(saved?.committedAtMs ?? saved?.decisionAtMs)}</strong></div>}
         {!locked && <div className="desk-checklist" aria-label={waitingForOdds?"Not evaluated: missing odds":`Qualification progress: ${requirementMet ?? "—"} of ${requirementsTotal} conditions met`}>
           {!waitingForOdds&&qualified.map((met, index) => <span key={index} className={met ? "met" : ""} title={["Fresh input", "Directional strength", "Same-side persistence", "Stable evidence"][index]} />)}
           <small>{waitingForOdds?"Not evaluated: missing odds":requirementMet == null ? "Qualification" : `${requirementMet} of ${requirementsTotal} conditions`}</small>
@@ -216,6 +217,18 @@ export function ManualOpportunity({
     {children&&<div className="desk-chart-slot">{children}</div>}
     <details className="desk-details">
       <summary>Details</summary>
+      <div className="desk-policy-choice">
+        <span>Research-policy display · display only</span>
+        <div role="group" aria-label="Research policy display">
+          <button type="button" aria-pressed={researchDisplay==="benchmark"} onClick={()=>setResearchDisplay("benchmark")}>30-second benchmark · active</button>
+          <button type="button" aria-pressed={researchDisplay==="event"} onClick={()=>setResearchDisplay("event")}>Event challenger · shadow</button>
+        </div>
+      </div>
+      {researchDisplay==="event" && <EventChallengerPanel
+        projection={exactDecision?.eventChallenger}
+        round={exactRound}
+        now={now}
+      />}
       <div className="desk-details-grid">
         <span>Live odds source</span><b>{odds ? "WaterX market" : "Unavailable; no trained-model fallback"}</b>
         <span>Data condition</span><b>{health?.primaryReason?.replaceAll("_", " ") ?? (view.fresh ? "Current" : "Waiting for snapshot")}</b>
@@ -225,7 +238,8 @@ export function ManualOpportunity({
         <span>Strategy</span><b>{exactDecision ? view.strategyVersion ?? exactDecision.policyVersion : "Not reported"}</b>
         <span>Timed blocker</span><b>{timed?.blocker?.replaceAll("_", " ") ?? "Not reported"}</b>
         {timed?.lastGate && <><span>Last gate</span><b>{timed.lastGate.result.replaceAll("_", " ")} · {time(timed.lastGate.scheduledAtMs)}</b></>}
-        {nextGateAtMs != null && <><span>Next gate</span><b>{time(nextGateAtMs)}</b></>}
+        {nextGateAtMs != null && <><span>Next benchmark gate</span><b>{time(nextGateAtMs)}</b></>}
+        <span>30-second benchmark countdown</span><b>{nextGateAtMs == null ? "No further scheduled checkpoint" : `${clock(nextGateAtMs - now) ?? "Not scheduled"} · scheduled benchmark evaluation only; not a challenger lock deadline`}</b>
         {staleSameRound && <><span>Last same-round odds</span><b>Stale · UP {percent(stale.up)} · DOWN {percent(stale.down)} · observed {time(stale.receivedAtMs)}</b></>}
         <span>Snapshot revision</span><b>{!exactDecision || view.snapshotVersion == null ? "Not available" : `v${view.snapshotVersion} · ${time(view.componentTimestamps.snapshotPublishedAtMs)}`}</b>
       </div>

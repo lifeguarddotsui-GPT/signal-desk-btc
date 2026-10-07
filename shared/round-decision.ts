@@ -29,6 +29,7 @@ export type RoundDecision = {
   canonical:null|{side:"UP"|"DOWN";probabilityUp:number;decisionAtMs:number;committedAtMs:number|null};
   earlyDecision?:EarlyDecision|null;
   timedDecision?:TimedState|null;
+  eventChallenger?:import("./event-lock").EventLockProjection|null;
   earlyPersistence?:{status:"DEVELOPING"|"SAVING"|"FAILED"|"SAVED";errorClass:string|null};
   opportunity?:OpportunityContext|null;
   componentHealth?:{priceFeed:"AVAILABLE"|"UNAVAILABLE";decisionService:"AVAILABLE"|"STALE"|"UNAVAILABLE";

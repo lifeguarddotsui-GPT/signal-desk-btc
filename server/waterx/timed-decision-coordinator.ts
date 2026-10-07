@@ -15,6 +15,8 @@ import {crossIntervalContext,type IntervalObservation} from "../../shared/early-
 import {refreshEarlyShadowModels,earlyShadowStatus} from "./early-shadow-runtime";
 import {researchPool} from "./research-store";
 import {gateResearchHealth,recoverGateResearch} from "./gate-research-queue";
+import {eventLockRuntime} from "./event-lock-runtime";
+import {decisionWriterAllowed} from "./decision-authority";
 const enqueuedAt=new WeakMap<TimedInput,number>();
 const persistenceFailures=new Map<string,number>();
 export type GateScheduler={schedule:(callback:()=>void,delayMs:number)=>()=>void};
@@ -41,11 +43,13 @@ const queue=createWaterxBackgroundQueue<TimedInput>(async input=>{
   }
 },(interval,error)=>console.error(`[waterx-${interval}m] timed decision storage failure: ${refreshErrorClass(error)}`));
 const enqueue=(input:TimedInput)=>{
+  if(!decisionWriterAllowed())return;
   const n=persistenceFailures.get(`${input.intervalMinutes}:${input.roundId}:${input.startMs}`)??0;
   input={...input,features:{...input.features,persistenceFailureCount:Math.max(n,Number(input.features?.persistenceFailureCount??0))}};
   enqueuedAt.set(input,performance.now());queue.enqueue(input);
 };
 export function observeTimedStrategy(input:TimedInput,scheduler:GateScheduler=realGateScheduler){
+   if(!decisionWriterAllowed())return;
    const acceptedAt=Date.now();
    const toObservation=(v:TimedInput):IntervalObservation=>{
      const cmp=v.features?.comparison as {price?:number;asOf?:string}|undefined;
@@ -92,6 +96,7 @@ export function observeTimedStrategy(input:TimedInput,scheduler:GateScheduler=re
  * It can only veto a gate; it carries no probabilities and never updates a
  * last-valid probability clock. Persistence records its explicit provenance. */
 export function timedSourceUnavailable(interval:5|15,atMs:number,reason:string){
+  if(decisionWriterAllowed())eventLockRuntime.unavailable(interval,atMs,reason);
   const entry=active.get(interval);
   if(!entry||atMs<entry.input.startMs||atMs>=entry.input.expiryMs)return;
   entry.input={...entry.input,probabilityUp:null,probabilityDown:null,receivedAtMs:atMs,
@@ -137,6 +142,7 @@ export async function recoverTimedSchedules(db=researchPool,now=Date.now()){
   lastRecoveryDurationMs=performance.now()-started;
 }
 export function startTimedRecovery(){
+  if(!decisionWriterAllowed())return;
   if(recoveryTimer)return;
   const tick=async()=>{
     if(recovering)return;recovering=true;
@@ -146,7 +152,8 @@ export function startTimedRecovery(){
         const phase=(at-input.startMs)%30000;return phase<2500||phase>27500;
       });
       if(nearGate)skippedRecoveryAtGate++;
-      else{await retryTimedAcknowledgements(researchPool);await recoverTimedSchedules();await recoverGateResearch();}
+      else{await retryTimedAcknowledgements(researchPool);await recoverTimedSchedules();await recoverGateResearch();
+        await eventLockRuntime.recover();}
     }
     catch(error){recoveryFailures++;console.error("[waterx-timed] durable schedule recovery failed",refreshErrorClass(error));}
     finally{recovering=false;}

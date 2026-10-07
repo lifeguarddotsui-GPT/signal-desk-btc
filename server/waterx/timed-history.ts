@@ -2,9 +2,10 @@ import {z} from "zod";
 import {researchPool} from "./research-store";
 import type {LockDb} from "./lock-store";
 import {TIMED_STRATEGY,PREVIOUS_TIMED_STRATEGY,LEGACY_TIMED_STRATEGY,type TimedDecision} from "../../shared/timed-decision";
+import {EVENT_LOCK_STRATEGY} from "../../shared/event-lock";
 export const timedHistoryQuery=z.object({
   interval:z.enum(["all","5","15"]).default("all"),
-  strategy:z.enum(["all",TIMED_STRATEGY,PREVIOUS_TIMED_STRATEGY,LEGACY_TIMED_STRATEGY]).default(TIMED_STRATEGY),
+  strategy:z.enum(["all",TIMED_STRATEGY,PREVIOUS_TIMED_STRATEGY,LEGACY_TIMED_STRATEGY,EVENT_LOCK_STRATEGY]).default(TIMED_STRATEGY),
   window:z.enum(["lifetime","24h","7d","20","50","100"]).default("lifetime"),
   limit:z.coerce.number().int().min(1).max(200).default(50),
 }).strict();

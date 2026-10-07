@@ -88,7 +88,7 @@ test("SYNTHETIC isolated end-to-end parser â†’ production ingestion/scheduler â†
           beforeCommit=live();
           assert(!/class="desk-state-tag[^"]*" role="status">LOCKED/.test(markup(beforeCommit)));
           assert.match(markup(beforeCommit),/>SAVING</);
-          const outside=(await db.query("SELECT count(*)::int AS n FROM waterx_timed_decisions WHERE round_id=$1",
+          const outside=(await db.query("SELECT count(*)::int AS n FROM waterx_timed_decisions WHERE round_id=$1 AND strategy_version='waterx-qualification-gates-v3'",
             [current.round.id])).rows[0].n;
           assert.equal(outside,0,"Uncommitted choice is invisible to an independent DB connection");
         }

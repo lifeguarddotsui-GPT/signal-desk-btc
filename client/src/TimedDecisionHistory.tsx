@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import type { GateJournal, TimedDecision } from "../../shared/timed-decision";
 
 type Interval = "all" | 5 | 15;
-type Strategy = "all" | "waterx-qualification-gates-v3" | "waterx-early-baseline-v2" | "waterx-timed-baseline-v1";
+type Strategy = "all" | "waterx-qualification-gates-v3" | "waterx-early-baseline-v2" | "waterx-timed-baseline-v1" | "waterx-event-lock-v1";
 type CohortWindow = "lifetime" | "24h" | "7d" | "20" | "50" | "100";
 type ResultStatus = "CORRECT" | "INCORRECT" | "PENDING" | "DISPUTED" | "NO_VALID_INPUT" | "MISSED_DEADLINE" | "ABSTENTION" | "DATA_FAILURE";
 type HistoryEntry = TimedDecision & { result?: ResultStatus; verifiedOutcome?: "UP" | "DOWN" | null; operationalReasons?: string[] };
@@ -236,7 +236,7 @@ export default function TimedDecisionHistory() {
     </div>
     <div className="timed-history-filters">
       <label>Strategy<select value={strategy} onChange={event => setStrategy(event.target.value as Strategy)}>
-      <option value="all">All strategies</option><option value="waterx-qualification-gates-v3">waterx-qualification-gates-v3</option><option value="waterx-early-baseline-v2">waterx-early-baseline-v2</option><option value="waterx-timed-baseline-v1">waterx-timed-baseline-v1 · legacy</option>
+      <option value="all">All strategies</option><option value="waterx-qualification-gates-v3">waterx-qualification-gates-v3 · active 30-second benchmark</option><option value="waterx-event-lock-v1">waterx-event-lock-v1 · shadow challenger</option><option value="waterx-early-baseline-v2">waterx-early-baseline-v2</option><option value="waterx-timed-baseline-v1">waterx-timed-baseline-v1 · legacy</option>
       </select></label>
       <label>Cohort<select value={window} onChange={event => setWindow(event.target.value as CohortWindow)}>
         <option value="lifetime">Lifetime</option><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option><option value="20">Last 20</option><option value="50">Last 50</option><option value="100">Last 100</option>

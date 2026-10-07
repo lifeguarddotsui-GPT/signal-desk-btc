@@ -7,6 +7,7 @@ import { currentBaselineChoice, currentChampionForecast, currentLockReadiness, c
 import { ManualOpportunity } from "./ManualOpportunity";
 import { projectExactRoundDecision, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
 import { useLiveSnapshot } from "./useLiveSnapshot";
+import { EventChallengerPanel } from "./EventChallengerPanel";
 
 type Interval = 5 | 15;
 type Props = { agentStatus?: string | null };
@@ -116,6 +117,7 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
     <details className="agent-benchmarks">
       <summary>Canonical, champion &amp; readiness benchmarks · separate research references</summary>
       <div className="agent-round-evidence">
+      <EventChallengerPanel projection={timedEnvelope?.decision?.eventChallenger ?? null} round={timedRound} now={timedNow} />
       <article className={`agent-round-evidence-card${choice ? " current" : ""}`}>
         <span className="agent-kicker">IMMUTABLE CANONICAL CHOICE</span>
         <h3>WaterX Market Baseline</h3>

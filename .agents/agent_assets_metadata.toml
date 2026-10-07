@@ -770,3 +770,17 @@ mtime_ms = 1791328773525
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/b4a5f975-beeb-49d4-956a-200ec6be2db6/7640f65f-6c4d-48be-b73b-d362e843d4cf"
 storage_version_token = "1791328821064734"
 content_type = "text/html"
+
+[[outputs]]
+id = "Cme2zVyAoBT6NAv6BPhw1"
+uri = "file://reports/event-lock/release-evidence.html"
+type = "html"
+title = "Bluewater event-lock release evidence"
+description = "Failure breakdown, controlled latency, live-development matched comparison, training deficits, six-state UI captures and exact candidate/baseline identities. Not production or trading acceptance."
+logical_id = "6347fdab-953a-4804-b4f9-610761ef0a23"
+content_hash = "sha256:8990e420baeb29cc8ef4096a03aab3ff2605b088b584413a1882ae69b5748f25"
+size = 1021196
+mtime_ms = 1791383792784
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/6347fdab-953a-4804-b4f9-610761ef0a23/ffb3c5b7-e975-4053-848c-4bda227c8536"
+storage_version_token = "1791383794024236"
+content_type = "text/html"

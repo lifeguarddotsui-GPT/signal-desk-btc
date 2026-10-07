@@ -1,4 +1,5 @@
 import {scoredTimedHistory,timedHistoryQuery} from "./waterx/timed-history";
+import {eventLockReport} from "./waterx/event-lock-report";
 import {gateHistory,gateHistoryQuery} from "./waterx/gate-history";
 import {earlyLearningReport} from "./waterx/early-training";
 import {usdcFundingPreview} from "./agent/funding-preview";
@@ -203,6 +204,12 @@ export function registerRoutes(app: Express) {
     if(!parsed.success){res.status(400).json({error:"Invalid timed-history filters"});return;}
     try{res.set("Cache-Control","no-store").json(await scoredTimedHistory(parsed.data));}
     catch{res.status(503).json({error:"Timed strategy history unavailable; no outcome is fabricated."});}
+  });
+  app.get("/api/waterx/event-lock",async(req,res)=>{
+    const parsed=z.object({interval:z.enum(["5","15"]).default("5")}).strict().safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid event-lock interval"});return;}
+    try{res.set("Cache-Control","no-store").json(await eventLockReport(Number(parsed.data.interval) as 5|15));}
+    catch{res.status(503).json({error:"Event-lock research evidence unavailable; no comparison fabricated."});}
   });
   app.get("/api/waterx/gates",async(req,res)=>{
     const parsed=gateHistoryQuery.safeParse(req.query);

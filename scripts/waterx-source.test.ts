@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {stopTimedStrategy} from "../server/waterx/timed-decision-coordinator";
+import {eventLockRuntime} from "../server/waterx/event-lock-runtime";
+import {timedPool} from "../server/waterx/timed-db";
+import {researchPool} from "../server/waterx/research-store";
+import {lockPool} from "../server/waterx/lock-store";
 import {
   classifyWaterxRound, getCurrentWaterxRound, parseWaterxResponse, verifiedHistoricalRound, WaterxProviderError,
 } from "../server/waterx/source";
 import {
   buildWaterxLivePayload, isNewerWaterxObservation,
 } from "../server/waterx/service";
+test.after(async()=>{
+  stopTimedStrategy();await eventLockRuntime.idle();
+  await Promise.all([timedPool.end(),researchPool.end(),lockPool.end()]);
+});
 
 const start = 1_800_000_000;
 const marketFixture = (options: {

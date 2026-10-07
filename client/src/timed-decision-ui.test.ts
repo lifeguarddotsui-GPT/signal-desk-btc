@@ -152,7 +152,8 @@ test("a fresh lean updates continuously while the next qualification gate remain
   for (const interval of [5, 15] as const) {
     const state = gateTimed(interval, 45_000);
     const html = renderDesk(roundDecision(interval, state));
-    assert.match(html, /Next gate<\/span><strong>00:15/);
+    assert.match(html, /30-second benchmark countdown/);
+    assert.match(html, /00:15 · scheduled benchmark evaluation only; not a challenger lock deadline/);
     assert.match(html, /LEANING UP/);
     assert.match(html, /WaterX market/);
     assert.doesNotMatch(html, /MANDATORY DECISION|HARD DEADLINE|readinessPercent|02:20 \/ 05:00/);

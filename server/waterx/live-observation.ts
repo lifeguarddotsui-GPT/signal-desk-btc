@@ -4,6 +4,8 @@ import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {observeTimedStrategy,type GateScheduler} from "./timed-decision-coordinator";
 import type {TimedInput} from "./timed-decision-store";
 import type {WaterxRound} from "./types";
+import {eventLockRuntime} from "./event-lock-runtime";
+import {decisionWriterAllowed,decisionClockDomain} from "./decision-authority";
 
 /** The production ingestion boundary, also used by isolated provider replays.
  * Publishes continuous market evidence before optional storage/research work.
@@ -27,10 +29,17 @@ export function acceptLiveTimedObservation(input:TimedInput,round:WaterxRound,
   if(input.probabilityUp!==null&&input.probabilityDown!==null)roundDecisions.observe(input,{
     atMs:Date.parse(input.observedAt),receivedAtMs,providerSourceAtMs:null,
     probabilityUp:input.probabilityUp,probabilityDown:input.probabilityDown,sourceHealthy:true});
-  observeTimedStrategy({...input,features:{...input.features,
+  const accepted={...input,features:{...input.features,decisionClockDomain,
+    reference:round.anchorPrice,
     referenceQuality:round.anchorPriceConfirmed?"confirmed":"provisional",
     purchaseUp:{status:round.sides.up.availability,askCents:round.sides.up.oddsCents},
     purchaseDown:{status:round.sides.down.availability,askCents:round.sides.down.oddsCents},
     comparison,executableQuote:null,settlementRule:"UNVERIFIED_COMPARISON_IS_NOT_SETTLEMENT",
-    marketId:round.marketId,providerUrl:`https://waterx.app/en/predict/market/crypto/${round.slug}/${round.endsAt}`}},scheduler);
+    marketId:round.marketId,providerUrl:`https://waterx.app/en/predict/market/crypto/${round.slug}/${round.endsAt}`}};
+  if(decisionWriterAllowed()){
+    // Same accepted HTTP receipt, separately versioned research choices. The
+    // challenger never replaces the benchmark/active strategy or funds orders.
+    void eventLockRuntime.observe(accepted);
+    observeTimedStrategy(accepted,scheduler);
+  }
 }

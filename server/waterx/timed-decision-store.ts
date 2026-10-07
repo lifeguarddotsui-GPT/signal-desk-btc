@@ -10,6 +10,7 @@ import {journalTimedAcknowledgement,retryTimedAcknowledgements} from "./timed-ac
 import {recordEarlyDelivery} from "./early-delivery-metrics";
 import {digestEarlySnapshot,freezeEarlyHorizon} from "./early-horizons";
 import {enqueueGateResearch} from "./gate-research-queue";
+import {decisionWriterAllowed} from "./decision-authority";
 export type TimedInput=TimedRound&{receivedAtMs?:number;observedAt:string;probabilityUp:number|null;
  probabilityDown:number|null;discoveredAtMs?:number;anchorPrice?:number|null;anchorConfirmed?:boolean;features?:Record<string,unknown>};
 const values=(r:TimedRound)=>["sui:mainnet",TIMED_STRATEGY,r.intervalMinutes,r.roundId];
@@ -51,6 +52,7 @@ function finalRecord(input:TimedInput,gates:GateJournal[],now:number):TimedDecis
  * Accepted-at is an independent DB timestamp: queued later data cannot enter an earlier gate. */
 export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelected?:()=>void,
  onGate?:(gate:GateJournal)=>void){
+ if(!decisionWriterAllowed())return null;
  const received=input.receivedAtMs,now=Date.now();
  if(!Number.isSafeInteger(received)||received!<input.startMs||received!>=input.expiryMs||received!>now)
    throw new Error("Invalid timed source receipt");
@@ -174,6 +176,7 @@ export async function captureTimedDecision(input:TimedInput,db=timedPool,onSelec
    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[final.id,...values(input),final.decisionAtMs,final.status,JSON.stringify(final)]);
    await c.query("INSERT INTO waterx_timed_outbox(decision_id) VALUES($1)",[final.id]);saved=inserted=final;
  }
+ if(!decisionWriterAllowed()){await c.query("ROLLBACK");return null;}
  const commitAt=performance.now();await c.query("COMMIT");committed=true;
   recordEarlyDelivery(input.intervalMinutes,input.roundId,"DATABASE_TRANSACTION",performance.now()-transactionAt,"ok");
   transactionAt=null;phase="POSTCOMMIT";

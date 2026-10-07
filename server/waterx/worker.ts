@@ -12,6 +12,7 @@ import {
   type ResearchTrainingQueryable,
 } from "./research-training";
 import { startResearchMaintenance } from "./research-maintenance";
+import {setDecisionWorkerLease} from "./decision-authority";
 
 type WorkerDatabase = {
   query<T = unknown>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>;
@@ -62,6 +63,7 @@ export async function startWaterxWorker(
   const stop = (): Promise<void> => {
     if (stopPromise) return stopPromise;
     stopping = true;
+    setDecisionWorkerLease(false);
     if (heartbeat) unschedule(heartbeat);
     if (candidateSchedule) unschedule(candidateSchedule);
     if (researchSchedule) unschedule(researchSchedule);
@@ -105,6 +107,7 @@ export async function startWaterxWorker(
       throw new Error("Another WaterX collector worker holds the database lease.");
 
     leaseOwned = true;
+    setDecisionWorkerLease(true);
     stopPrice = options.startPriceCapture();
     stopWaterx = options.startWaterxCapture();
     heartbeat = schedule(() => {

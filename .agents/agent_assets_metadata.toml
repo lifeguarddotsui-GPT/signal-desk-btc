@@ -784,3 +784,17 @@ mtime_ms = 1791383792784
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/6347fdab-953a-4804-b4f9-610761ef0a23/ffb3c5b7-e975-4053-848c-4bda227c8536"
 storage_version_token = "1791383794024236"
 content_type = "text/html"
+
+[[outputs]]
+id = "q_9YqnaNvOoE8tsshiPIn"
+uri = "file://reports/value-update/delivery-evidence.html"
+type = "html"
+title = "Bluewater update — delivery evidence"
+description = "Self-contained report with published/candidate identities, matched 5m/15m comparisons, reconciled History totals, actual desktop/mobile screenshots, passing checks and explicit live-execution blockers."
+logical_id = "5170567e-0424-4734-b4e1-7116c3b40faa"
+content_hash = "sha256:b789670e7bd28345297cdcd3ef88e3567b676e0b46d6ad1ca3c5803b20172d6f"
+size = 645349
+mtime_ms = 1791388876361
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/5170567e-0424-4734-b4e1-7116c3b40faa/c78e5ed2-51f3-4356-b875-6f0732943dc0"
+storage_version_token = "1791388885579796"
+content_type = "text/html"

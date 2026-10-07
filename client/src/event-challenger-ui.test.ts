@@ -107,5 +107,5 @@ test("display choice leaves the 30-second benchmark active and never routes chal
   assert.match(agent, /useLiveSnapshot<LiveSnapshotEnvelope>/);
   const history = readFileSync(new URL("./TimedDecisionHistory.tsx", import.meta.url), "utf8");
   assert.match(history, /waterx-event-lock-v1">waterx-event-lock-v1 · shadow challenger/);
-  assert.match(history, /new URLSearchParams\(\{ interval: String\(interval\), strategy, window, limit: String\(limit\) \}\)/);
+  assert.match(history, /new URLSearchParams\(\{ interval: String\(interval\), strategy, window, deployment, limit: String\(limit\), timezoneOffsetMinutes:/);
 });

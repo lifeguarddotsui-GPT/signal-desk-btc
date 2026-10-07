@@ -24,3 +24,4 @@
 - [Signer control-plane isolation](signer-control-plane-isolation.md) — encrypted remote keys are not isolated if the public website can redeploy the signer.
 - [Development batch identity](development-batch-identity.md) — old compiled helpers can hide source repairs; verify worker identity and actual persisted report fields.
 - [Isolated release validation](isolated-release-validation.md) — passing ordinary tests can hide skipped auth/research regressions; run complete isolated database suites before release claims.
+- [Value-aware opportunity](value-aware-opportunity.md) — $5 returning $6–$7 is a configurable pre-cost preference, not a promise or $7 maximum.

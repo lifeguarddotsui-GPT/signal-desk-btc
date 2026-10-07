@@ -78,7 +78,7 @@ const metric = (value: number | null, digits = 1) =>
 const readable = (value: string | null | undefined) => value?.trim() || "Not recorded";
 const shortRound = (id: string) => id.length > 34 ? `${id.slice(0, 18)}…${id.slice(-10)}` : id;
 
-function CanonicalHistory() {
+export function LegacyCanonicalHistory() {
   const [interval, setInterval] = useState<IntervalFilter>("all");
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("lifetime");
   const [source, setSource] = useState<SourceFilter>("baseline");
@@ -254,4 +254,18 @@ function CanonicalHistory() {
   </main>;
 }
 
-export default CanonicalHistory;
+export default function CanonicalHistory(){
+  const [archiveOpen,setArchiveOpen]=useState(false);
+  return <main className="canonical-history">
+    <header className="history-heading"><div>
+      <div className="history-eyebrow">BLUEWATERAI / IMMUTABLE RESEARCH RECORD</div>
+      <h1>Round history</h1>
+      <p>Compare frozen choices with verified outcomes. Entry estimates are not fills or trading profit.</p>
+    </div></header>
+    <TimedDecisionHistory/>
+    <details className="history-old-benchmarks" onToggle={event=>setArchiveOpen(event.currentTarget.open)}>
+      <summary>Legacy checkpoint archive · separate cohorts</summary>
+      {archiveOpen&&<LegacyCanonicalHistory/>}
+    </details>
+  </main>;
+}

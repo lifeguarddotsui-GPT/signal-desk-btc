@@ -8,6 +8,7 @@ import {digestEarlySnapshot} from "./early-horizons";
 import {researchPool} from "./research-store";
 import type {LockDb} from "./lock-store";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
+import {economicTrainingReadiness} from "./event-value-evidence";
 
 export const EVENT_TRAINING_PROTOCOL="event-whole-trajectory-4way-next-opportunity-v1";
 export const EVENT_FEATURE_NAMES=["market_logit","elapsed_fraction","persistence_fraction","range_scaled",
@@ -94,7 +95,7 @@ export function trainEventStopping(trajectories:EventTrajectory[],interval:5|15,
   const counts=Object.fromEntries(Object.entries(groups).map(([k,v])=>[k,v.length]));
   const deficits=Object.fromEntries(Object.entries(groups).map(([k,v])=>[k,{
     requiredRounds:60,missingRounds:Math.max(0,60-v.length),bothOutcomes:bothClasses(v)}]));
-  const fingerprint=digestEarlySnapshot({protocol:EVENT_TRAINING_PROTOCOL,excluded,
+  const fingerprint=digestEarlySnapshot({protocol:EVENT_TRAINING_PROTOCOL,economicReadinessVersion:"event-value-whole-trajectory-readiness-v1",excluded,
     discoveredRounds:trajectories.filter(r=>r.intervalMinutes===interval).length,
     trajectories:unique.map(r=>({...r,partition:eventPartition(r,now)}))});
   const base={strategyVersion:EVENT_LOCK_STRATEGY,protocol:EVENT_TRAINING_PROTOCOL,featureVersion:EVENT_FEATURE_VERSION,
@@ -204,7 +205,7 @@ export async function runEventTrainingDay(interval:5|15,now=Date.now()){
     await c.query(`INSERT INTO waterx_early_training_jobs(id,day,interval_minutes,strategy_version,started_at_ms,
       dataset_cutoff_ms,status,attempt) VALUES($1,$2,$3,$4,$5,$5,'RUNNING',$6)`,
       [id,day,interval,EVENT_LOCK_STRATEGY,now,attempt]);
-    const report=trainEventStopping(trajectories,interval,now);
+    const report={...trainEventStopping(trajectories,interval,now),economicReadiness:economicTrainingReadiness(trajectories,interval,now)};
     if(old?.report?.datasetFingerprint===report.datasetFingerprint&&old.status!=="FAILED"){
       await c.query("DELETE FROM waterx_early_training_jobs WHERE id=$1 AND status='RUNNING'",[id]);
       return old.report;

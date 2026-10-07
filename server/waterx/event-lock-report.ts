@@ -5,6 +5,7 @@ import {researchPool} from "./research-store";
 import {forecastMetrics} from "./event-report-metrics";
 import type {LockDb} from "./lock-store";
 import {earlyDeliveryMetrics} from "./early-delivery-metrics";
+import {compareEntryEconomics} from "./event-value-evidence";
 export async function eventLockReport(interval:5|15,now=Date.now(),db:LockDb=researchPool){
   const rows=await db.query(`WITH launch AS (
     SELECT min(r.start_ms) AS at FROM waterx_timed_rounds r WHERE r.strategy_version=$1 AND r.interval_minutes=$3
@@ -61,6 +62,12 @@ export async function eventLockReport(interval:5|15,now=Date.now(),db:LockDb=res
     [EVENT_LOCK_STRATEGY,interval]);
   return {strategyVersion:EVENT_LOCK_STRATEGY,benchmarkVersion:TIMED_STRATEGY,interval,asOfMs:now,
     shadowOnly:true,activePolicy:"RETAIN_30_SECOND_BENCHMARK",promotion:"NOT_AUTHORIZED",
+    rollout:{authoritative:false,blockers:["Adequate prospective matched comparison on both intervals",
+      "Independent production collector and single-writer recovery proof","Production acquisition/persistence reliability",
+      "Verified current backup restored in isolation before production collector changes",
+      "Owner approval of recurring hosting/database costs before activation"],
+      valuePolicy:"DIAGNOSTIC_ONLY_NOT_PROMOTED",qualificationChanged:false},
+    entryEconomics:compareEntryEconomics(facts.map(r=>({event:r.event,benchmark:r.benchmark,verified:r.verified}))),
     clockSemantics:"Seconds gained only when both decisions carry the same application-process clock domain. Provider tick time and unmeasured UI latency remain unknown.",
     prospective:{cohortN:facts.length,matchedN:usable.length,event:summary("event"),benchmark:summary("benchmark"),
       matchedEvent:forecastMetrics(usable.map(r=>({probability:r.event!.probabilityUp!,outcome:String(r.outcome).toUpperCase()}))),

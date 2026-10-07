@@ -268,7 +268,11 @@ test("exact round and selected interval are required to show a current lean", ()
 
 test("history renders both intervals and repeats the exact authoritative desk decision ID", () => {
   for (const interval of [5, 15] as const) {
-    const record = savedRecord(interval);
+    const record = {
+      ...savedRecord(interval),
+      entryEconomics: { kind: "INDICATIVE" as const, collateralUsd: 5, totalReturnedIfCorrectUsd: 6.3, netProfitIfCorrectUsd: 1.3, expectedNetUsd: null, reason: "Public ask only; not an executable quote" },
+      deploymentId: "build-current-7",
+    };
     const state = timed(interval, interval === 5 ? 140_000 : 320_000, "EVALUATING");
     state.saved = record;
     state.persistence = "COMMITTED";
@@ -276,9 +280,13 @@ test("history renders both intervals and repeats the exact authoritative desk de
     const rows = renderToStaticMarkup(React.createElement(TimedDecisionHistoryRecords, { interval, data: history(interval, record) }));
     assert.doesNotMatch(desk, new RegExp(record.id));
     assert.match(rows, new RegExp(record.id));
-    assert.match(rows, /Early strategy records/);
-    assert.match(rows, /DOWN locked/);
+    assert.match(rows, /Timed strategy records/);
+    assert.match(rows, /DOWN/);
     assert.match(rows, /Correctness is not trading P\/L/);
+    assert.match(rows, /Indicative/);
+    assert.match(rows, /\$6\.30/);
+    assert.match(rows, /build-current-7/);
+    assert.match(rows, /no calibrated probability reported/);
   }
 });
 
@@ -291,29 +299,32 @@ test("history scorecard distinguishes correctness from delivery and uses cohort 
       n: 42, onTimeLocks: 31, deadlineLocks: 8, missed: 3, noValidInput: 1, settledN: 28,
       correct: 17, incorrect: 11, pending: 9, disputed: 2, hitRate: 17 / 28,
       ratio: "17:11", choiceCoverage: 39 / 42, onTimeCoverage: 31 / 42, medianElapsedMs: 58_000,
-      deadlineMisses: 4, operationalFailures: 6, operationalCoverage: .86,
+      cohortN: 42, locks: 39, dataFailures: 6, missingRecords: 2, dataFailureRate: 6 / 42,
+      missingRecordRate: null, p90ElapsedMs: 91_000, expectedCohortN: null,
+      expectedCohortStatus: "NOT_INDEPENDENTLY_VERIFIED",
+      topLevelOutcomes: { CORRECT: 17, INCORRECT: 11, PENDING: 9, DISPUTED: 2, DATA_FAILURE: 3, MISSING_RECORD: 2 },
     },
   };
   const markup = renderToStaticMarkup(React.createElement(TimedDecisionHistoryRecords, { interval: 5, data }));
-  assert.match(markup, /Correct prediction · late operational miss/);
+  assert.match(markup, /Correct prediction · late operational delivery/);
   assert.match(markup, /verified outcome/i);
   assert.match(markup, /CORRECT/);
   assert.match(markup, /60\.7%/);
-  assert.match(markup, /17:11/);
+  assert.match(markup, /39 \/ 42/);
+  assert.match(markup, /6 \/ 42/);
+  assert.match(markup, /91\.0 sec/);
   assert.match(markup, /42/);
   assert.match(markup, /Correctness is not trading P\/L/);
-  assert.match(markup, /Missed deadlines \/ late locks/);
-  assert.match(markup, /Operational failures<\/span><b>6/);
-  assert.match(markup, /Operational coverage<\/span><b>86\.0%/);
-  assert.match(markup, /DATA_FAILURE is an operational failure, not a missed deadline/);
+  assert.match(markup, /Top-level outcome totals are mutually exclusive/);
+  assert.match(markup, /expected slots: not independently verified/);
+  assert.match(markup, /Top-level outcome totals are mutually exclusive/);
 });
 
 test("older history reports label legacy missed as operational failures, not guessed deadline misses", () => {
   const data = history(5, savedRecord(5));
   const markup = renderToStaticMarkup(React.createElement(TimedDecisionHistoryRecords, { interval: 5, data }));
-  assert.match(markup, /Deadline misses · not reported/);
-  assert.match(markup, /Operational failures · legacy missed<\/span><b>0/);
-  assert.match(markup, /shown here as operational failures rather than inferred deadline misses/);
+  assert.match(markup, /MISSING RECORD/);
+  assert.match(markup, /Not reported/);
   const source = readFileSync(new URL("./TimedDecisionHistory.tsx", import.meta.url), "utf8");
   assert.match(source, /useState<Strategy>\("waterx-qualification-gates-v3"\)/);
 });
@@ -338,7 +349,7 @@ test("history separates source, qualification, scheduler and persistence operati
   }));
   for (const reason of ["Source unavailable", "No qualified signal", "Scheduler missed gate", "Persistence failure",
     "Gate source unavailable", "Gate no qualified signal", "Gate scheduler missed"]) assert.match(markup, new RegExp(reason));
-  assert.match(markup, /Operational reasons<\/span><b>source-unavailable · persistence-failure/);
+  assert.match(markup, /Operational reasons · overlapping<\/span><b>source-unavailable · persistence-failure/);
   assert.match(markup, /<span>Persistence failure<\/span><b>4/);
 });
 
@@ -353,8 +364,10 @@ test("Agent uses the same ManualOpportunity and corrected server clock; history 
   assert.match(historyPage, /<TimedDecisionHistory \/>/);
   assert.match(historyPage, /<TimedStrategyHistory interval=/);
   assert.match(historyPage, /Full gate audit and historical strategy filters/);
-  assert.match(historyComponent, /timed-history\?\$\{query\}/);
-  assert.match(historyComponent, /new URLSearchParams\(\{ interval: String\(interval\), strategy, window, limit: String\(limit\) \}\)/);
+  assert.match(historyPage,/export default function CanonicalHistory\(\)[\s\S]*<TimedDecisionHistory\/>/);
+  assert.match(historyPage,/archiveOpen&&<LegacyCanonicalHistory\/>/);
+  assert.match(historyComponent, /timed-history\?\$\{params\}/);
+  assert.match(historyComponent, /new URLSearchParams\(\{ interval: String\(interval\), strategy, window, deployment, limit: String\(limit\), timezoneOffsetMinutes:/);
   assert.match(historyComponent, /correct\?: number/);
   assert.match(historyComponent, /CORRECT.*INCORRECT.*PENDING.*DISPUTED/s);
   assert.match(historyComponent, /credentials: "include"/);
@@ -438,10 +451,8 @@ test("gate history displays intentional abstention and keeps gate journals separ
         abstentionRate: 1, operationalFailureRate: 0 },
     },
   }));
-  assert.match(markup, /Abstained · no qualified signal/);
-  assert.match(markup, /Abstention rate/);
-  assert.match(markup, /Operational failure rate/);
-  assert.match(markup, /Scored sample count<\/span><b>0/);
-  assert.match(markup, /Intentional abstention · excluded from prediction scoring/);
+  assert.match(markup, /Abstained/);
+  assert.match(markup, /Accuracy · scored n=—/);
+  assert.match(markup, /Intentional abstention · excluded from accuracy/);
   assert.doesNotMatch(markup, /Operationally late/);
 });

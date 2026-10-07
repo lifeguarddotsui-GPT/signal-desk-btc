@@ -1,16 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Check, Clock3, LockKeyhole, Pause, RefreshCw, Shield, ShieldCheck, Wallet, X } from "lucide-react";
+import { AlertTriangle, Check, LockKeyhole, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { getWallets, type WalletAccount } from "@mysten/wallet-standard";
 import { agentPolicySchema, defaultAgentPolicy, policySummary, type AgentPolicy } from "../../shared/agent-policy";
-import { agentDate, asErrorMessage, changePolicyLimitMode, copyPolicy, paperCapitalFromInput, policyAmountInputValue, policyValueFromInput } from "./agent-format";
+import { agentDate, asErrorMessage, changePolicyLimitMode, copyPolicy, policyAmountInputValue, policyValueFromInput } from "./agent-format";
 import AgentCurrentRound from "./AgentCurrentRound";
-import AgentFundingPreview from "./AgentFundingPreview";
 import GuidedAgentSetup from "./GuidedAgentSetup";
+import { dollarsToAtomicAmount, signReviewedOwnerTransaction } from "./owner-wallet-signing";
 
 type Paper = { startingCents: number; availableCents: number; committedCents: number; turnoverCents: number; realizedPnlCents: number; highWaterCents: number; consecutiveLosses: number; targetCents: number | null; startedAt: number | null };
 type LedgerItem = { id: string; event: string; at: number | string; details: unknown };
 type AgentState = { owner: string; policy: AgentPolicy; policyVersion: number; status: "PAUSED" | "SHADOW" | "LOSS_STOP" | "TARGET_REACHED"; accountId: string | null; delegateAddress: string | null; delegateExpiresAtMs: number | null; paper: Paper | null; ledger: LedgerItem[]; summary: string[]; blockers: string[]; balances: unknown; walletSessionExpiresAtMs?: number | null };
-type Capabilities = { developmentOnly: boolean; sdkVersion: string; network: "mainnet"; globalExecutionDisabled: boolean; mainnetEnabled: boolean; blockers: string[]; defaultPolicy: AgentPolicy; capabilities?: { shadow?: boolean; arming?: boolean; execution?: boolean; betaAuthorization?: boolean }; permissions: { prediction: number; account: number }; config: { status: "VERIFIED_IDENTITY_ONLY" | "UNAVAILABLE" | string; reason: string; decimals?: number; marketSemanticsVerified?: false; settlements?: unknown; packages?: unknown } };
+type Capabilities = { developmentOnly: boolean; sdkVersion: string; network: "mainnet"; globalExecutionDisabled: boolean; mainnetEnabled: boolean; blockers: string[]; defaultPolicy: AgentPolicy; ownerSetupSigning?: boolean; readiness?: { released: boolean; items: { id: string; label: string; status: "IMPLEMENTED" | "UNVERIFIED" | "BLOCKED" | string; evidence?: string; nextAction?: string }[]; blocker?: string | null; nextAction?: string | null }; capabilities?: { shadow?: boolean; arming?: boolean; execution?: boolean; betaAuthorization?: boolean }; permissions: { prediction: number; account: number }; config: { status: "VERIFIED_IDENTITY_ONLY" | "UNAVAILABLE" | string; reason: string; decimals?: number; marketSemanticsVerified?: false; settlements?: unknown; packages?: unknown } };
 type OwnerTransaction = { transaction: string; description: string; network: "mainnet"; permissions: { account: number; prediction: number } };
 type WalletLike = { name: string; icon?: string; chains?: string[]; features?: Record<string, { connect?: () => Promise<{ accounts?: WalletAccount[] }>; signPersonalMessage?: (input: { message: Uint8Array; account: WalletAccount; chain?: string }) => Promise<{ signature: string; bytes?: string }> } | undefined>; accounts?: WalletAccount[] };
 type WalletIdentity = { address: string; wallet: WalletLike | null; account: WalletAccount | null; generation: number };
@@ -45,6 +45,14 @@ const eligibleWallet = (wallet: WalletLike) => {
 };
 const shortAddress = (address: string) => address.length > 18 ? `${address.slice(0, 8)}…${address.slice(-6)}` : address;
 const centsFrom = (value: string) => Math.round(Number(value || 0) * 100);
+const PENDING_OWNER_APPROVAL_KEY = "bluewater:pending-owner-approval";
+const readPendingOwnerApproval = () => {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(PENDING_OWNER_APPROVAL_KEY) ?? "null") as { digest?: string; owner?: string; action?: string } | null;
+    return value && typeof value.owner === "string" && typeof value.action === "string" ? value : null;
+  } catch { return null; }
+};
 function Field({ label, help, children }: { label: string; help?: string; children: ReactNode }) {
   return <label className="agent-field"><span>{label}</span>{children}{help && <small>{help}</small>}</label>;
 }
@@ -80,10 +88,7 @@ function AgentPage() {
   const [zeroReserveAck, setZeroReserveAck] = useState(false);
   const [fundingAmount, setFundingAmount] = useState("");
   const [usdcFundingAmount, setUsdcFundingAmount] = useState("");
-  const [redeemAmount, setRedeemAmount] = useState("");
-  const [redeemMinimum, setRedeemMinimum] = useState("");
   const [coinIds, setCoinIds] = useState("");
-  const [paperCapital, setPaperCapital] = useState("");
   const [settlementInfo, setSettlementInfo] = useState<{ coinType: string; network: string; decimals?: number; conversionAvailable?: boolean; collateral?: string } | null>(null);
   const [pendingTx, setPendingTx] = useState<OwnerTransaction | null>(null);
   const [pendingAction, setPendingAction] = useState("");
@@ -96,10 +101,16 @@ function AgentPage() {
   const [walletRecovery, setWalletRecovery] = useState("");
   const [pendingActionType, setPendingActionType] = useState("");
   const [accounts, setAccounts] = useState<{ accountId: string }[]>([]);
+  const [uncertainDigest, setUncertainDigest] = useState(() => readPendingOwnerApproval()?.digest ?? "");
+  const [uncertainOwner, setUncertainOwner] = useState(() => readPendingOwnerApproval()?.owner ?? "");
+  const [uncertainAction, setUncertainAction] = useState(() => readPendingOwnerApproval()?.action ?? "");
+  const [ownerSubmissionPending, setOwnerSubmissionPending] = useState(() => readPendingOwnerApproval() != null);
   const [lastUpdated, setLastUpdated] = useState(0);
   const requestSeq = useRef(0);
+  const capabilitySeq = useRef(0);
   const accountRef = useRef("");
   const sessionGeneration = useRef(0);
+  const pendingGeneration = useRef<number | null>(null);
   const identityRef = useRef<WalletIdentity>({ address: "", wallet: null, account: null, generation: 0 });
   const stateRef = useRef<AgentState | null>(null);
   const dirtyPolicyRef = useRef(false);
@@ -152,7 +163,6 @@ function AgentPage() {
 
   useEffect(() => {
     let active = true;
-    request<Capabilities>("/capabilities").then(data => { if (active) { setCapabilities(data); setPolicyDraft(completePolicy(data.defaultPolicy)); } }).catch(error => { if (active) setPageError(asErrorMessage(error, "Agent capabilities are unavailable.")); });
     const registered = getWallets();
     const updateWallets = () => {
       const all = (registered.get() as unknown as WalletLike[]).filter(eligibleWallet);
@@ -163,6 +173,19 @@ function AgentPage() {
     const unsubscribe = typeof registryOn === "function" ? registryOn.call(registered, "register", updateWallets) : undefined;
     return () => { active = false; unsubscribe?.(); };
   }, []);
+
+  useEffect(() => {
+    const seq = ++capabilitySeq.current;
+    let active = true;
+    request<Capabilities>("/capabilities").then(data => {
+      if (!active || seq !== capabilitySeq.current) return;
+      setCapabilities(data);
+      if (!dirtyPolicyRef.current) setPolicyDraft(completePolicy(data.defaultPolicy));
+    }).catch(error => {
+      if (active && seq === capabilitySeq.current) setPageError(asErrorMessage(error, "Agent capabilities are unavailable."));
+    });
+    return () => { active = false; };
+  }, [isAuthorized]);
 
   useEffect(() => {
     if (!isAuthorized) return;
@@ -182,6 +205,11 @@ function AgentPage() {
     setPolicyDraft(completePolicy(capabilities?.defaultPolicy ?? defaultAgentPolicy));
     setDirtyPolicy(false);
     setPendingTx(null);
+    if (!ownerSubmissionPending) {
+      setUncertainDigest("");
+      setUncertainOwner("");
+      setUncertainAction("");
+    }
     setOwnerPayload(null);
     setSimulation(null);
     setOwnerChoice(false);
@@ -195,16 +223,15 @@ function AgentPage() {
     setLastUpdated(0);
     setFundingAmount("");
     setUsdcFundingAmount("");
-    setRedeemAmount("");
-    setRedeemMinimum("");
     setCoinIds("");
-    setPaperCapital("");
+    setCoinIds("");
     setNotice("");
     setPageError("");
     accountRef.current = "";
+    pendingGeneration.current = null;
     identityRef.current = { address: "", wallet: null, account: null, generation };
     if (logout) await request("/logout", "POST", {}).catch(() => undefined);
-  }, [capabilities]);
+  }, [capabilities, ownerSubmissionPending]);
 
   useEffect(() => {
     const onUnauthorized = (event: Event) => {
@@ -357,29 +384,38 @@ function AgentPage() {
     catch (error) { setPageError(asErrorMessage(error)); }
     finally { setBusy(""); }
   };
-  const control = async (action: "PAUSE" | "ARM_SHADOW" | "STOP_GOAL") => {
-    const initialPaperCapital = action === "ARM_SHADOW" && !state?.paper ? paperCapitalFromInput(paperCapital) : null;
-    if (action === "ARM_SHADOW" && !state?.paper && initialPaperCapital == null) {
-      setPageError("Set a positive paper-ledger starting amount from $0.01 to $1,000,000. This initializes shadow simulation only and does not move funds.");
-      return;
-    }
+  const control = async (action: "PAUSE") => {
     setBusy(action); setPageError(""); setNotice("");
     try {
-      const result = await request<AgentState>("/control", "POST", { action, ...(action === "ARM_SHADOW" && !state?.paper ? { paperCapitalCents: initialPaperCapital } : {}), acknowledged: action !== "ARM_SHADOW" || ((policy.frequency !== "EVERY_ELIGIBLE_ROUND" || everyRoundAck) && (policy.edgeEnabled || edgeOffAck) && (policy.reserveCents !== 0 || zeroReserveAck)), ...(!policy.edgeEnabled ? { edgeOffConfirmed: edgeOffAck } : {}), ...(policy.reserveCents === 0 ? { zeroReserveConfirmed: zeroReserveAck } : {}) }, identityRef.current);
+      const result = await request<AgentState>("/control", "POST", { action }, identityRef.current);
       rememberSessionExpiry(result.walletSessionExpiresAtMs);
-       setState(result); setPolicyDraft(completePolicy(result.policy)); setNotice(action === "ARM_SHADOW" ? "Shadow observation request acknowledged by the service." : action === "PAUSE" ? "Persistent pause requested." : "Goal stop requested.");
-      if (action === "ARM_SHADOW") { setEveryRoundAck(false); setEdgeOffAck(false); setZeroReserveAck(false); }
+      setState(result); setPolicyDraft(completePolicy(result.policy)); setNotice("Persistent pause requested.");
     } catch (error) { setPageError(asErrorMessage(error)); }
     finally { setBusy(""); }
   };
   const beginOwnerAction = async (action: string, extra: Record<string, unknown> = {}) => {
     const identity = identityRef.current;
-    if (!identity.wallet || !identity.account || !isAuthorized || !state) return;
-    const payload: Record<string, unknown> = { action, ...(action !== "CREATE_ACCOUNT" && state.accountId ? { accountId: state.accountId } : {}), ...extra };
+    if (!identity.wallet || !identity.account || !isAuthorized || !state || ownerSubmissionPending ||
+      !identityStillCurrent(identity, identityRef.current) || capabilities?.ownerSetupSigning !== true) {
+      setPageError("Owner setup review requires a current authenticated owner identity and ownerSetupSigning=true from backend capabilities.");
+      return;
+    }
+    const payloadExtra = { ...extra };
+    const amountHuman = typeof payloadExtra.amountHuman === "string" ? payloadExtra.amountHuman : null;
+    delete payloadExtra.amountHuman;
+    if (amountHuman != null) {
+      const decimals = action === "FUND_USDC" ? 6 : settlementInfo?.decimals;
+      if (decimals == null) { setPageError("Settlement decimals were not reported; amount conversion is blocked."); return; }
+      const amountAtomic = dollarsToAtomicAmount(amountHuman, decimals);
+      if (!amountAtomic) { setPageError(`Enter a positive dollar amount with no more than ${decimals} decimal places.`); return; }
+      payloadExtra.amountAtomic = amountAtomic;
+    }
+    const payload: Record<string, unknown> = { action, ...(action !== "CREATE_ACCOUNT" && state.accountId ? { accountId: state.accountId } : {}), ...payloadExtra };
     setBusy("simulate"); setPageError(""); setNotice(""); setPendingTx(null); setOwnerChoice(false);
     try {
       const result = await request<{ success: boolean; checksEnabled: boolean; gasBudgetMist: number; network: string }>("/owner-simulation", "POST", payload, identity);
       if (!identityStillCurrent(identity, identityRef.current)) return;
+      pendingGeneration.current = identity.generation;
       setOwnerPayload(payload);
       setSimulation(result);
       setPendingAction(action);
@@ -394,8 +430,10 @@ function AgentPage() {
     finally { setBusy(""); }
   };
   const prepareOwnerTransaction = async () => {
-    if (!ownerPayload || !simulation?.success || !simulation.checksEnabled || simulation.network !== "mainnet" || !ownerChoice) return;
     const identity = identityRef.current;
+    if (!ownerPayload || !simulation?.success || !simulation.checksEnabled || simulation.network !== "mainnet" ||
+      !ownerChoice || !isAuthorized || capabilities?.ownerSetupSigning !== true ||
+      ownerSubmissionPending || pendingGeneration.current !== identity.generation || !identityStillCurrent(identity, identityRef.current)) return;
     setBusy("prepare"); setPageError("");
     try {
       const response = await request<OwnerTransaction>("/owner-transaction", "POST", ownerPayload, identity);
@@ -405,6 +443,79 @@ function AgentPage() {
     } catch (error) { setPageError(asErrorMessage(error)); }
     finally { setBusy(""); }
   };
+  const confirmOwnerDigest = async (digest: string, action: string, identity: WalletIdentity) => {
+    if (!isAuthorized || !identityStillCurrent(identity, identityRef.current) || capabilities?.ownerSetupSigning !== true) {
+      setPageError("Owner confirmation is blocked because the authenticated wallet or verified setup-signing capability is no longer current.");
+      return;
+    }
+    setBusy("confirm"); setPageError("");
+    try {
+      await request("/owner-confirm", "POST", { digest, action }, identity);
+      setUncertainDigest(""); setUncertainOwner(""); setUncertainAction(""); setOwnerSubmissionPending(false);
+      window.sessionStorage.removeItem(PENDING_OWNER_APPROVAL_KEY);
+      setNotice("Owner transaction confirmed by the service. Refreshing owned account state.");
+      await loadState(true);
+      await accountOptions();
+    } catch (error) {
+      setUncertainDigest(digest); setUncertainOwner(identity.address); setUncertainAction(action);
+      setOwnerSubmissionPending(true);
+      window.sessionStorage.setItem(PENDING_OWNER_APPROVAL_KEY, JSON.stringify({ digest, owner: identity.address, action }));
+      setPageError(`Transaction digest retained; confirmation could not be verified. Retry confirmation only. ${asErrorMessage(error)}`);
+    } finally { setBusy(""); }
+  };
+  const approvePreparedOwnerTransaction = async () => {
+    const identity = identityRef.current;
+    if (!pendingTx || !pendingAction || !simulationPassed || !ownerChoice || !isAuthorized ||
+      capabilities?.ownerSetupSigning !== true || !identity.wallet || !identity.account ||
+      ownerSubmissionPending || pendingGeneration.current !== identity.generation ||
+      !identityStillCurrent(identity, identityRef.current)) {
+      setPageError("Explicit wallet approval is blocked until login, owner identity, ownerSetupSigning capability, simulation checks and review are all current.");
+      return;
+    }
+    setBusy("sign"); setPageError(""); setNotice("");
+    setOwnerSubmissionPending(true);
+    setUncertainOwner(identity.address);
+    setUncertainAction(pendingAction);
+    try {
+      window.sessionStorage.setItem(PENDING_OWNER_APPROVAL_KEY, JSON.stringify({ owner: identity.address, action: pendingAction }));
+      const isCurrent = () => identityStillCurrent(identity, identityRef.current) &&
+        identityRef.current.address.toLowerCase() === pendingOwner.toLowerCase();
+      const signed = await signReviewedOwnerTransaction({
+        wallet: identity.wallet as Parameters<typeof signReviewedOwnerTransaction>[0]["wallet"],
+        account: identity.account,
+        transaction: pendingTx.transaction,
+        action: pendingAction,
+        isCurrent,
+      });
+      setUncertainDigest(signed.digest); setUncertainOwner(identity.address); setUncertainAction(pendingAction);
+      window.sessionStorage.setItem(PENDING_OWNER_APPROVAL_KEY, JSON.stringify({ digest: signed.digest, owner: identity.address, action: pendingAction }));
+      if (!isCurrent()) {
+        setPageError("Owner identity changed after wallet approval. The returned digest is retained; reconnect as the same owner to retry confirmation only.");
+        return;
+      }
+      await confirmOwnerDigest(signed.digest, pendingAction, identity);
+    } catch (error) {
+      const message = asErrorMessage(error, "Owner wallet approval failed or was cancelled.");
+      const definitelyNotSubmitted = (error as {submissionState?:unknown})?.submissionState === "NOT_SUBMITTED";
+      if (definitelyNotSubmitted) {
+        setOwnerSubmissionPending(false);
+        setUncertainOwner(""); setUncertainAction("");
+        window.sessionStorage.removeItem(PENDING_OWNER_APPROVAL_KEY);
+      }
+      setPageError(!definitelyNotSubmitted
+        ? `${message} If wallet submission may have occurred, do not approve again; reconcile owner activity before continuing.`
+        : message);
+    } finally { setBusy(""); }
+  };
+  const retryOwnerConfirmation = async () => {
+    const identity = identityRef.current;
+    if (!uncertainDigest || uncertainOwner.toLowerCase() !== identity.address.toLowerCase() ||
+      !identityStillCurrent(identity, identityRef.current) || capabilities?.ownerSetupSigning !== true) {
+      setPageError("Confirmation retry requires the same current authenticated owner and verified setup-signing capability.");
+      return;
+    }
+    await confirmOwnerDigest(uncertainDigest, uncertainAction, identity);
+  };
   const accountOptions = async () => {
     setBusy("accounts");
     try { const result = await request<{ accounts: { accountId: string }[]; settlementCoinType: string; network: string; decimals?: number; conversionAvailable?: boolean; collateral?: string }>("/accounts", "POST", {}, identityRef.current); setAccounts(result.accounts); setSettlementInfo({ coinType: result.settlementCoinType, network: result.network, decimals: result.decimals, conversionAvailable: result.conversionAvailable, collateral: result.collateral }); setNotice(result.accounts.length ? `${result.accounts.length} agent account${result.accounts.length === 1 ? "" : "s"} returned. Select one below.` : "No agent accounts were returned."); }
@@ -413,7 +524,7 @@ function AgentPage() {
   };
   const setAccount = async (accountId: string) => {
     setBusy("account");
-    try { const result = await request<AgentState>("/account", "POST", { accountId }, identityRef.current); rememberSessionExpiry(result.walletSessionExpiresAtMs); setEveryRoundAck(false); setEdgeOffAck(false); setZeroReserveAck(false); setExperimentalConfirmed(false); setCompoundingConfirmed(false); setState(result); setPolicyDraft(completePolicy(result.policy)); setDirtyPolicy(false); setNotice("Agent account selected."); }
+    try { const result = await request<AgentState>("/account", "POST", { accountId }, identityRef.current); rememberSessionExpiry(result.walletSessionExpiresAtMs); setEveryRoundAck(false); setEdgeOffAck(false); setZeroReserveAck(false); setExperimentalConfirmed(false); setCompoundingConfirmed(false); setPendingTx(null); setPendingAction(""); setOwnerPayload(null); setSimulation(null); setOwnerChoice(false); pendingGeneration.current = null; setState(result); setPolicyDraft(completePolicy(result.policy)); setDirtyPolicy(false); setNotice("Owned account selected."); }
     catch (error) { setPageError(asErrorMessage(error)); }
     finally { setBusy(""); }
   };
@@ -421,17 +532,6 @@ function AgentPage() {
   const status = state?.status ?? "NOT LOADED";
   const accountId = state?.accountId;
   const simulationPassed = !!simulation?.success && simulation.checksEnabled && simulation.network === "mainnet";
-  const setupBlocker = !isAuthorized
-    ? "Connect the owner wallet on Sui mainnet."
-    : !cap
-      ? "Capability report unavailable; shadow arming and live permissions cannot be verified."
-      : cap.capabilities?.shadow !== true
-        ? "Shadow arming is disabled in this deployment; live execution remains separately unavailable."
-        : status === "SHADOW"
-          ? "Shadow session already active; pause new submissions and continue reconciliation before any restart."
-          : status === "LOSS_STOP" || status === "TARGET_REACHED"
-            ? "Paper goal is stopped; the service must close it before another shadow goal can start."
-            : "Live order adapter, signer, and effective permissions are not exposed as verified capabilities.";
   const technicalBlockers = Array.from(new Set([...(cap?.blockers ?? []), ...(state?.blockers ?? [])]));
   const capabilitySummary = [
     `Development only: ${cap ? String(cap.developmentOnly) : "not reported"}`,
@@ -439,15 +539,18 @@ function AgentPage() {
     `Global execution disabled: ${cap ? String(cap.globalExecutionDisabled) : "not reported"}`,
     `Account / prediction permissions: ${cap ? `${cap.permissions.account} / ${cap.permissions.prediction}` : "not reported"}`,
     `Configuration: ${cap?.config.status ?? "not reported"}${cap?.config.reason ? ` — ${cap.config.reason}` : ""}`,
-    "Order adapter, signer, reservation, simulation, and uncertain-submission recovery are not verified by this capability contract.",
+    `Owner setup signing: ${cap?.ownerSetupSigning === true ? "reported enabled" : "not verified"}`,
+    `Live readiness: ${cap?.readiness?.released === true ? "released by capability report" : "not released"}`,
   ];
   const retryCapabilities = () => {
     setBusy("capabilities");
+    const seq = ++capabilitySeq.current;
     request<Capabilities>("/capabilities").then(data => {
+      if (seq !== capabilitySeq.current) return;
       setCapabilities(data);
       if (!dirtyPolicyRef.current) setPolicyDraft(completePolicy(data.defaultPolicy));
       setPageError("");
-    }).catch(error => setPageError(asErrorMessage(error, "Agent capabilities are unavailable."))).finally(() => setBusy(""));
+    }).catch(error => { if (seq === capabilitySeq.current) setPageError(asErrorMessage(error, "Agent capabilities are unavailable.")); }).finally(() => { if (seq === capabilitySeq.current) setBusy(""); });
   };
 
   return <div className="page agent-page">
@@ -457,7 +560,7 @@ function AgentPage() {
     </header>
 
     <section className="agent-safety-strip">
-      <ShieldCheck size={19} /><div><strong>IDENTITY IS NOT AUTHORITY</strong><span>Wallet connection authenticates the owner only. This console never starts trading, signs, or funds automatically; balances, fills, and profit appear only if the service reports them.</span></div>
+      <ShieldCheck size={19} /><div><strong>IDENTITY IS NOT AUTHORITY</strong><span>Wallet connection authenticates the owner only. This console never starts trading or signs or funds automatically. An explicitly reviewed setup transaction remains a separate owner choice; balances, fills, and profit appear only if the service reports them.</span></div>
     </section>
 
     <div className="agent-overview">
@@ -465,10 +568,9 @@ function AgentPage() {
         <div className="agent-section-top"><span className="agent-kicker">CONTROL STATE</span><span className={`agent-status ${status.toLowerCase()}`}><i />{status.replace("_", " ")}</span></div>
         <div className="agent-status-main"><strong>{isAuthorized ? "OWNER SESSION · MAINNET IDENTITY" : "Owner session not connected"}</strong><p>{isAuthorized ? `Authenticated owner ${shortAddress(address)} · session expires ${agentDate(lastSessionExpiryMs)}. Identity does not create an execution permission.` : "The public console and current capabilities remain available. Connect to view owner-specific agent state."}</p></div>
         <div className="agent-actions">
-          <button className="agent-pause" disabled={!isAuthorized || !state || !!busy || status === "PAUSED"} onClick={() => void control("PAUSE")}><Pause size={15} /> Pause</button>
-          {isAuthorized ? <button className="agent-logout" disabled={!!busy} onClick={() => void logout()}><X size={15} /> Disconnect</button> : <div className="agent-wallet-picker"><Wallet size={15} /><select aria-label="Connect compatible Sui mainnet wallet" value="" disabled={!wallets.length || !!busy} onChange={e => { const selected = wallets[Number(e.target.value)]; if (selected) void connectWallet(selected); }}><option value="">{wallets.length ? "Connect wallet" : "No wallet-standard wallet detected"}</option>{wallets.map((item, i) => <option key={`${item.name}-${i}`} value={i}>{item.name}</option>)}</select></div>}
+          {isAuthorized ? <>{status === "SHADOW" && <button className="agent-pause" disabled={!!busy} onClick={() => void control("PAUSE")}>Stop</button>}<button className="agent-logout" disabled={!!busy} onClick={() => void logout()}><X size={15} /> Disconnect</button></> : <span className="agent-connect-hint">Connect in the guided setup below.</span>}
         </div>
-        <div className="agent-paper-capital"><label>Wallet authority <small>identity session only · no order signer</small></label><div className="agent-locked-control"><LockKeyhole size={14} /> No trading permission granted</div></div>
+        <div className="agent-wallet-authority"><label>Wallet authority <small>identity session only · no order signer</small></label><div className="agent-locked-control"><LockKeyhole size={14} /> No trading permission granted</div></div>
         <div className="agent-auth-note"><LockKeyhole size={13} /> Mainnet-bound short-lived login challenge. No transaction signature requested on connect.</div>
         {!isAuthorized && <div className="agent-wallet-setup"><b>Wallet setup</b><ol><li>Install or unlock a Sui wallet that registers wallet-standard connect and personal-message signing.</li><li>Select a wallet account enabled for Sui mainnet.</li><li>Approve connection and the personal-message login challenge; neither is a transaction.</li></ol><p>Mobile wallet-standard handoff has not been verified. No mobile deep link is provided.</p></div>}
         {walletRecovery && <div className="agent-wallet-recovery" role="status"><b>Recovery guidance</b><p>{walletRecovery}</p></div>}
@@ -501,34 +603,40 @@ function AgentPage() {
             walletName={wallet?.name ?? ""}
             wallets={wallets}
             onConnect={index => { const candidate = wallets[index]; if (candidate) void connectWallet(candidate); }}
+            accounts={accounts}
+            accountId={accountId}
+            onSelectAccount={id => void setAccount(id)}
             supportedAsset={settlementInfo ? `${settlementInfo.coinType} · ${settlementInfo.network}${settlementInfo.decimals == null ? "" : ` · ${settlementInfo.decimals} decimals`}${settlementInfo.collateral ? ` · collateral ${settlementInfo.collateral}` : ""}${settlementInfo.conversionAvailable === false ? " · wallet conversion unavailable" : ""}` : null}
             onRefreshAsset={() => void accountOptions()}
-            status={status}
+            settlementDecimals={settlementInfo?.decimals}
             busy={busy}
             dirty={dirtyPolicy}
             onSave={() => void updatePolicy()}
-            onStartShadow={() => void control("ARM_SHADOW")}
-            onPause={() => void control("PAUSE")}
-            paperExists={!!state?.paper}
-            paperCapital={paperCapital}
-            onPaperCapitalChange={setPaperCapital}
-            experimentalConfirmed={experimentalConfirmed}
-            onExperimentalConfirmedChange={setExperimentalConfirmed}
-            compoundingConfirmed={compoundingConfirmed}
-            onCompoundingConfirmedChange={setCompoundingConfirmed}
-            everyRoundAck={everyRoundAck}
-            onEveryRoundAckChange={setEveryRoundAck}
-            edgeOffAck={edgeOffAck}
-            onEdgeOffAckChange={setEdgeOffAck}
-            zeroReserveAck={zeroReserveAck}
-            onZeroReserveAckChange={setZeroReserveAck}
-            shadowAvailable={cap?.capabilities?.shadow === true}
-            reviewGeneration={`${identityRef.current.generation}:${state?.accountId ?? "no-account"}`}
+            fundingAmount={fundingAmount}
+            onFundingAmountChange={setFundingAmount}
+            usdcFundingAmount={usdcFundingAmount}
+            onUsdcFundingAmountChange={setUsdcFundingAmount}
+            coinObjectIds={coinIds}
+            onCoinObjectIdsChange={setCoinIds}
+            onOwnerAction={(action, extra) => void beginOwnerAction(action, extra)}
+            simulationPassed={simulationPassed}
+            pendingAction={pendingAction}
+            pendingDescription={pendingTx?.description ?? ""}
+            pendingTransaction={pendingTx?.transaction ?? ""}
+            ownerChoice={ownerChoice}
+            onOwnerChoiceChange={setOwnerChoice}
+            onPrepare={() => void prepareOwnerTransaction()}
+            onApprove={() => void approvePreparedOwnerTransaction()}
+            uncertainDigest={uncertainDigest}
+            ownerSubmissionPending={ownerSubmissionPending}
+            onRetryConfirmation={() => void retryOwnerConfirmation()}
+            ownerSetupSigning={cap?.ownerSetupSigning === true}
+            readiness={cap?.readiness ?? null}
             onRetryCapabilities={retryCapabilities}
             capabilitiesAvailable={!!cap}
-            blocker={setupBlocker}
             technicalBlockers={technicalBlockers}
             capabilitySummary={capabilitySummary}
+            notice={notice}
           />
           <details className="guided-advanced policy-technical-controls">
             <summary>Advanced · legacy technical policy controls</summary>
@@ -551,7 +659,7 @@ function AgentPage() {
               <Field label="Daily loss guard"><div className="agent-pair-fields"><select aria-label="Daily loss mode" value={policy.dailyLoss?.mode ?? "AMOUNT"} onChange={e => changePolicy(p => { const mode = e.target.value as "AMOUNT" | "PERCENT"; const from = p.dailyLoss?.mode ?? mode; return { ...p, dailyLoss: { mode, value: p.dailyLoss ? changePolicyLimitMode(from, mode, p.dailyLoss.value) : mode === "AMOUNT" ? 100 : 1 } }; })}><option value="AMOUNT">Amount</option><option value="PERCENT">Percent</option></select><div className="agent-input-wrap"><input aria-label="Daily loss value" type="number" min=".01" max={policy.dailyLoss?.mode === "PERCENT" ? 100 : 1000000} step={policy.dailyLoss?.mode === "PERCENT" ? ".1" : ".01"} value={policy.dailyLoss ? policyAmountInputValue(policy.dailyLoss.mode, policy.dailyLoss.value) : ""} placeholder="Disabled" onChange={e => changePolicy(p => ({ ...p, dailyLoss: e.target.value === "" ? null : { mode: p.dailyLoss?.mode ?? "AMOUNT", value: policyValueFromInput(p.dailyLoss?.mode ?? "AMOUNT", e.target.value) } }))} /><span>{policy.dailyLoss?.mode === "PERCENT" ? "%" : "$"}</span></div></div></Field>
               <Field label="Maximum drawdown"><div className="agent-input-wrap"><input type="number" min="0" max="100" step=".1" placeholder="Disabled" value={policy.maxDrawdownPercent ?? ""} onChange={e => changePolicy(p => ({ ...p, maxDrawdownPercent: e.target.value === "" ? null : Number(e.target.value) }))} /><span>%</span></div></Field>
               <Field label="Maximum consecutive losses"><input type="number" min="1" step="1" placeholder="Disabled" value={policy.maxConsecutiveLosses ?? ""} onChange={e => changePolicy(p => ({ ...p, maxConsecutiveLosses: e.target.value === "" ? null : Number(e.target.value) }))} /></Field>
-              <MoneyField label="Reserve" cents={policy.reserveCents} onChange={v => changePolicy(p => ({ ...p, reserveCents: v ?? 0 }))} help="Zero reserve requires an explicit start confirmation." />
+              <MoneyField label="Reserve" cents={policy.reserveCents} onChange={v => changePolicy(p => ({ ...p, reserveCents: v ?? 0 }))} help="Reserve is a saved policy limit only; this release has no live session start." />
               <MoneyField label="Maximum order" cents={policy.maxOrderCents} nullable onChange={v => changePolicy(p => ({ ...p, maxOrderCents: v }))} />
               <Field label="Maximum unresolved exposure"><div className="agent-pair-fields"><select aria-label="Maximum unresolved exposure mode" value={policy.maxUnresolved.mode} onChange={e => changePolicy(p => ({ ...p, maxUnresolved: { ...p.maxUnresolved, mode: e.target.value as "AMOUNT" | "PERCENT" } }))}><option value="AMOUNT">Amount</option><option value="PERCENT">Percent</option></select><div className="agent-input-wrap"><input aria-label="Maximum unresolved exposure value" type="number" min=".01" max={policy.maxUnresolved.mode === "PERCENT" ? 100 : 1000000} step={policy.maxUnresolved.mode === "PERCENT" ? ".1" : ".01"} value={policy.maxUnresolved.mode === "AMOUNT" ? (policy.maxUnresolved.value / 100).toFixed(2) : policy.maxUnresolved.value} onChange={e => changePolicy(p => ({ ...p, maxUnresolved: { ...p.maxUnresolved, value: policy.maxUnresolved.mode === "AMOUNT" ? centsFrom(e.target.value) : Number(e.target.value) } }))} /><span>{policy.maxUnresolved.mode === "AMOUNT" ? "$" : "%"}</span></div></div></Field>
               <MoneyField label="Aggregate collateral per round" cents={policy.roundCollateralCents} onChange={v => changePolicy(p => ({ ...p, roundCollateralCents: v ?? 1 }))} help="Explicit aggregate round bound; fixed sizing must not exceed this limit." />
@@ -578,75 +686,21 @@ function AgentPage() {
              {policy.compound && <label><input type="checkbox" checked={compoundingConfirmed} onChange={e => setCompoundingConfirmed(e.target.checked)} /> I explicitly confirm compounding. This grants no additional funding authority and does not make trades compound here.</label>}
            </div>}
           {isAuthorized && <>
-            {(policy.frequency === "EVERY_ELIGIBLE_ROUND" || !policy.edgeEnabled || policy.reserveCents === 0) && <div className="agent-confirm-group">
-              <span className="agent-kicker">START CONFIRMATIONS · REQUIRED EACH SHADOW START</span>
-              {policy.frequency === "EVERY_ELIGIBLE_ROUND" && <label><input type="checkbox" checked={everyRoundAck} onChange={e => setEveryRoundAck(e.target.checked)} /> I understand this evaluates every eligible round.</label>}
-              {!policy.edgeEnabled && <label><input type="checkbox" checked={edgeOffAck} onChange={e => setEdgeOffAck(e.target.checked)} /> I understand the edge filter is off; rounds may qualify without positive estimated edge.</label>}
-              {policy.reserveCents === 0 && <label><input type="checkbox" checked={zeroReserveAck} onChange={e => setZeroReserveAck(e.target.checked)} /> I understand zero reserve permits all available simulation capital to be committed.</label>}
-            </div>}
              <div className="agent-policy-actions"><span>{dirtyPolicy ? "Review the complete draft; saving does not start execution." : "Authenticated policy is current."}</span><button className="agent-primary" disabled={!dirtyPolicy || !!busy || (policy.signalSource === "EXPERIMENTAL_QUALIFICATION_GATES" && !experimentalConfirmed) || (policy.compound && !compoundingConfirmed)} onClick={() => void updatePolicy()}>{busy === "policy" ? "Saving…" : "Save reviewed policy"}</button></div>
           </>}
             </div>
           </details>
         </section>
 
-        <section className="agent-card">
-          <div className="agent-card-heading"><div><span className="agent-kicker">02 / CAPITAL & ACCOUNT</span><h2>Owner-controlled setup</h2><p>Every owner action is simulated first. Review and transaction preparation require a separate, explicit owner choice; this console never signs or submits.</p></div><span className="agent-flag">OWNER REVIEW ONLY</span></div>
-          <div className="agent-account-row"><div><span>SELECTED ACCOUNT</span><strong>{accountId || "No agent account selected"}</strong></div><div className="agent-account-select"><select aria-label="Select an agent account" disabled={!accounts.length || !!busy} value={accountId || ""} onChange={e => { if (e.target.value) void setAccount(e.target.value); }}><option value="">{accounts.length ? "Choose returned account" : "No accounts loaded"}</option>{accounts.map(item => <option key={item.accountId} value={item.accountId}>{item.accountId}</option>)}</select><button className="agent-secondary" disabled={!isAuthorized || !!busy} onClick={() => void accountOptions()}><RefreshCw size={14} /> Refresh accounts</button></div></div>
-          <div className="agent-funding-form">
-            <Field label="Settlement-native USD amountAtomic" help={`Legacy FUND / WITHDRAW use the service-reported settlement coin: ${settlementInfo?.coinType ?? "not yet reported"}. USD denomination is not USDC.`}><input inputMode="numeric" placeholder="Exact atomic amount" value={fundingAmount} onChange={e => setFundingAmount(e.target.value)} /></Field>
-            <Field label="Native USDC amountAtomic" help="FUND_USDC converts native USDC. This is not settlement-native USD."><input inputMode="numeric" placeholder="Exact atomic amount" value={usdcFundingAmount} onChange={e => setUsdcFundingAmount(e.target.value)} /></Field>
-            <Field label="USDC redemption amountAtomic" help="REDEEM_USDC queues redemption; amount is required."><input inputMode="numeric" placeholder="Exact atomic amount" value={redeemAmount} onChange={e => setRedeemAmount(e.target.value)} /></Field>
-            <Field label="USDC redemption minOutputAtomic" help="Required positive minimum output for queued redemption."><input inputMode="numeric" placeholder="Positive minimum output" value={redeemMinimum} onChange={e => setRedeemMinimum(e.target.value)} /></Field>
-            <Field label="Coin object IDs" help="Comma-separated owner coin object IDs where needed by the service."><input placeholder="Optional object IDs" value={coinIds} onChange={e => setCoinIds(e.target.value)} /></Field>
-          </div>
-          <div className="agent-owner-actions">
-            <button disabled={!isAuthorized || !!busy} onClick={() => void beginOwnerAction("CREATE_ACCOUNT")}><Wallet size={15} /> Simulate account creation</button>
-            <button disabled={!isAuthorized || !accountId || !/^[0-9]+$/.test(fundingAmount) || Number(fundingAmount) <= 0 || !!busy} onClick={() => void beginOwnerAction("FUND", { amountAtomic: fundingAmount, coinObjectIds: coinIds.split(",").map(x => x.trim()).filter(Boolean) })}><ArrowDownToLine size={15} /> Simulate settlement USD funding</button>
-            <button disabled={!isAuthorized || !accountId || !/^[0-9]+$/.test(usdcFundingAmount) || Number(usdcFundingAmount) <= 0 || !!busy} onClick={() => void beginOwnerAction("FUND_USDC", { amountAtomic: usdcFundingAmount, coinObjectIds: coinIds.split(",").map(x => x.trim()).filter(Boolean) })}><ArrowDownToLine size={15} /> Simulate native USDC conversion</button>
-            <button disabled={!isAuthorized || !accountId || !/^[0-9]+$/.test(redeemAmount) || Number(redeemAmount) <= 0 || !/^[0-9]+$/.test(redeemMinimum) || Number(redeemMinimum) <= 0 || !!busy} onClick={() => void beginOwnerAction("REDEEM_USDC", { amountAtomic: redeemAmount, minOutputAtomic: redeemMinimum })}><ArrowUpFromLine size={15} /> Simulate queued USDC redemption</button>
-            <button disabled title="Unavailable: a reviewed mainnet delegate adapter and independently verified authorization path are not exposed by current capabilities."><Shield size={15} /> Delegate unavailable</button>
-            <button disabled title="Unavailable: effective account/prediction permission verification is not implemented by the current capability contract."><ShieldCheck size={15} /> Authorization unavailable</button>
-            <button disabled={!isAuthorized || !accountId || !!busy} onClick={() => void beginOwnerAction("REVOKE")}><ShieldCheck size={15} /> Simulate delegate revocation</button>
-            <button disabled={!isAuthorized || !accountId || !!busy} onClick={() => void beginOwnerAction("WITHDRAW")}><ArrowUpFromLine size={15} /> Simulate settlement USD withdrawal</button>
-          </div>
-          <AgentFundingPreview />
-          <div className="agent-delegate-warning"><AlertTriangle size={15} /><span>Delegate and authorization controls remain unavailable because the current capabilities do not expose a verified delegate-management or effective permission implementation. This is a specific dependency, not a release countdown.</span></div>
-          <div className="agent-account-facts"><div><span>ACCOUNT ID</span><b>{accountId || "Not selected"}</b></div><div><span>DELEGATE ADDRESS</span><b>{state?.delegateAddress || "Not reported"}</b></div><div><span>OWNER AUTHORIZATION</span><b>Not reported as granted</b></div><div><span>CAPABILITY CONFIG</span><b>{cap?.config.status ?? "Not loaded"}</b></div><div><span>ON-CHAIN BALANCES</span><b>{state?.balances == null ? "Not reported" : "Returned by service"}</b></div></div>
-          <p className="agent-caution"><AlertTriangle size={14} /> Settlement endpoint: {settlementInfo?.coinType ?? "not reported"} · {settlementInfo?.network ?? "network not reported"} · {settlementInfo?.decimals == null ? "decimals not reported" : `${settlementInfo.decimals} decimals reported`}. This is distinct from native USDC conversion and queued redemption. No asset substitution is performed.</p>
-        </section>
-
-        <section className="agent-card agent-ledger">
-          <div className="agent-card-heading"><div><span className="agent-kicker">03 / AUDIT TRAIL</span><h2>Paper ledger</h2><p>Records are shown only when returned by the authenticated state API.</p></div><Clock3 size={18} /></div>
-          {state?.ledger?.length ? <div className="agent-ledger-list">{state.ledger.slice().reverse().map(entry => <article key={entry.id}><time>{typeof entry.at === "number" ? agentDate(entry.at) : entry.at}</time><b>{entry.event}</b><pre>{ledgerDetails(entry.details)}</pre></article>)}</div> : <div className="agent-empty-ledger"><span>NO LEDGER RECORDS</span><p>{isAuthorized ? "The server has not reported any agent ledger events." : "Authenticate to load private ledger events."}</p></div>}
-        </section>
       </main>
 
       <aside className="agent-side-column">
-         <section className="agent-card agent-paper-card"><div className="agent-card-heading"><div><span className="agent-kicker">SERVICE-REPORTED STATE</span><h2>Paper counters</h2></div><span className="agent-shadow-tag">{state?.paper ? "REPORTED" : "NOT REPORTED"}</span></div>
-            {state?.paper ? <div className="agent-paper-facts"><div><span>AVAILABLE</span><b>${(state.paper.availableCents / 100).toFixed(2)}</b></div><div><span>COMMITTED</span><b>${(state.paper.committedCents / 100).toFixed(2)}</b></div><div><span>TURNOVER</span><b>${(state.paper.turnoverCents / 100).toFixed(2)}</b></div><div><span>REALIZED P/L</span><b>${(state.paper.realizedPnlCents / 100).toFixed(2)}</b></div></div> : <div className="agent-goal-value">NO PAPER STATE</div>}
-            <p>These values are rendered only from the authenticated /state response and are paper data, not wallet balances or mainnet fills.</p>
-            <div className="agent-goal-note">Starting capital: {state?.paper ? `$${(state.paper.startingCents / 100).toFixed(2)}` : "not reported"} · high-water: {state?.paper ? `$${(state.paper.highWaterCents / 100).toFixed(2)}` : "not reported"}.</div>
-            <div className="agent-goal-labels"><span>{state?.paper ? `${state.paper.consecutiveLosses} consecutive losses` : "No paper counters loaded"}</span><span>{state?.paper?.targetCents == null ? "No target reported" : `Target $${(state.paper.targetCents / 100).toFixed(2)}`}</span></div>
-        </section>
-        <section className="agent-card agent-copy-card"><span className="agent-kicker">RESEARCH IS NOT AUTHORITY</span><p>Research may inform a shadow decision. It cannot grant custody or turn this panel into a live trading interface.</p><div><span>Prediction permission</span><b>{cap?.permissions.prediction ?? "Not reported"}</b></div><div><span>Account permission</span><b>{cap?.permissions.account ?? "Not reported"}</b></div></section>
+        <section className="agent-card agent-copy-card"><span className="agent-kicker">RESEARCH IS NOT AUTHORITY</span><p>Frozen round predictions remain research records. They never imply an order, fill or realized trading result.</p><div><span>Prediction permission</span><b>{cap?.permissions.prediction ?? "Not reported"}</b></div><div><span>Account permission</span><b>{cap?.permissions.account ?? "Not reported"}</b></div></section>
       </aside>
     </div>
 
     <footer className="agent-footer"><span>BLUEWATERAI AGENT · MAINNET IDENTITY ONLY</span><span>Balances are never inferred <i /> No background signing <i /> Owner action only</span></footer>
 
-    {pendingAction && simulation && <div className="agent-modal-backdrop" role="presentation"><section className="agent-review-modal" role="dialog" aria-modal="true" aria-labelledby="owner-review-title">
-      <button className="agent-modal-close" aria-label="Close owner action review" onClick={() => { setPendingTx(null); setPendingAction(""); setOwnerPayload(null); setSimulation(null); setOwnerChoice(false); }}><X size={17} /></button>
-      <span className="agent-kicker">OWNER ACTION REVIEW · PRE-SIGN SIMULATION</span><h2 id="owner-review-title">{pendingTx ? "Prepared payload" : "Review before preparation"}</h2>
-      <div className={`agent-review-warning${simulationPassed ? " passed" : ""}`}><AlertTriangle size={16} />{simulationPassed ? "Simulation passed with checks enabled on mainnet. This is not a signature, submission, fill, or funding result." : "Simulation did not pass all required checks. No owner transaction can be prepared."}</div>
-      {pendingTx && <p>{pendingTx.description}</p>}
-      <div className="agent-review-facts"><span>Action</span><b>{pendingAction}</b><span>Asset / intent</span><b>{pendingActionType}</b><span>Owner</span><b>{shortAddress(pendingOwner)}</b><span>Simulation</span><b>{simulation.success ? "success" : "failed"} · checks {simulation.checksEnabled ? "enabled" : "disabled"}</b><span>Network</span><b>{simulation.network}</b><span>Simulation gas budget</span><b>{simulation.gasBudgetMist.toLocaleString()} MIST</b><span>Account ID</span><b>{String(ownerPayload?.accountId ?? "Not applicable / no account selected")}</b></div>
-      <details><summary>Exact owner action payload</summary><pre>{JSON.stringify(ownerPayload, null, 2)}</pre></details>
-      {pendingTx && <details><summary>Prepared transaction payload</summary><pre>{pendingTx.transaction}</pre></details>}
-      {!pendingTx && simulationPassed && <label className="agent-owner-choice"><input type="checkbox" checked={ownerChoice} onChange={e => setOwnerChoice(e.target.checked)} /> I reviewed the action, exact amount and asset, account, and successful simulation. I explicitly choose to request transaction-payload preparation; this does not authorize signing or submission.</label>}
-      <div className="agent-modal-actions"><button className="agent-secondary" onClick={() => { setPendingTx(null); setPendingAction(""); setOwnerPayload(null); setSimulation(null); setOwnerChoice(false); }}>Close review</button><button className="agent-primary" disabled={!!busy || !simulationPassed || !ownerChoice || !!pendingTx} onClick={() => void prepareOwnerTransaction()}>{busy === "prepare" ? "Preparing…" : "Prepare owner transaction"}</button></div>
-      <small className="agent-signing-disclaimer">No automatic wallet prompt. Transaction signing and submission are intentionally not invoked here.</small>
-    </section></div>}
   </div>;
 }
 export default AgentPage;

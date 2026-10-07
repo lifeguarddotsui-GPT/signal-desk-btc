@@ -5,7 +5,8 @@ import {observeTimedStrategy,type GateScheduler} from "./timed-decision-coordina
 import type {TimedInput} from "./timed-decision-store";
 import type {WaterxRound} from "./types";
 import {eventLockRuntime} from "./event-lock-runtime";
-import {decisionWriterAllowed,decisionClockDomain} from "./decision-authority";
+import {decisionWriterAllowed,decisionClockDomain,decisionDeploymentId} from "./decision-authority";
+import {entryEconomics} from "../../shared/lock-economics";
 
 /** The production ingestion boundary, also used by isolated provider replays.
  * Publishes continuous market evidence before optional storage/research work.
@@ -29,7 +30,13 @@ export function acceptLiveTimedObservation(input:TimedInput,round:WaterxRound,
   if(input.probabilityUp!==null&&input.probabilityDown!==null)roundDecisions.observe(input,{
     atMs:Date.parse(input.observedAt),receivedAtMs,providerSourceAtMs:null,
     probabilityUp:input.probabilityUp,probabilityDown:input.probabilityDown,sourceHealthy:true});
-  const accepted={...input,features:{...input.features,decisionClockDomain,
+  const valueEconomics={
+    UP:entryEconomics({roundId:round.id,marketId:round.marketId,side:"UP",nowMs:receivedAtMs,
+      askCents:round.sides.up.availability==="reported"?round.sides.up.oddsCents:null}),
+    DOWN:entryEconomics({roundId:round.id,marketId:round.marketId,side:"DOWN",nowMs:receivedAtMs,
+      askCents:round.sides.down.availability==="reported"?round.sides.down.oddsCents:null}),
+  };
+  const accepted={...input,features:{...input.features,decisionClockDomain,deploymentId:decisionDeploymentId,valueEconomics,
     reference:round.anchorPrice,
     referenceQuality:round.anchorPriceConfirmed?"confirmed":"provisional",
     purchaseUp:{status:round.sides.up.availability,askCents:round.sides.up.oddsCents},

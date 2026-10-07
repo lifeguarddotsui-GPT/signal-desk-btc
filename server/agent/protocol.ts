@@ -150,5 +150,6 @@ export async function simulateOwnerTransaction(owner:string,body:Record<string,u
   if(result.$kind!=="Transaction"||!result.Transaction.status.success)
     throw new Error("Owner transaction simulation failed with validation enabled; no funds moved");
   return {success:true,checksEnabled:true,gasBudgetMist:prepared.gasBudgetMist,network:"mainnet",
+    transaction:await Transaction.from(bytes).toJSON(),
     description:prepared.description};
 }

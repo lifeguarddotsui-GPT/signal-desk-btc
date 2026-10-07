@@ -4,6 +4,7 @@ import type {TimedDecision,TimedRound} from "../../shared/timed-decision";
 import type {LockDb} from "./lock-store";
 import {digestEarlySnapshot} from "./early-horizons";
 import {recordEarlyDelivery} from "./early-delivery-metrics";
+import {economicEvidenceFromFeatures} from "../../shared/lock-economics";
 
 export const eventIdentity=(r:TimedRound)=>["sui:mainnet",EVENT_LOCK_STRATEGY,r.intervalMinutes,r.roundId];
 export async function readEventLock(round:TimedRound,db:LockDb){
@@ -37,6 +38,9 @@ export async function commitEventLock(round:TimedRound,observations:readonly Eve
       maxGapMs:frozen.length>1?Math.max(...frozen.slice(1).map((o,i)=>o.receivedAtMs-frozen[i].receivedAtMs)):null},
     committedAtMs:null,workerReceivedAtMs:null,onTime:null,operationalFailure:null,automaticExecutionAllowed:false,
     evidence:{featureVersion:EVENT_FEATURE_VERSION,qualification:state.components,firstQualifiedAtMs,
+      deploymentId:latest.features.deploymentId??null,
+      latestFeatures:{...latest.features},
+      entryEconomics:economicEvidenceFromFeatures(latest.features,round.roundId,state.liveSide,evaluatedAtMs),
       evaluationAtMs:evaluatedAtMs,modelVersion:null,calibrationVersion:null,
       probabilitySource:"WaterX market",captureMode:latest.provenance,providerSourceAtMs:null,
       clockDomain:latest.features.decisionClockDomain??null,

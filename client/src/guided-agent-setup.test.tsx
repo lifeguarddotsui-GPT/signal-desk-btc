@@ -17,86 +17,104 @@ const render = (overrides: Partial<ComponentProps<typeof GuidedAgentSetup>> = {}
     walletName: "",
     wallets: [],
     onConnect: () => undefined,
-    supportedAsset: null,
+    accounts: [],
+    accountId: null,
     onRefreshAsset: () => undefined,
-    status: "NOT LOADED",
+    onSelectAccount: () => undefined,
+    supportedAsset: null,
+    settlementDecimals: undefined,
     busy: "",
     dirty: false,
     onSave: () => undefined,
-    onStartShadow: () => undefined,
-    onPause: () => undefined,
-    paperExists: false,
-    paperCapital: "25.00",
-    onPaperCapitalChange: () => undefined,
-    experimentalConfirmed: false,
-    onExperimentalConfirmedChange: () => undefined,
-    compoundingConfirmed: false,
-    onCompoundingConfirmedChange: () => undefined,
-    everyRoundAck: false,
-    onEveryRoundAckChange: () => undefined,
-    edgeOffAck: false,
-    onEdgeOffAckChange: () => undefined,
-    zeroReserveAck: false,
-    onZeroReserveAckChange: () => undefined,
-    shadowAvailable: false,
-    onRetryCapabilities: () => undefined,
+    fundingAmount: "",
+    onFundingAmountChange: () => undefined,
+    usdcFundingAmount: "",
+    onUsdcFundingAmountChange: () => undefined,
+    coinObjectIds: "",
+    onCoinObjectIdsChange: () => undefined,
+    onOwnerAction: () => undefined,
+    simulationPassed: false,
+    pendingAction: "",
+    pendingDescription: "",
+    pendingTransaction: "",
+    ownerChoice: false,
+    onOwnerChoiceChange: () => undefined,
+    onPrepare: () => undefined,
+    onApprove: () => undefined,
+    uncertainDigest: "",
+    ownerSubmissionPending: false,
+    onRetryConfirmation: () => undefined,
+    ownerSetupSigning: false,
+    readiness: { blocker: "Execution dependencies remain blocked.", nextAction: "Verify the isolated order adapter." },
     capabilitiesAvailable: true,
-    reviewGeneration: 0,
-    blocker: "Connect the owner wallet on Sui mainnet.",
+    onRetryCapabilities: () => undefined,
     technicalBlockers: [],
     capabilitySummary: [],
     ...overrides,
   }));
 
-test("guided setup presents wallet identity without implying funding or trading authority", () => {
+test("guided setup combines identity, owned account, funding, session, permissions and locked start", () => {
   const html = render();
-  assert.match(html, /Wallet identity/);
-  assert.match(html, /A connection is not trading permission/);
-  assert.match(html, /Nothing here grants signing or live order authority/);
-  assert.match(html, /No supported wallet detected/);
-  assert.doesNotMatch(html, /Start live session/);
+  for (const label of ["Connect Slush", "Owned account", "Review funding", "Set session", "Permissions", "Start"]) assert.match(html, new RegExp(label));
+  assert.match(html, /Connect an owner wallet/);
+  assert.match(html, /No setup action starts trading/);
+  assert.doesNotMatch(html, /paper capital|shadow session|Start shadow/i);
 });
 
-test("live authorization remains explicitly disabled even with an authenticated owner identity", () => {
+test("account workflow shows only returned account choices and never invents a balance", () => {
+  const html = render({ initialStep: 1, accounts: [{ accountId: "0xowned" }], accountId: "0xowned" });
+  assert.match(html, /0xowned/);
+  assert.match(html, /No balance is inferred/);
+  assert.match(html, /Review account creation/);
+});
+
+test("funding step accepts human dollars and reports asset decimals rather than atomics", () => {
+  const html = render({ initialStep: 2, authorized: true, accountId: "0xowned", settlementDecimals: 9, supportedAsset: "settlement coin · Sui mainnet" });
+  assert.match(html, /Settlement-native USD funding/);
+  assert.match(html, /Native USDC conversion/);
+  assert.match(html, /9 decimals reported/);
+  assert.match(html, /USDC · 6 decimals/);
+  assert.doesNotMatch(html, /amountAtomic/);
+});
+
+test("winning-return preferences are human dollar policy values, reviewed with explicit constraints", () => {
+  const html = render({ initialStep: 3 });
+  assert.match(html, /Minimum preferred total return on a win/);
+  assert.match(html, /Preferred total return on a win/);
+  assert.match(html, /Return preferences do not currently change active research qualification/);
+  assert.match(html, /Not a maximum: better returns are allowed/);
+  const invalid = render({ initialStep: 3, policy: { ...defaultAgentPolicy, minimumWinningReturnCents: 800, preferredWinningReturnCents: 700 } });
+  assert.match(invalid, /preferred return at or above the minimum/);
+  assert.match(invalid, /\$8\.00/);
+  assert.match(invalid, /\$7\.00/);
+});
+
+test("permission approval is separate and live start remains unavailable", () => {
   const html = render({
+    initialStep: 4,
     authorized: true,
     ownerAddress: "0xowner",
     accountAddress: "0xowner",
     network: "Sui mainnet",
     walletName: "Slush",
-    supportedAsset: "0xasset::USD::USD · mainnet",
-    initialStep: 3,
+    ownerSetupSigning: true,
+    simulationPassed: true,
+    pendingAction: "FUND",
+    pendingDescription: "Review funding operation",
+    pendingTransaction: "prepared-transaction",
   });
-  assert.match(html, /Authorize and start live/);
-  assert.match(html, /Live authorization unavailable/);
-  assert.match(html, /disabled/);
-  assert.match(html, /Verified order adapter/);
+  assert.match(html, /Approve this setup transaction in Slush/);
+  assert.match(html, /never prompted on connect/);
+  assert.match(html, /no AUTHORIZE flow/);
+  assert.doesNotMatch(html, /Authorize and start live/);
+  const start = render({ initialStep: 5, readiness: { blocker: "Owner signer is not verified.", nextAction: "Provision isolated signer." } });
+  assert.match(start, /Owner signer is not verified/);
+  assert.match(start, /Provision isolated signer/);
+  assert.match(start, /Live beta session unavailable/);
 });
 
-test("wallet step reports the selected mainnet identity and only the returned asset", () => {
-  const html = render({
-    authorized: true,
-    ownerAddress: "0xowner",
-    accountAddress: "0xowner",
-    network: "Sui mainnet",
-    walletName: "Slush",
-    supportedAsset: "0xasset::USD::USD · mainnet",
-  });
-  assert.match(html, /Slush/);
-  assert.match(html, /Sui mainnet/);
-  assert.match(html, /0xowner/);
-  assert.match(html, /0xasset::USD::USD/);
-  assert.match(html, /Identity verification only/);
-});
-
-test("experimental strategy exposes the exact explicit consent in guided review", () => {
-  const html = render({
-    policy: { ...defaultAgentPolicy, signalSource: "EXPERIMENTAL_QUALIFICATION_GATES" },
-    authorized: true,
-    dirty: true,
-    initialStep: 2,
-  });
-  assert.match(html, /I understand this qualification-gates strategy is uncalibrated and I explicitly choose it/);
-  assert.doesNotMatch(html, /model confidence|champion performance|profitability threshold/i);
-  assert.match(html, /Save reviewed policy/);
+test("uncertain owner transaction supports confirmation retry without another signing action", () => {
+  const html = render({ initialStep: 4, authorized: true, pendingAction: "FUND", uncertainDigest: "digest-retained" });
+  assert.match(html, /digest-retained/);
+  assert.match(html, /Retry confirmation only/);
 });

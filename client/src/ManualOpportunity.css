@@ -321,6 +321,44 @@
   .two-stage-desk-row > small { grid-column: 1; }
 }
 
+/* Early Lock is the research focal point; market odds above it remain unchanged. */
+.two-stage-desk { padding-top: 2px; }
+.two-stage-desk-heading { align-items: center; min-height: 33px; font-size: 10px; }
+.two-stage-desk-heading > span {
+  color: #d4c49d; font: 700 10px "DM Mono", monospace; letter-spacing: .11em;
+}
+.two-stage-desk-heading > b {
+  padding: 4px 7px; border: 1px solid #655b42; border-radius: 3px;
+  color: #e0ce9f; background: rgba(112,96,62,.12); font-size: 9px;
+}
+.two-stage-desk-row {
+  grid-template-columns: 1fr; gap: 5px; margin: 5px 0; padding: 11px 12px;
+  border: 1px solid rgba(133,163,153,.2); border-radius: 5px; background: #132a2c;
+}
+.two-stage-desk-row.early-primary {
+  gap: 7px; padding: 13px 14px; border-color: rgba(185,217,143,.42);
+  background: linear-gradient(110deg, rgba(169,217,120,.09), rgba(19,42,44,.82) 70%);
+}
+.two-stage-desk-row.confirmation-secondary { margin-top: 6px; padding: 9px 12px; background: rgba(19,42,44,.48); }
+.two-stage-row-label { font: 700 14px "DM Mono", monospace; color: #c5d5ad; letter-spacing: .08em; }
+.two-stage-desk-row > strong { color: #cbd6ca; font-size: 15px; font-weight: 550; }
+.two-stage-desk-row.early-primary > strong { color: #dce9d7; font-size: clamp(28px, 4vw, 36px); font-weight: 700; line-height: 1.05; letter-spacing: -.045em; }
+.two-stage-desk-row.confirmation-secondary > strong { font-size: 20px; }
+.two-stage-desk-row > small { grid-column: 1; color: #a1b1a4; font-size: 14px; line-height: 1.4; }
+.two-stage-desk-row.early-primary > .two-stage-lock-timing { color: #d5dfd2; font-size: 15px; font-variant-numeric: tabular-nums; }
+.two-stage-desk-row.early-primary > .two-stage-lock-return { color: #dfd0a5; font-size: 15px; font-weight: 600; }
+.two-stage-relationship { margin: 7px 0 1px; font-size: 11px; }
+.two-stage-diagnostics { font-size: 10px; }
+.two-stage-diagnostics > div { grid-template-columns: minmax(120px,.35fr) minmax(0,1fr); }
+.desk-active-policy { padding: 3px 5px; border: 1px solid #61563f; border-radius: 3px; color: #d6c79e; font-size: 9px; }
+@media (max-width: 600px) {
+  .two-stage-desk-row { padding: 10px; }
+  .two-stage-desk-row.early-primary { padding: 12px; }
+  .two-stage-row-label { font-size: 13px; }
+  .two-stage-desk-row > small { font-size: 14px; }
+  .two-stage-desk-heading { align-items: flex-start; }
+}
+
 .canonical-history .two-stage-history {
   --ts-ink: #dce8df;
   --ts-muted: #91a79d;

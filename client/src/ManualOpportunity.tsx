@@ -39,26 +39,30 @@ const identityMatches = (decision: RoundDecision | null, round: RoundIdentity | 
   !!decision && !!round && decision.roundId === round.id && decision.startMs === round.startMs && decision.expiryMs === round.expiryMs;
 const twoStageTime = (value: number | null | undefined) => value == null || !Number.isFinite(value)
   ? "time unavailable" : `${Math.max(0, Math.round(value / 1000))}s elapsed`;
-const stageReason = (reason: string | undefined, persistence: string | undefined) => {
-  if (persistence === "FAILED") return "Lock persistence failed";
-  if (persistence === "UNKNOWN") return "Commit state unknown";
-  if (persistence === "SAVING") return "Saving; not committed";
-  if (reason === "CONFIRMATION_POLICY_NOT_QUALIFIED") return "Confirmation policy not yet qualified";
+const elapsedClock = (value: number | null | undefined) => value == null || !Number.isFinite(value)
+  ? "time unavailable" : clock(Math.floor(value / 1000)*1000) ?? "time unavailable";
+const stageReason = (reason: string | undefined, persistence: string | undefined, diagnostics?: { message: string }) => {
+  if (persistence === "FAILED") return "Storage unavailable";
+  if (persistence === "UNKNOWN") return "Commit state unknown · reconciling";
+  if (persistence === "SAVING") return "Saving decision";
+  if (reason === "CONFIRMATION_POLICY_NOT_QUALIFIED") return "Confirmation model not available";
+  if (diagnostics?.message?.trim()) return diagnostics.message;
   if (reason === "NO_QUALIFYING_EARLY_VALUE" || reason === "ENTRY_TERMS_UNAVAILABLE") return "No qualifying early opportunity";
-  if (reason === "WAITING_FOR_FRESH_DATA" || reason === "SOURCE_STALE") return "Waiting for fresh data";
+  if (reason === "WAITING_FOR_FRESH_DATA" || reason === "SOURCE_STALE") return "Fresh odds unavailable";
   if (reason === "WAITING_FOR_ADDITIONAL_EVIDENCE") return "Building additional evidence";
   if (reason === "ROUND_EXPIRED") return "Round complete · no qualifying lock";
   if (reason === "SAME_SIDE_PERSISTENCE_INCOMPLETE" || reason === "STABILITY_WINDOW_INCOMPLETE" ||
       reason === "DIRECTIONAL_SEPARATION_BELOW_POLICY" || reason === "NO_VALID_PROBABILITY_INPUT") return "Building evidence";
   const normalized = reason?.replaceAll("_", " ").trim();
   if (normalized && !["conditions satisfied", "locked"].includes(normalized.toLowerCase())) return normalized;
-  return "Building evidence";
+  return reason === "CONDITIONS_SATISFIED" ? "Qualified · awaiting durable commit" : "Building evidence";
 };
 
-function TwoStageDeskRows({ projection, round, interval }: {
+function TwoStageDeskRows({ projection, round, interval, now }: {
   projection: TwoStageProjection | null | undefined;
   round: RoundIdentity | null;
   interval: Interval;
+  now: number;
 }) {
   const exact = !!projection && !!round &&
     projection.roundId === round.id && projection.startMs === round.startMs &&
@@ -66,6 +70,7 @@ function TwoStageDeskRows({ projection, round, interval }: {
     projection.strategyVersion === TWO_STAGE_STRATEGY && projection.shadowOnly === true &&
     projection.automaticExecutionAllowed === false;
   const candidate = exact ? projection : null;
+  const localObservedAt=React.useMemo(()=>now,[projection]);
   const getLock = (stage: LockStage): StageLock | null => {
     const state = stage === "EARLY" ? candidate?.early : candidate?.confirmation;
     const lock = state?.lock;
@@ -88,21 +93,27 @@ function TwoStageDeskRows({ projection, round, interval }: {
       ? `${lock.side} · ${twoStageTime(lock.elapsedMs)} · ${lock.probabilitySource}`
       : !projection ? "Building evidence · two-stage projection unavailable"
         : !candidate ? "Building evidence · projection does not match this round and interval"
-          : stageReason(state?.reason, state?.persistence);
+      : stageReason(state?.reason, state?.persistence, state?.diagnostics);
     const economics = lock?.economics;
     const returnText = economics?.totalReturnedIfCorrectUsd != null &&
       Number.isFinite(economics.totalReturnedIfCorrectUsd) && Number.isFinite(economics.collateralUsd)
-      ? `${economics.kind === "VERIFIED_QUOTE" ? "Verified" : "Indicative"} $${economics.collateralUsd.toFixed(2)} collateral → $${economics.totalReturnedIfCorrectUsd.toFixed(2)} total return if correct`
-      : "$5 return unavailable";
-    return <div className={`two-stage-desk-row${lock ? " committed" : ""}`} key={stage} data-stage={stage.toLowerCase()}>
+      ? `${economics.kind === "VERIFIED_QUOTE" ? "Verified" : "Indicative"} $${economics.collateralUsd.toFixed(2)} collateral · $${economics.totalReturnedIfCorrectUsd.toFixed(2)} total return if correct`
+      : "Indicative return unavailable";
+    const qualifiedMs = lock?.committedAtMs!=null&&candidate?lock.committedAtMs-candidate.startMs:null;
+    const remainingMs = lock?.committedAtMs!=null&&candidate?Math.max(0,candidate.expiryMs-lock.committedAtMs):null;
+    const status = lock?.valueStatus === "BELOW_PREFERRED" ? "Below preferred return"
+      : lock?.valueStatus === "UNAVAILABLE" ? "Entry return unavailable"
+        : lock ? "Research lock committed" : description;
+    return <div className={`two-stage-desk-row${lock ? " committed" : ""}${stage === "EARLY" ? " early-primary" : " confirmation-secondary"}`} key={stage} data-stage={stage.toLowerCase()}>
       <span className="two-stage-row-label">{title}</span>
-      <strong>{lock ? `${lock.side} · ${twoStageTime(lock.elapsedMs)}` : description}</strong>
-      {lock && <small>{lock.probabilitySource} · frozen {percent(lock.probabilityUp)} UP / {percent(1 - lock.probabilityUp)} DOWN · {returnText}</small>}
-      {lock && <small>Calibration {lock.calibrationStatus === "QUALIFIED" ? "qualified" : "unqualified"}{lock.modelVersion ? ` · ${lock.modelVersion}` : " · no qualified model"}</small>}
+      <strong>{lock ? lock.side : status}</strong>
+      {lock && <small className="two-stage-lock-timing">{lock.committedAtMs==null?"Commit verified · acknowledgement time unknown":`Locked at ${elapsedClock(qualifiedMs)} · ${clock(remainingMs)??"time unavailable"} remaining`}</small>}
+      {lock && <small className="two-stage-lock-return">{returnText}{lock.valueStatus === "BELOW_PREFERRED" ? " · Below preferred return" : ""}</small>}
+      {lock && <small>{lock.calibrationStatus==="QUALIFIED"?"Stage-selected calibrated forecast":"Market-derived evidence · uncalibrated"} · frozen {percent(lock.probabilityUp)} UP / {percent(1 - lock.probabilityUp)} DOWN</small>}
     </div>;
   };
   return <section className="two-stage-desk" aria-label="Two-stage shadow research">
-    <div className="two-stage-desk-heading"><span>SHADOW RESEARCH</span><b>Two-stage · not active · no order authority</b></div>
+    <div className="two-stage-desk-heading"><span>EXPERIMENTAL · SHADOW RESEARCH</span><b>Not activated · no order authority</b></div>
     {displayStage("EARLY LOCK", "EARLY", early)}
     {displayStage("CONFIRMATION LOCK", "CONFIRMATION", confirmation)}
     <p className="two-stage-relationship">{relationship ?? (candidate
@@ -113,10 +124,13 @@ function TwoStageDeskRows({ projection, round, interval }: {
       <div><span>Strategy / market</span><b>{candidate.strategyVersion} · {candidate.marketId}</b></div>
       <div><span>Settlement rule</span><b>{JSON.stringify(candidate.settlementRule)}</b></div>
       <div><span>Price features</span><b>{JSON.stringify(candidate.priceFeatures)}</b></div>
+      {candidate.researchPreference && <div><span>Frozen research mode</span><b>{candidate.researchPreference.mode} · collateral {usd(candidate.researchPreference.collateralUsd)} · minimum return {usd(candidate.researchPreference.minimumReturnUsd)} · preferred return {usd(candidate.researchPreference.preferredReturnUsd)}. Research display only; does not change trading settings or execution eligibility.</b></div>}
+      {candidate.policyRegistry != null && <div><span>Policy registry</span><b>{JSON.stringify(candidate.policyRegistry)}</b></div>}
+      <div><span>Browser snapshot timing</span><b>Local UI first observed {time(localObservedAt)}. Browser/server clock synchronization is unverified; this is not a verified network-latency measurement.</b></div>
       {([["EARLY", candidate.early, early], ["CONFIRMATION", candidate.confirmation, confirmation]] as const).map(([name, state, lock]) =>
         <div className="two-stage-diagnostic-lock" key={name}><span>{name} diagnostics</span><b>{lock
-          ? `Policy ${lock.policyVersion} · feature ${lock.featureVersion} · cutoff ${time(lock.evidenceCutoffMs)} · qualified ${time(lock.qualifiedAtMs)} · committed ${time(lock.committedAtMs)} · model ${lock.modelVersion ?? "not reported"} · calibration ${lock.calibrationStatus} · observations ${lock.observationIds.join(", ") || "none reported"} · economics ${JSON.stringify(lock.economics)}`
-          : `${state.persistence} · ${state.reason || "No committed lock"} · diagnostics unavailable`}</b></div>)}
+          ? `Source ${lock.probabilitySource} · Calibration ${lock.calibrationStatus==="QUALIFIED"?"qualified":"unqualified"} · ${lock.modelVersion??"no qualified model"} · Frozen research preference · ${lock.researchPreference?.mode.toLowerCase()??"not reported"} · ${JSON.stringify(lock.researchPreference??{})} · Policy ${lock.policyVersion} · feature ${lock.featureVersion} · cutoff ${time(lock.evidenceCutoffMs)} · qualified ${time(lock.qualifiedAtMs)} · committed ${time(lock.committedAtMs)} · model ${lock.modelVersion ?? "not reported"} · calibration ${lock.calibrationStatus} · observations ${lock.observationIds.join(", ") || "none reported"} · economics ${JSON.stringify(lock.economics)} · diagnostics ${JSON.stringify(lock.diagnostics ?? state.diagnostics ?? {})} · timing ${JSON.stringify(lock.timing ?? state.timing ?? {})}`
+          : `${state.persistence} · ${stageReason(state.reason, state.persistence, state.diagnostics)} · measurements ${JSON.stringify(state.diagnostics?.measurements ?? {})} · thresholds ${JSON.stringify(state.diagnostics?.thresholds ?? {})} · timing ${JSON.stringify(state.timing ?? {})}`}</b></div>)}
       <p>Frozen stage evidence is separate from current market odds and current purchase terms. Every stage is shadow-only.</p>
     </details>}
   </section>;
@@ -245,14 +259,14 @@ export function ManualOpportunity({
         <small>{odds ? `WaterX · ${Math.max(0,Math.floor((now-odds.receivedAtMs)/1000))}s ago · app observed` : "WaterX · no current probability receipt"}</small>
       </div>
       {purchase&&(upAsk||downAsk)&&<div className="desk-purchase-prices"><span>Purchase price (not probability)</span><b>UP {upAsk??"Not reported"} · DOWN {downAsk??"Not reported"}</b></div>}
-      {locked && <div className="desk-frozen-evidence">
-        <span>Frozen lock · {savedSide}</span>
-        <strong>UP {percent(frozenUp)} <i>·</i> DOWN {percent(frozenDown)}</strong>
-        <small>{savedSource} · saved {time(saved?.committedAtMs ?? saved?.decisionAtMs)} · {clock(exactRound!.expiryMs-(saved?.committedAtMs??saved?.decisionAtMs??exactRound!.expiryMs))} before close</small>
-      </div>}
     </div>
 
-    <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} />
+    <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
+    {locked && <div className="desk-frozen-evidence">
+      <span>Frozen lock · {savedSide} · active benchmark</span>
+      <strong>UP {percent(frozenUp)} <i>·</i> DOWN {percent(frozenDown)}</strong>
+      <small>{savedSource} · saved {time(saved?.committedAtMs ?? saved?.decisionAtMs)} · {clock(exactRound!.expiryMs-(saved?.committedAtMs??saved?.decisionAtMs??exactRound!.expiryMs))} before close</small>
+    </div>}
 
     <div className={`desk-decision-card${locked ? " locked" : ""}`}>
       <h3 className="desk-section-title">Bluewater decision <span className="desk-active-policy">ACTIVE · 30-SECOND BENCHMARK</span></h3>

@@ -177,7 +177,7 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
       if(timing.saved?.side&&timing.saved.status==="LOCKED")
         timing.lifecycle=timing.saved.side==="UP"?"LOCKED_UP":"LOCKED_DOWN";
       else if(timing.persistence==="SAVING")timing.lifecycle="SAVING";
-       const snapshotVersion=++version;
+       const snapshotVersion=++version,twoStage=twoStageRuntime.read(identity);
        return {...identity,format:"waterx-live-decision-v2",streamId,network:"sui:mainnet",
          policyVersion:policy.version,stateVersion:snapshotVersion,snapshotVersion,updatedAtMs:entry.updatedAtMs,publishedAtMs:now,
          projectionVersion:"waterx-timed-projection-v1",strategyVersion:timing.strategyVersion,
@@ -187,7 +187,7 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
               timing.persistence==="SAVING"?"SAVING":lean==="UP"?"LEANING_UP":lean==="DOWN"?"LEANING_DOWN":"WATCHING",
             result:null},
          ...(eventLockRuntime.read(identity,now)?{eventChallenger:eventLockRuntime.read(identity,now)}:{}),
-         ...(twoStageRuntime.read(identity)?{twoStage:twoStageRuntime.read(identity)}:{}),
+         ...(twoStage?{twoStage}:{}),
          componentTimestamps:{decisionSnapshotAtMs:entry.updatedAtMs,
            probabilitiesReceivedAtMs:last?.receivedAtMs??null,
            persistenceAtMs:timing.saved?.committedAtMs??timing.lastGate?.evaluatedAtMs??entry.updatedAtMs},

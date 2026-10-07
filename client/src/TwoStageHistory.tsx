@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { StageLock, StageStats, TwoStageHistory, TwoStageRoundRow } from "../../shared/two-stage";
-import { TWO_STAGE_STRATEGY } from "../../shared/two-stage";
+import { TWO_STAGE_STRATEGY, PREVIOUS_TWO_STAGE_STRATEGY } from "../../shared/two-stage";
 
 type Interval = "all" | "5" | "15";
 type Window = "today" | "24h" | "7d" | "custom";
+type StrategyFilter = "current" | "previous" | "all";
 type Load = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; data: TwoStageHistory };
 
 const dateTime = (value: number | null | undefined) => value == null || !Number.isFinite(value)
@@ -20,8 +21,10 @@ const score = (lock: StageLock | null, row: TwoStageRoundRow) => !lock ? "No loc
     : lock.side === row.outcome ? "Correct" : "Incorrect";
 const calibration = (value: unknown) => value == null ? "Not reported" : JSON.stringify(value);
 const committedHistoryLock = (lock: StageLock | null, stage: "EARLY" | "CONFIRMATION", row: TwoStageRoundRow) => {
+  const expectedVersion = row.strategyVersion ?? lock?.strategyVersion;
   if (!lock || lock.stage !== stage || lock.network !== "sui:mainnet" ||
-    lock.strategyVersion !== TWO_STAGE_STRATEGY || lock.shadowOnly !== true ||
+    ![TWO_STAGE_STRATEGY, PREVIOUS_TWO_STAGE_STRATEGY].includes(lock.strategyVersion) ||
+    !expectedVersion || lock.strategyVersion !== expectedVersion || lock.shadowOnly !== true ||
     lock.automaticExecutionAllowed !== false || lock.roundId !== row.roundId ||
     lock.startMs !== row.startMs || lock.expiryMs !== row.expiryMs ||
     lock.intervalMinutes !== row.intervalMinutes || lock.marketId !== row.marketId ||
@@ -43,6 +46,7 @@ export function StageStatsBlock({ title, stats }: { title: string; stats: StageS
       <div><span>Decision coverage · locks / cohort</span><b>{stats.locks} / {stats.cohortN} · {percent(stats.coverage)}</b></div>
       <div><span>Lock elapsed · median / p90</span><b>{duration(stats.medianElapsedMs)} / {duration(stats.p90ElapsedMs)}</b></div>
       <div><span>Calibration</span><b>{calibration(stats.calibration)}</b></div>
+      {stats.earlyWindows?.map(window => <div key={window.seconds}><span>Locks by {window.seconds}s · locks / cohort n={stats.cohortN}</span><b>{window.locks} / {stats.cohortN} · {percent(window.rate)}</b></div>)}
       <div><span>Brier score</span><b>{stats.brier == null ? "Not reported" : stats.brier.toFixed(4)}</b></div>
       <div><span>Entry-economics evidence</span><b>{stats.indicativeN} indicative · {stats.verifiedQuoteN} verified quotes</b></div>
       <div><span>Actual trading P/L</span><b>{stats.actualTradingPnl == null ? "Unavailable · no fills inferred" : money(stats.actualTradingPnl)}</b></div>
@@ -58,16 +62,20 @@ function StageEvidence({ title, lock }: { title: string; lock: StageLock | null 
     <div className="two-stage-fact"><span>{title} · lock timing</span><b>Cutoff {dateTime(lock.evidenceCutoffMs)} · qualified {dateTime(lock.qualifiedAtMs)} · commit acknowledgement {dateTime(lock.committedAtMs)} · elapsed {duration(lock.elapsedMs)} · remaining {duration(lock.remainingMs)}</b></div>
     <div className="two-stage-fact"><span>{title} · provenance</span><b>{lock.network} · {lock.marketId} · {lock.strategyVersion} · {lock.policyVersion} · {lock.featureVersion} · model {lock.modelVersion ?? "not reported"} · calibration {lock.calibrationStatus}</b></div>
     <div className="two-stage-fact"><span>{title} · economics</span><b>{economics.kind} · collateral {money(economics.collateralUsd)} · return if correct {money(economics.totalReturnedIfCorrectUsd)} · net if correct {money(economics.netProfitIfCorrectUsd)} · loss if incorrect {money(economics.lossIfIncorrectUsd)} · costs {money(economics.totalCostUsd)} · {economics.reason}</b></div>
+    {lock.researchPreference && <div className="two-stage-fact"><span>{title} · frozen research preference</span><b>{lock.researchPreference.mode} · collateral {money(lock.researchPreference.collateralUsd)} · minimum return {money(lock.researchPreference.minimumReturnUsd)} · preferred return {money(lock.researchPreference.preferredReturnUsd)} · {lock.valueStatus ?? "value status not reported"}</b></div>}
+    {lock.diagnostics && <div className="two-stage-fact"><span>{title} · qualification measurements / thresholds</span><b>{lock.diagnostics.message} · measurements {JSON.stringify(lock.diagnostics.measurements)} · thresholds {JSON.stringify(lock.diagnostics.thresholds)}</b></div>}
+    {lock.timing && <div className="two-stage-fact"><span>{title} · processing timeline</span><b>Server received {dateTime(lock.timing.receivedAtMs)} · accepted {dateTime(lock.timing.acceptedAtMs)} · qualified {dateTime(lock.timing.qualifiedAtMs)} · acquisition started {dateTime(lock.timing.acquisitionStartedAtMs)} · acquired {dateTime(lock.timing.acquiredAtMs)} · server commit acknowledgement {dateTime(lock.timing.commitAcknowledgedAtMs)} · projection {dateTime(lock.timing.projectionAtMs)}</b></div>}
     <div className="two-stage-fact"><span>{title} · quote and observations</span><b>Quote {economics.quoteId ?? "not reported"} · age {duration(economics.quoteAgeMs)} · {economics.payoutRule ?? "payout rule not reported"} · observation IDs {lock.observationIds.join(", ") || "none reported"}</b></div>
     <details className="two-stage-evidence"><summary>{title} frozen reference, coverage and features</summary><pre>{JSON.stringify({
       reference: lock.reference, coverage: lock.coverage, features: lock.features,
       economics: lock.economics, captureMode: lock.captureMode, shadowOnly: lock.shadowOnly,
-      automaticExecutionAllowed: lock.automaticExecutionAllowed,
+      automaticExecutionAllowed: lock.automaticExecutionAllowed, diagnostics: lock.diagnostics,
+      timing: lock.timing, researchPreference: lock.researchPreference, valueStatus: lock.valueStatus,
     }, null, 2)}</pre></details>
   </>;
 }
 
-function RoundRow({ row }: { row: TwoStageRoundRow }) {
+export function RoundRow({ row }: { row: TwoStageRoundRow }) {
   const early = committedHistoryLock(row.early, "EARLY", row);
   const confirmation = committedHistoryLock(row.confirmation, "CONFIRMATION", row);
   const stageSummary = (lock: StageLock | null) => lock
@@ -96,6 +104,7 @@ function RoundRow({ row }: { row: TwoStageRoundRow }) {
 export default function TwoStageHistory() {
   const [interval, setInterval] = useState<Interval>("all");
   const [windowFilter, setWindowFilter] = useState<Window>("today");
+  const [strategy, setStrategy] = useState<StrategyFilter>("current");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
@@ -120,7 +129,7 @@ export default function TwoStageHistory() {
     setLoad({ kind: "loading" });
     const params = new URLSearchParams({
       interval, window: windowFilter,
-      timezoneOffsetMinutes: String(new Date().getTimezoneOffset()), limit: "100",
+      timezoneOffsetMinutes: String(new Date().getTimezoneOffset()), limit: "100", strategy,
     });
     if (windowFilter === "custom" && customRange) {
       params.set("fromMs", String(customRange.fromMs));
@@ -130,7 +139,8 @@ export default function TwoStageHistory() {
       credentials: "include", signal: controller.signal, headers: { Accept: "application/json" },
     }).then(async response => {
       const body = await response.json().catch(() => ({})) as Partial<TwoStageHistory> & { error?: string; reason?: string };
-      if (!response.ok || body.strategyVersion !== TWO_STAGE_STRATEGY || body.shadowOnly !== true ||
+      const validVersion = body.strategyVersion === TWO_STAGE_STRATEGY || body.strategyVersion === PREVIOUS_TWO_STAGE_STRATEGY;
+      if (!response.ok || !validVersion || body.shadowOnly !== true ||
         body.activeStrategy !== "waterx-qualification-gates-v3" || !body.cohort ||
         !body.early || !body.confirmation || !body.paired || !Array.isArray(body.rows))
         throw new Error(body.error || body.reason || `Two-stage history unavailable (${response.status}).`);
@@ -139,7 +149,7 @@ export default function TwoStageHistory() {
       if (!controller.signal.aborted) setLoad({ kind: "error", message: error instanceof Error ? error.message : "Two-stage history could not be loaded." });
     });
     return () => controller.abort();
-  }, [interval, windowFilter, customRange, reloadKey]);
+  }, [interval, windowFilter, strategy, customRange, reloadKey]);
 
   const cohort = load.kind === "ready" ? load.data.cohort : null;
   const paired = load.kind === "ready" ? load.data.paired : null;
@@ -168,6 +178,9 @@ export default function TwoStageHistory() {
         <option value="today">Today · local</option><option value="24h">Last 24 hours</option>
         <option value="7d">Last 7 days</option><option value="custom">Custom range</option>
       </select></label>
+      <label>Strategy evidence<select value={strategy} onChange={event => setStrategy(event.target.value as StrategyFilter)}>
+        <option value="current">Current · v2</option><option value="previous">Previous · v1</option><option value="all">All versions</option>
+      </select></label>
       {windowFilter === "custom" && <div className="two-stage-custom">
         <label>From<input type="date" value={customFrom} onChange={event => setCustomFrom(event.target.value)} /></label>
         <label>Through<input type="date" value={customTo} onChange={event => setCustomTo(event.target.value)} /></label>
@@ -189,6 +202,10 @@ export default function TwoStageHistory() {
         <span>Missing-record rate · active discovered rounds n={load.data.expectedCohortN ?? "not reported"}</span><b>{percent(load.data.missingRecordRate)} · {load.data.missingRecordDenominator ?? "denominator unavailable"}</b>
         <span>Active-strategy discovered cohort denominator</span><b>{load.data.expectedCohortN ?? "Not reported"}</b>
       </section>
+      {load.data.breakdown != null && <details className="two-stage-learning two-stage-breakdown"><summary>Measured breakdowns · interval and build</summary>
+        <p>Service-reported measurements only; denominators and missing groups are not inferred.</p>
+        <pre>{JSON.stringify(load.data.breakdown, null, 2)}</pre>
+      </details>}
       <div className="two-stage-round-list-heading"><h3>Paired round records</h3><span>{load.data.rows.length} shown{load.data.rowsTruncated ? " · page truncated" : ""}</span></div>
       {load.data.rows.length
         ? <div className="two-stage-round-list">{load.data.rows.map((row, index) => <RoundRow key={`${row.roundId}-${row.startMs}-${index}`} row={row} />)}</div>

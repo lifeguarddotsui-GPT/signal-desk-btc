@@ -1,6 +1,6 @@
 export const AREA_VERSION="price-area-proxy-v1";
 export const MAX_PRICE_GAP_MS=5000;
-export type PricePoint={id:string;atMs:number;availableAtMs:number;price:number;reference:number|null;source:string};
+export type PricePoint={id:string;atMs:number;availableAtMs:number;price:number;reference:number|null;source:string;receivedAtMs?:number};
 export type AverageRule={verified:boolean;method:"CONTINUOUS_FULL_ROUND_AVERAGE"|"UNKNOWN";oracle:string|null;
   feed:string|null;referenceAtMs:number|null;referenceValue:number|null;rounding:string|null;tieRule:string|null};
 export const unverifiedSettlementRule:AverageRule={verified:false,method:"UNKNOWN",oracle:null,feed:null,
@@ -42,6 +42,10 @@ export function priceAreaFeatures(input:{points:readonly PricePoint[];startMs:nu
   const deltas=compatible.slice(1).flatMap((p,i)=>p.atMs-compatible[i].atMs<=maxGap?[p.price-compatible[i].price]:[]);
   const volatility=deltas.length?Math.sqrt(deltas.reduce((s,d)=>s+d*d,0)/deltas.length):null;
   const latest=points.at(-1),fresh=!!latest&&end-latest.atMs<=maxGap&&latest.reference===reference;
+  const gaps=points.slice(1).map((p,i)=>p.atMs-points[i].atMs).sort((a,b)=>a-b);
+  const receiptGaps=points.slice(1).flatMap((p,i)=>p.receivedAtMs!=null&&points[i].receivedAtMs!=null?
+    [p.receivedAtMs-points[i].receivedAtMs!]:[]).sort((a,b)=>a-b);
+  const quantile=(v:number[],q:number)=>v.length?v[Math.ceil(v.length*q)-1]:null;
   const windows=Object.fromEntries([15,30,60].map(seconds=>{
     const from=Math.max(input.startMs,end-seconds*1000),window=integrate(points,reference??NaN,from,end,maxGap);
     const preceding=compatible.filter(p=>p.atMs<=from).at(-1);
@@ -63,6 +67,15 @@ export function priceAreaFeatures(input:{points:readonly PricePoint[];startMs:nu
     missingMs:Math.max(0,elapsed-integral.observedMs),maxSupportedGapMs:maxGap,
     interpolation:"Piecewise linear between compatible observed endpoints, gap <= maximum; no extrapolation across outages or at tail.",
     observationN:points.length,referenceMismatchN:points.filter(p=>p.reference!==reference).length,
+    rawObservationCoverage:{pointN:points.length,uniqueSourceTimestampN:points.length,
+      duplicateTimestampN:candidates.length-points.length,firstAtMs:points[0]?.atMs??null,lastAtMs:latest?.atMs??null,
+      observedSpanMs:points.length?latest!.atMs-points[0].atMs:0,
+      medianSourceCadenceMs:quantile(gaps,.5),p95SourceCadenceMs:quantile(gaps,.95),
+      medianReceiptCadenceMs:quantile(receiptGaps,.5),p95ReceiptCadenceMs:quantile(receiptGaps,.95),
+      sourceToReceiptLatencyMs:points.flatMap(p=>p.receivedAtMs!=null?[p.receivedAtMs-p.atMs]:[])},
+    usableAreaCoverage:{supportedMs:integral.observedMs,elapsedMs:elapsed,
+      fraction:elapsed?integral.observedMs/elapsed:null,unsupportedSegments:integral.gapSegments,
+      referenceMismatchN:points.filter(p=>p.reference!==reference).length},
     crossingsPerObservedMinute:integral.observedMs?integral.crossings/(integral.observedMs/60000):null,
     volatilityUsd:volatility,volatilityAdjustedDistance:fresh&&reference!=null&&volatility!=null&&volatility>0?(latest!.price-reference)/volatility:null,
     normalizedArea:integral.timeWeightedDistanceUsd!=null&&volatility!=null&&volatility>0?integral.timeWeightedDistanceUsd/volatility:null,

@@ -5,11 +5,11 @@ import {EVENT_LOCK_STRATEGY,type EventObservation} from "../../shared/event-lock
 import {metrics} from "./bluewater-metrics";
 import {economicEvidenceFromFeatures} from "../../shared/lock-economics";
 type Forecast={side:"UP"|"DOWN";probabilityUp:number;elapsedMs:number;clockDomain:string|null;economics:unknown};
-const key=(r:TwoStageRoundRow)=>`${r.intervalMinutes}:${r.roundId}:${r.startMs}:${r.expiryMs}`;
+const key=(r:TwoStageRoundRow)=>`${r.strategyVersion??TWO_STAGE_STRATEGY}:${r.intervalMinutes}:${r.roundId}:${r.startMs}:${r.expiryMs}`;
 export async function compareTwoStage(rows:TwoStageRoundRow[],db:LockDb){
   const facts=new Map<string,{market:Forecast|null;active:Forecast|null;event:Forecast|null}>();
   if(rows.length){
-    const result=await db.query(`SELECT r.interval_minutes,r.round_id,r.start_ms,r.expiry_ms,r.market_id,
+    const result=await db.query(`SELECT r.strategy_version,r.interval_minutes,r.round_id,r.start_ms,r.expiry_ms,r.market_id,
       a.decision AS active,e.decision AS event,o.input AS first_input
       FROM waterx_two_stage_rounds r
       LEFT JOIN waterx_timed_decisions a ON a.network=r.network AND a.strategy_version=$2
@@ -23,8 +23,8 @@ export async function compareTwoStage(rows:TwoStageRoundRow[],db:LockDb){
         AND p.strategy_version=r.strategy_version AND p.input->>'sourceHealthy'='true'
         AND p.input->>'provenance'='PROSPECTIVE' AND p.available_at_ms<r.expiry_ms
         ORDER BY p.available_at_ms,p.received_at_ms LIMIT 1) o ON true
-      WHERE r.strategy_version=$1 AND r.capture_mode='PROSPECTIVE' AND r.start_ms>=$4 AND r.start_ms<=$5`,
-      [TWO_STAGE_STRATEGY,TIMED_STRATEGY,EVENT_LOCK_STRATEGY,Math.min(...rows.map(r=>r.startMs)),Math.max(...rows.map(r=>r.startMs))]);
+      WHERE r.strategy_version=ANY($1::text[]) AND r.capture_mode='PROSPECTIVE' AND r.start_ms>=$4 AND r.start_ms<=$5`,
+      [Array.from(new Set(rows.map(r=>r.strategyVersion??TWO_STAGE_STRATEGY))),TIMED_STRATEGY,EVENT_LOCK_STRATEGY,Math.min(...rows.map(r=>r.startMs)),Math.max(...rows.map(r=>r.startMs))]);
     const existing=(d:unknown):Forecast|null=>{
       const p=d as TimedDecision|null;if(!p||p.status!=="LOCKED"||!p.side||p.probabilityUp==null)return null;
       return {side:p.side,probabilityUp:p.probabilityUp,elapsedMs:p.elapsedMs,
@@ -37,7 +37,7 @@ export async function compareTwoStage(rows:TwoStageRoundRow[],db:LockDb){
         side:o.probabilityUp>.5?"UP" as const:"DOWN" as const,probabilityUp:o.probabilityUp,
         elapsedMs:o.availableAtMs-Number(r.start_ms),clockDomain:typeof o.features.decisionClockDomain==="string"?o.features.decisionClockDomain:null,
         economics:economicEvidenceFromFeatures(o.features,String(r.round_id),o.probabilityUp>.5?"UP":"DOWN",o.availableAtMs)}:null;
-      facts.set(`${r.interval_minutes}:${r.round_id}:${r.start_ms}:${r.expiry_ms}`,{market,active:existing(r.active),event:existing(r.event)});
+      facts.set(`${r.strategy_version}:${r.interval_minutes}:${r.round_id}:${r.start_ms}:${r.expiry_ms}`,{market,active:existing(r.active),event:existing(r.event)});
     }
   }
   const stage=(d:StageLock|null):Forecast|null=>d?{side:d.side,probabilityUp:d.probabilityUp,elapsedMs:d.elapsedMs,

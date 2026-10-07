@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { registerRoutes } from "./routes";
 import { initializeStore } from "./btc/store";
 import { startPriceCapture } from "./btc/chart";
+import {startTwoStageSupport} from "./waterx/two-stage-support";
 import { startWaterxCapture } from "./waterx/service";
 import { startResearchSchedule } from "./waterx/research-training";
 import { startResearchMaintenance } from "./waterx/research-maintenance";
@@ -81,6 +82,7 @@ async function main() {
       // In an approved continuously running deployment the leased worker owns
       // BOTH collectors. The web process must not duplicate the BTC stream.
       if (process.env.WATERX_EXTERNAL_COLLECTOR === "true") return;
+      startTwoStageSupport();
       startPriceCapture();
       startWaterxCapture({
         onStalled: (interval, ageMs) => {

@@ -812,3 +812,17 @@ mtime_ms = 1791399295457
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/ff936970-3b0e-4dc3-a482-b58ad3b9a688/95c26745-5df7-488c-bdfa-65dc354439de"
 storage_version_token = "1791399296614254"
 content_type = "text/html"
+
+[[outputs]]
+id = "hZDZDUYLE6r0Juy8CcEKA"
+uri = "file://reports/early-repair/activation-report.html"
+type = "html"
+title = "Early Lock repair — evidence and activation recommendation"
+description = "Self-contained report with baseline and experimental results, final tests, desktop/mobile screenshots, changed-file hashes and history-preserving rollback. Recommendation: hold activation."
+logical_id = "d81c1327-5f70-48a6-bf7d-99079379747d"
+content_hash = "sha256:8e7f04bd50f9a56c7174435106425b0513916414a6533a35807de3bc3918ae3d"
+size = 630191
+mtime_ms = 1791414822837
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/d81c1327-5f70-48a6-bf7d-99079379747d/762a55ae-26ca-48d2-833f-9feacf7ff46f"
+storage_version_token = "1791414823920968"
+content_type = "text/html"

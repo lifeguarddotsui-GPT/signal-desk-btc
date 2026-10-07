@@ -91,6 +91,7 @@ export function economicEvidenceFromFeatures(features: Record<string, unknown> |
   roundId: string, side: "UP" | "DOWN", atMs: number): EntryEconomics {
   const purchase = features?.[side === "UP" ? "purchaseUp" : "purchaseDown"] as { status?: string; askCents?: number } | undefined;
   return entryEconomics({ roundId, marketId: String(features?.marketId ?? ""), side, nowMs: atMs,
+    preference:features?.researchValuePreference as ValuePreference|undefined,
     askCents: purchase?.status === "reported" ? purchase.askCents : null,
     quote:features?.executableQuote as VerifiedEntryQuote|null|undefined,
     forecast:features?.qualifiedForecast as QualifiedForecast|null|undefined });

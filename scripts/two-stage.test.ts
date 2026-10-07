@@ -94,6 +94,7 @@ test("isolated PostgreSQL stage locks are immutable, atomic, recoverable, and un
   {skip:process.env.RUN_TIMED_POSTGRES_TESTS!=="1"},async()=>{
   const db=new pg.Pool({connectionString:process.env.DATABASE_URL,max:4});
   await db.query(readFileSync(new URL("../migrations/waterx-two-stage.sql",import.meta.url),"utf8"));
+  await db.query(readFileSync(new URL("../migrations/waterx-two-stage-prices.sql",import.meta.url),"utf8"));
   const r=input("stage-db-"+Date.now());
   await db.query(`INSERT INTO waterx_two_stage_rounds(network,market_id,round_id,interval_minutes,strategy_version,
     start_ms,expiry_ms,discovered_at_ms,capture_mode) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'SYNTHETIC')`,

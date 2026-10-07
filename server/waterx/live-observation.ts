@@ -7,6 +7,7 @@ import type {WaterxRound} from "./types";
 import {eventLockRuntime} from "./event-lock-runtime";
 import {decisionWriterAllowed,decisionClockDomain,decisionDeploymentId} from "./decision-authority";
 import {entryEconomics} from "../../shared/lock-economics";
+import {twoStageRuntime} from "./two-stage-runtime";
 
 /** The production ingestion boundary, also used by isolated provider replays.
  * Publishes continuous market evidence before optional storage/research work.
@@ -47,6 +48,7 @@ export function acceptLiveTimedObservation(input:TimedInput,round:WaterxRound,
     // Same accepted HTTP receipt, separately versioned research choices. The
     // challenger never replaces the benchmark/active strategy or funds orders.
     void eventLockRuntime.observe(accepted);
+    void twoStageRuntime.observe(accepted);
     observeTimedStrategy(accepted,scheduler);
   }
 }

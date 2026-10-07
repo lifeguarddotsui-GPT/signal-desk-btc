@@ -1,5 +1,6 @@
 import {scoredTimedHistory,timedHistoryQuery} from "./waterx/timed-history";
 import {eventLockReport} from "./waterx/event-lock-report";
+import {twoStageHistory,stageHistoryQuery} from "./waterx/two-stage-history";
 import {gateHistory,gateHistoryQuery} from "./waterx/gate-history";
 import {earlyLearningReport} from "./waterx/early-training";
 import {usdcFundingPreview} from "./agent/funding-preview";
@@ -211,6 +212,11 @@ export function registerRoutes(app: Express) {
     try{res.set("Cache-Control","no-store").json(await eventLockReport(Number(parsed.data.interval) as 5|15));}
     catch{res.status(503).json({error:"Event-lock research evidence unavailable; no comparison fabricated."});}
   });
+  app.get("/api/waterx/two-stage/history",safe(async(req,res)=>{
+    const parsed=stageHistoryQuery.safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid two-stage History filters"});return;}
+    res.set("Cache-Control","no-store").json(await twoStageHistory(parsed.data));
+  }));
   app.get("/api/waterx/gates",async(req,res)=>{
     const parsed=gateHistoryQuery.safeParse(req.query);
     if(!parsed.success){res.status(400).json({error:"Invalid gate history filters"});return;}

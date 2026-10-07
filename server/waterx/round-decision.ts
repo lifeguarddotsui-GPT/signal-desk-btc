@@ -8,6 +8,7 @@ import {evaluateLockReadiness} from "./lock-readiness";
 import {evaluateTimedDecision,type TimedDecision,type GateJournal} from "../../shared/timed-decision";
 import {provisionalLean,LEAN_VERSION} from "../../shared/provisional-lean";
 import {eventLockRuntime} from "./event-lock-runtime";
+import {twoStageRuntime} from "./two-stage-runtime";
 
 type Identity={intervalMinutes:5|15;roundId:string;startMs:number;expiryMs:number};
 type Entry={identity:Identity;observations:LockObservation[];updatedAtMs:number;
@@ -186,6 +187,7 @@ export function createRoundDecisionTracker(streamId=randomUUID()){
               timing.persistence==="SAVING"?"SAVING":lean==="UP"?"LEANING_UP":lean==="DOWN"?"LEANING_DOWN":"WATCHING",
             result:null},
          ...(eventLockRuntime.read(identity,now)?{eventChallenger:eventLockRuntime.read(identity,now)}:{}),
+         ...(twoStageRuntime.read(identity)?{twoStage:twoStageRuntime.read(identity)}:{}),
          componentTimestamps:{decisionSnapshotAtMs:entry.updatedAtMs,
            probabilitiesReceivedAtMs:last?.receivedAtMs??null,
            persistenceAtMs:timing.saved?.committedAtMs??timing.lastGate?.evaluatedAtMs??entry.updatedAtMs},

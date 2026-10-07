@@ -16,6 +16,7 @@ import {refreshEarlyShadowModels,earlyShadowStatus} from "./early-shadow-runtime
 import {researchPool} from "./research-store";
 import {gateResearchHealth,recoverGateResearch} from "./gate-research-queue";
 import {eventLockRuntime} from "./event-lock-runtime";
+import {twoStageRuntime} from "./two-stage-runtime";
 import {decisionWriterAllowed} from "./decision-authority";
 const enqueuedAt=new WeakMap<TimedInput,number>();
 const persistenceFailures=new Map<string,number>();
@@ -97,6 +98,7 @@ export function observeTimedStrategy(input:TimedInput,scheduler:GateScheduler=re
  * last-valid probability clock. Persistence records its explicit provenance. */
 export function timedSourceUnavailable(interval:5|15,atMs:number,reason:string){
   if(decisionWriterAllowed())eventLockRuntime.unavailable(interval,atMs,reason);
+  if(decisionWriterAllowed())twoStageRuntime.unavailable(interval,atMs,reason);
   const entry=active.get(interval);
   if(!entry||atMs<entry.input.startMs||atMs>=entry.input.expiryMs)return;
   entry.input={...entry.input,probabilityUp:null,probabilityDown:null,receivedAtMs:atMs,

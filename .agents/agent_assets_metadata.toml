@@ -798,3 +798,17 @@ mtime_ms = 1791388876361
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/5170567e-0424-4734-b4e1-7116c3b40faa/c78e5ed2-51f3-4356-b875-6f0732943dc0"
 storage_version_token = "1791388885579796"
 content_type = "text/html"
+
+[[outputs]]
+id = "3qBJzaKT3Ad4lqvdFHkO8"
+uri = "file://reports/two-stage/delivery-evidence.html"
+type = "html"
+title = "Two-stage shadow delivery evidence"
+description = "Measured shadow results, exact changed files and build identities, desktop/mobile screenshots, known limitations and data-preserving rollback instructions."
+logical_id = "ff936970-3b0e-4dc3-a482-b58ad3b9a688"
+content_hash = "sha256:0e8236794287d65fd9343c881a1adb3456cd3a5992813273d08cb62f7cbe8616"
+size = 507782
+mtime_ms = 1791399295457
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/ff936970-3b0e-4dc3-a482-b58ad3b9a688/95c26745-5df7-488c-bdfa-65dc354439de"
+storage_version_token = "1791399296614254"
+content_type = "text/html"

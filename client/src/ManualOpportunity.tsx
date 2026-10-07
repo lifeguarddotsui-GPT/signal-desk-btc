@@ -4,6 +4,8 @@ import type { RoundDecision } from "../../shared/round-decision";
 import type { AtomicDecisionView } from "./live-decision-contract";
 import type { AdvisoryPayload } from "./advisory-contract";
 import { EventChallengerPanel } from "./EventChallengerPanel";
+import type { TwoStageProjection, StageLock, LockStage } from "../../shared/two-stage";
+import { TWO_STAGE_STRATEGY } from "../../shared/two-stage";
 
 type Interval = 5 | 15;
 type RoundIdentity = { id: string; startMs: number; expiryMs: number };
@@ -35,6 +37,90 @@ const time = (ms: number | null | undefined) => ms == null || !Number.isFinite(m
   ? "Time unavailable" : new Date(ms).toLocaleTimeString([], { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) + " UTC";
 const identityMatches = (decision: RoundDecision | null, round: RoundIdentity | null) =>
   !!decision && !!round && decision.roundId === round.id && decision.startMs === round.startMs && decision.expiryMs === round.expiryMs;
+const twoStageTime = (value: number | null | undefined) => value == null || !Number.isFinite(value)
+  ? "time unavailable" : `${Math.max(0, Math.round(value / 1000))}s elapsed`;
+const stageReason = (reason: string | undefined, persistence: string | undefined) => {
+  if (persistence === "FAILED") return "Lock persistence failed";
+  if (persistence === "UNKNOWN") return "Commit state unknown";
+  if (persistence === "SAVING") return "Saving; not committed";
+  if (reason === "CONFIRMATION_POLICY_NOT_QUALIFIED") return "Confirmation policy not yet qualified";
+  if (reason === "NO_QUALIFYING_EARLY_VALUE" || reason === "ENTRY_TERMS_UNAVAILABLE") return "No qualifying early opportunity";
+  if (reason === "WAITING_FOR_FRESH_DATA" || reason === "SOURCE_STALE") return "Waiting for fresh data";
+  if (reason === "WAITING_FOR_ADDITIONAL_EVIDENCE") return "Building additional evidence";
+  if (reason === "ROUND_EXPIRED") return "Round complete · no qualifying lock";
+  if (reason === "SAME_SIDE_PERSISTENCE_INCOMPLETE" || reason === "STABILITY_WINDOW_INCOMPLETE" ||
+      reason === "DIRECTIONAL_SEPARATION_BELOW_POLICY" || reason === "NO_VALID_PROBABILITY_INPUT") return "Building evidence";
+  const normalized = reason?.replaceAll("_", " ").trim();
+  if (normalized && !["conditions satisfied", "locked"].includes(normalized.toLowerCase())) return normalized;
+  return "Building evidence";
+};
+
+function TwoStageDeskRows({ projection, round, interval }: {
+  projection: TwoStageProjection | null | undefined;
+  round: RoundIdentity | null;
+  interval: Interval;
+}) {
+  const exact = !!projection && !!round &&
+    projection.roundId === round.id && projection.startMs === round.startMs &&
+    projection.expiryMs === round.expiryMs && projection.intervalMinutes === interval &&
+    projection.strategyVersion === TWO_STAGE_STRATEGY && projection.shadowOnly === true &&
+    projection.automaticExecutionAllowed === false;
+  const candidate = exact ? projection : null;
+  const getLock = (stage: LockStage): StageLock | null => {
+    const state = stage === "EARLY" ? candidate?.early : candidate?.confirmation;
+    const lock = state?.lock;
+    if (!candidate || state?.persistence !== "COMMITTED" || !lock || lock.stage !== stage ||
+      lock.network !== "sui:mainnet" || lock.roundId !== candidate.roundId ||
+      lock.startMs !== candidate.startMs || lock.expiryMs !== candidate.expiryMs ||
+      lock.intervalMinutes !== candidate.intervalMinutes || lock.strategyVersion !== TWO_STAGE_STRATEGY ||
+      lock.marketId !== candidate.marketId || lock.shadowOnly !== true ||
+      lock.automaticExecutionAllowed !== false || (lock.commitVerified !== true && lock.committedAtMs == null)) return null;
+    return lock;
+  };
+  const early = getLock("EARLY");
+  const confirmation = getLock("CONFIRMATION");
+  const relationship = early && confirmation
+    ? early.side === confirmation.side ? "Agrees with Early Lock" : "Changed direction"
+    : early ? "No confirmation" : confirmation ? "No early decision" : null;
+  const displayStage = (title: string, stage: LockStage, lock: StageLock | null) => {
+    const state = candidate ? stage === "EARLY" ? candidate.early : candidate.confirmation : null;
+    const description = lock
+      ? `${lock.side} · ${twoStageTime(lock.elapsedMs)} · ${lock.probabilitySource}`
+      : !projection ? "Building evidence · two-stage projection unavailable"
+        : !candidate ? "Building evidence · projection does not match this round and interval"
+          : stageReason(state?.reason, state?.persistence);
+    const economics = lock?.economics;
+    const returnText = economics?.totalReturnedIfCorrectUsd != null &&
+      Number.isFinite(economics.totalReturnedIfCorrectUsd) && Number.isFinite(economics.collateralUsd)
+      ? `${economics.kind === "VERIFIED_QUOTE" ? "Verified" : "Indicative"} $${economics.collateralUsd.toFixed(2)} collateral → $${economics.totalReturnedIfCorrectUsd.toFixed(2)} total return if correct`
+      : "$5 return unavailable";
+    return <div className={`two-stage-desk-row${lock ? " committed" : ""}`} key={stage} data-stage={stage.toLowerCase()}>
+      <span className="two-stage-row-label">{title}</span>
+      <strong>{lock ? `${lock.side} · ${twoStageTime(lock.elapsedMs)}` : description}</strong>
+      {lock && <small>{lock.probabilitySource} · frozen {percent(lock.probabilityUp)} UP / {percent(1 - lock.probabilityUp)} DOWN · {returnText}</small>}
+      {lock && <small>Calibration {lock.calibrationStatus === "QUALIFIED" ? "qualified" : "unqualified"}{lock.modelVersion ? ` · ${lock.modelVersion}` : " · no qualified model"}</small>}
+    </div>;
+  };
+  return <section className="two-stage-desk" aria-label="Two-stage shadow research">
+    <div className="two-stage-desk-heading"><span>SHADOW RESEARCH</span><b>Two-stage · not active · no order authority</b></div>
+    {displayStage("EARLY LOCK", "EARLY", early)}
+    {displayStage("CONFIRMATION LOCK", "CONFIRMATION", confirmation)}
+    <p className="two-stage-relationship">{relationship ?? (candidate
+      ? "No stage lock committed"
+      : "Relationship unavailable until exact-round evidence is reported")}</p>
+    {candidate && <details className="two-stage-diagnostics">
+      <summary>Two-stage diagnostics</summary>
+      <div><span>Strategy / market</span><b>{candidate.strategyVersion} · {candidate.marketId}</b></div>
+      <div><span>Settlement rule</span><b>{JSON.stringify(candidate.settlementRule)}</b></div>
+      <div><span>Price features</span><b>{JSON.stringify(candidate.priceFeatures)}</b></div>
+      {([["EARLY", candidate.early, early], ["CONFIRMATION", candidate.confirmation, confirmation]] as const).map(([name, state, lock]) =>
+        <div className="two-stage-diagnostic-lock" key={name}><span>{name} diagnostics</span><b>{lock
+          ? `Policy ${lock.policyVersion} · feature ${lock.featureVersion} · cutoff ${time(lock.evidenceCutoffMs)} · qualified ${time(lock.qualifiedAtMs)} · committed ${time(lock.committedAtMs)} · model ${lock.modelVersion ?? "not reported"} · calibration ${lock.calibrationStatus} · observations ${lock.observationIds.join(", ") || "none reported"} · economics ${JSON.stringify(lock.economics)}`
+          : `${state.persistence} · ${state.reason || "No committed lock"} · diagnostics unavailable`}</b></div>)}
+      <p>Frozen stage evidence is separate from current market odds and current purchase terms. Every stage is shadow-only.</p>
+    </details>}
+  </section>;
+}
 
 export function ManualOpportunity({
   view, now, interval = view.decision?.intervalMinutes ?? 5, round, onIntervalChange, onRetry, refresh,
@@ -50,6 +136,7 @@ export function ManualOpportunity({
     return ()=>media.removeEventListener("change",update);
   },[]);
   const decision = view.decision;
+  const twoStageProjection = (decision as (RoundDecision & { twoStage?: TwoStageProjection | null }) | null)?.twoStage;
   const exactRound = round !== undefined ? round : (decision ? { id: decision.roundId, startMs: decision.startMs, expiryMs: decision.expiryMs } : null);
   const exactDecision = identityMatches(decision, exactRound) && decision?.intervalMinutes === interval ? decision : null;
   const exactFresh = !!exactDecision && view.fresh;
@@ -164,6 +251,8 @@ export function ManualOpportunity({
         <small>{savedSource} · saved {time(saved?.committedAtMs ?? saved?.decisionAtMs)} · {clock(exactRound!.expiryMs-(saved?.committedAtMs??saved?.decisionAtMs??exactRound!.expiryMs))} before close</small>
       </div>}
     </div>
+
+    <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} />
 
     <div className={`desk-decision-card${locked ? " locked" : ""}`}>
       <h3 className="desk-section-title">Bluewater decision <span className="desk-active-policy">ACTIVE · 30-SECOND BENCHMARK</span></h3>

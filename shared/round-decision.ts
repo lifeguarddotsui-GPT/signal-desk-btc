@@ -30,6 +30,7 @@ export type RoundDecision = {
   earlyDecision?:EarlyDecision|null;
   timedDecision?:TimedState|null;
   eventChallenger?:import("./event-lock").EventLockProjection|null;
+  twoStage?:import("./two-stage").TwoStageProjection|null;
   earlyPersistence?:{status:"DEVELOPING"|"SAVING"|"FAILED"|"SAVED";errorClass:string|null};
   opportunity?:OpportunityContext|null;
   componentHealth?:{priceFeed:"AVAILABLE"|"UNAVAILABLE";decisionService:"AVAILABLE"|"STALE"|"UNAVAILABLE";

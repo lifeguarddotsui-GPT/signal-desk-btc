@@ -1,0 +1,1 @@
+interval_minutes,created_at_ms,protocol,feature_version,confirmation_status,confirmation_calibration_n,confirmation_test_n,confirmation_reason,has_confirmation_artifact,report_reason

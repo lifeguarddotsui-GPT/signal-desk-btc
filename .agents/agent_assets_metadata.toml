@@ -826,3 +826,17 @@ mtime_ms = 1791414822837
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/d81c1327-5f70-48a6-bf7d-99079379747d/762a55ae-26ca-48d2-833f-9feacf7ff46f"
 storage_version_token = "1791414823920968"
 content_type = "text/html"
+
+[[outputs]]
+id = "vzUNXgjEulFCQFAC_fhfh"
+uri = "file://docs/round-history-audit-2026-10-08.html"
+type = "html"
+title = "Round History audit, evidence and rollback plan"
+description = "Production-versus-GitHub comparison, real read-only cohorts and failures, verified development repairs, unresolved gaps and rollout safeguards."
+logical_id = "de329df3-494e-4195-bc9c-70eeab1e03f8"
+content_hash = "sha256:3722e893db224e800fe59249bf8333f8ce53d5116f83ee71f20a4228bd58b179"
+size = 55089
+mtime_ms = 1791495245729
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/de329df3-494e-4195-bc9c-70eeab1e03f8/47f428bd-e406-46a5-81e5-ebf5b7fb16fb"
+storage_version_token = "1791495280592364"
+content_type = "text/html"

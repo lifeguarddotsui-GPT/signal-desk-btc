@@ -35,6 +35,10 @@ export type TwoStageRoundRow=TimedRound&{
   disputed:boolean;dataFailure:boolean;earlyReason:string;confirmationReason:string;
   strategyVersion?:string;
   captureBuildId?:string;
+  settlementStatus?:import("./waterx-round-identity").SettlementStatus;
+  settlementReason?:string|null;
+  earlyScore?:import("./waterx-round-identity").StageScore;
+  confirmationScore?:import("./waterx-round-identity").StageScore;
 };
 export type StageStats={
   correct:number;incorrect:number;pending:number;disputed:number;scoredN:number;accuracy:number|null;
@@ -43,6 +47,7 @@ export type StageStats={
   actualTradingPnl:null;
   earlyWindows?:{seconds:number;locks:number;rate:number|null}[];
   timingN?:number;timingUnknownN?:number;timingBasis?:string;
+  noLockN?:number;abstainedN?:number;dataFailureN?:number;withheldN?:number;
 };
 export type TwoStageHistory={
   strategyVersion:string;asOfMs:number;shadowOnly:true;activeStrategy:string;
@@ -53,6 +58,7 @@ export type TwoStageHistory={
   missingRecordDenominator?:string;
   rows:TwoStageRoundRow[];rowsTruncated:boolean;learning:unknown;comparison:unknown;
   breakdown?:unknown;
+  pairedRates?:{scoredN:number;earlyAccuracy:number|null;confirmationAccuracy:number|null;agreementN:number;disagreementN:number};
 };
 export function stageRelationship(early:StageLock|null,confirmation:StageLock|null):TwoStageProjection["relationship"]{
   if(!early)return "No early decision";

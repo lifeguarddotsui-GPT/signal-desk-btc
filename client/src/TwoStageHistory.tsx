@@ -16,9 +16,37 @@ const duration = (value: number | null | undefined) => value == null || !Number.
 const money = (value: number | null | undefined) => value == null || !Number.isFinite(value)
   ? "Not reported" : `$${value.toFixed(2)}`;
 const readable = (value: string | null | undefined) => value?.trim() || "Not reported";
-const score = (lock: StageLock | null, row: TwoStageRoundRow) => !lock ? "No lock"
-  : row.disputed ? "Disputed" : row.outcome == null ? "Pending"
-    : lock.side === row.outcome ? "Correct" : "Incorrect";
+type SettlementStatus = "VERIFIED" | "PENDING" | "WITHHELD" | "DISPUTED" | "MISSING" | "IDENTITY_MISMATCH";
+type IndependentScore = "CORRECT" | "INCORRECT" | "PENDING" | "WITHHELD" | "DISPUTED" | "NO_LOCK" | "ABSTAINED" | "DATA_FAILURE" | "IDENTITY_MISMATCH";
+type ExtendedRound = TwoStageRoundRow & {
+  settlementStatus?: SettlementStatus;
+  settlementReason?: string | null;
+  earlyScore?: IndependentScore;
+  confirmationScore?: IndependentScore;
+};
+type PairedRates = { scoredN: number; earlyAccuracy: number | null; confirmationAccuracy: number | null; agreementN: number; disagreementN: number };
+const settlement = (row: TwoStageRoundRow) => {
+  const extended = row as ExtendedRound;
+  const status = extended.settlementStatus ?? (row.disputed ? "DISPUTED" : row.outcome != null ? "VERIFIED" : "PENDING");
+  // Legacy outcome is only evidence when the service says VERIFIED (or no status was supplied).
+  const outcome = extended.settlementStatus == null || status === "VERIFIED" ? row.outcome : null;
+  return { status, outcome, reason: extended.settlementReason };
+};
+const settlementLabel = (status: SettlementStatus) => ({
+  VERIFIED: "Verified outcome", PENDING: "Settlement pending", WITHHELD: "Outcome withheld",
+  DISPUTED: "Outcome disputed", MISSING: "Settlement record missing", IDENTITY_MISMATCH: "Round identity mismatch",
+}[status]);
+const score = (lock: StageLock | null, row: TwoStageRoundRow, stage: "early" | "confirmation") => {
+  const extended = row as ExtendedRound;
+  const supplied = stage === "early" ? extended.earlyScore : extended.confirmationScore;
+  if (supplied) return supplied.replaceAll("_", " ");
+  if (!lock) return "No lock";
+  const result = settlement(row);
+  if (result.status === "WITHHELD" || result.status === "MISSING" || result.status === "IDENTITY_MISMATCH") return settlementLabel(result.status);
+  if (result.status === "DISPUTED" || row.disputed) return "Disputed";
+  if (result.status !== "VERIFIED" || result.outcome == null) return "Pending";
+  return lock.side === result.outcome ? "Correct" : "Incorrect";
+};
 const calibration = (value: unknown) => value == null ? "Not reported" : JSON.stringify(value);
 const committedHistoryLock = (lock: StageLock | null, stage: "EARLY" | "CONFIRMATION", row: TwoStageRoundRow) => {
   const expectedVersion = row.strategyVersion ?? lock?.strategyVersion;
@@ -37,6 +65,7 @@ const committedHistoryLock = (lock: StageLock | null, stage: "EARLY" | "CONFIRMA
 export function StageStatsBlock({ title, stats }: { title: string; stats: StageStats }) {
   const scored = stats.scoredN;
   const ratio = `${stats.correct} : ${stats.incorrect}`;
+  const extended = stats as StageStats & { noLockN?: number; abstainedN?: number; dataFailureN?: number; withheldN?: number };
   return <section className="two-stage-stats" aria-label={`${title} statistics`}>
     <header><h3>{title}</h3><span>stage-specific cohort</span></header>
     <div className="two-stage-stat-grid">
@@ -44,12 +73,14 @@ export function StageStatsBlock({ title, stats }: { title: string; stats: StageS
       <div><span>Accuracy · scored n={scored}</span><b>{percent(stats.accuracy)}</b></div>
       <div><span>Pending / disputed</span><b>{stats.pending} / {stats.disputed}</b></div>
       <div><span>Decision coverage · locks / cohort</span><b>{stats.locks} / {stats.cohortN} · {percent(stats.coverage)}</b></div>
+      <div><span>Outcome availability · withheld</span><b>{extended.withheldN ?? "Not reported"}</b></div>
+      <div><span>No lock · abstained · data failure</span><b>{extended.noLockN ?? "Not reported"} · {extended.abstainedN ?? "Not reported"} · {extended.dataFailureN ?? "Not reported"}</b></div>
       <div><span>Lock elapsed · median / p90</span><b>{duration(stats.medianElapsedMs)} / {duration(stats.p90ElapsedMs)}</b></div>
       <div><span>Calibration</span><b>{calibration(stats.calibration)}</b></div>
       {stats.earlyWindows?.map(window => <div key={window.seconds}><span>Locks by {window.seconds}s · locks / cohort n={stats.cohortN}</span><b>{window.locks} / {stats.cohortN} · {percent(window.rate)}</b></div>)}
       <div><span>Brier score</span><b>{stats.brier == null ? "Not reported" : stats.brier.toFixed(4)}</b></div>
-      <div><span>Entry-economics evidence</span><b>{stats.indicativeN} indicative · {stats.verifiedQuoteN} verified quotes</b></div>
-      <div><span>Actual trading P/L</span><b>{stats.actualTradingPnl == null ? "Unavailable · no fills inferred" : money(stats.actualTradingPnl)}</b></div>
+      <div><span>Indicative economics · research only</span><b>{stats.indicativeN} indicative · {stats.verifiedQuoteN} verified quotes · not executable evidence</b></div>
+      <div><span>Actual trading P/L</span><b>Unavailable · no fills inferred</b></div>
     </div>
   </section>;
 }
@@ -61,7 +92,7 @@ function StageEvidence({ title, lock }: { title: string; lock: StageLock | null 
     <div className="two-stage-fact"><span>{title} · frozen choice</span><b>{lock.side} · {percent(lock.probabilityUp)} UP / {percent(1 - lock.probabilityUp)} DOWN · {lock.probabilitySource}</b></div>
     <div className="two-stage-fact"><span>{title} · lock timing</span><b>Cutoff {dateTime(lock.evidenceCutoffMs)} · qualified {dateTime(lock.qualifiedAtMs)} · commit acknowledgement {dateTime(lock.committedAtMs)} · elapsed {duration(lock.elapsedMs)} · remaining {duration(lock.remainingMs)}</b></div>
     <div className="two-stage-fact"><span>{title} · provenance</span><b>{lock.network} · {lock.marketId} · {lock.strategyVersion} · {lock.policyVersion} · {lock.featureVersion} · model {lock.modelVersion ?? "not reported"} · calibration {lock.calibrationStatus}</b></div>
-    <div className="two-stage-fact"><span>{title} · economics</span><b>{economics.kind} · collateral {money(economics.collateralUsd)} · return if correct {money(economics.totalReturnedIfCorrectUsd)} · net if correct {money(economics.netProfitIfCorrectUsd)} · loss if incorrect {money(economics.lossIfIncorrectUsd)} · costs {money(economics.totalCostUsd)} · {economics.reason}</b></div>
+    <div className="two-stage-fact"><span>{title} · indicative research economics · not executable / not P&amp;L</span><b>{economics.kind} · collateral {money(economics.collateralUsd)} · hypothetical return if correct {money(economics.totalReturnedIfCorrectUsd)} · hypothetical net if correct {money(economics.netProfitIfCorrectUsd)} · hypothetical loss if incorrect {money(economics.lossIfIncorrectUsd)} · estimated costs {money(economics.totalCostUsd)} · {economics.reason}</b></div>
     {lock.researchPreference && <div className="two-stage-fact"><span>{title} · frozen research preference</span><b>{lock.researchPreference.mode} · collateral {money(lock.researchPreference.collateralUsd)} · minimum return {money(lock.researchPreference.minimumReturnUsd)} · preferred return {money(lock.researchPreference.preferredReturnUsd)} · {lock.valueStatus ?? "value status not reported"}</b></div>}
     {lock.diagnostics && <div className="two-stage-fact"><span>{title} · qualification measurements / thresholds</span><b>{lock.diagnostics.message} · measurements {JSON.stringify(lock.diagnostics.measurements)} · thresholds {JSON.stringify(lock.diagnostics.thresholds)}</b></div>}
     {lock.timing && <div className="two-stage-fact"><span>{title} · processing timeline</span><b>Server received {dateTime(lock.timing.receivedAtMs)} · accepted {dateTime(lock.timing.acceptedAtMs)} · qualified {dateTime(lock.timing.qualifiedAtMs)} · acquisition started {dateTime(lock.timing.acquisitionStartedAtMs)} · acquired {dateTime(lock.timing.acquiredAtMs)} · server commit acknowledgement {dateTime(lock.timing.commitAcknowledgedAtMs)} · projection {dateTime(lock.timing.projectionAtMs)}</b></div>}
@@ -78,8 +109,11 @@ function StageEvidence({ title, lock }: { title: string; lock: StageLock | null 
 export function RoundRow({ row }: { row: TwoStageRoundRow }) {
   const early = committedHistoryLock(row.early, "EARLY", row);
   const confirmation = committedHistoryLock(row.confirmation, "CONFIRMATION", row);
+  const result = settlement(row);
+  const leadTime = early && confirmation && early.committedAtMs != null && confirmation.committedAtMs != null
+    ? duration(Math.abs(confirmation.committedAtMs - early.committedAtMs)) : "Not available";
   const stageSummary = (lock: StageLock | null) => lock
-    ? `${lock.side} · ${duration(lock.elapsedMs)}` : "No lock";
+    ? `${lock.side} · ${duration(lock.elapsedMs)} · ${score(lock, row, lock.stage === "EARLY" ? "early" : "confirmation")}` : "No lock";
   return <article className="two-stage-history-row">
     <details>
       <summary>
@@ -87,15 +121,17 @@ export function RoundRow({ row }: { row: TwoStageRoundRow }) {
         <span><b>{stageSummary(early)}</b><small>Early Lock</small></span>
         <span><b>{stageSummary(confirmation)}</b><small>Confirmation Lock</small></span>
         <span className="two-stage-row-relationship">{row.relationship}</span>
-        <span className="two-stage-row-outcome">{row.disputed ? "Disputed" : row.outcome ?? "Pending"}</span>
+        <span className="two-stage-row-outcome">{settlementLabel(result.status)}</span>
       </summary>
       <div className="two-stage-row-details">
-        <div className="two-stage-detail-score"><span>Early score</span><b>{score(early, row)}</b><span>Confirmation score</span><b>{score(confirmation, row)}</b></div>
+        <div className="two-stage-detail-score"><span>Early side / score</span><b>{early ? `${early.side} · ${score(early, row, "early")}` : `No lock · ${score(null, row, "early")}`}</b><span>Confirmation side / score</span><b>{confirmation ? `${confirmation.side} · ${score(confirmation, row, "confirmation")}` : `No lock · ${score(null, row, "confirmation")}`}</b></div>
+        <div className="two-stage-fact"><span>Immutable stage timestamps · lead time</span><b>Early committed {dateTime(early?.committedAtMs)} · Confirmation committed {dateTime(confirmation?.committedAtMs)} · separation {leadTime}</b></div>
         <div className="two-stage-fact"><span>Exact round</span><b>{row.roundId} · {row.marketId} · {row.intervalMinutes}m · {dateTime(row.startMs)} → {dateTime(row.expiryMs)}</b></div>
-        <div className="two-stage-fact"><span>Relationship and verified outcome</span><b>{row.relationship} · {row.disputed ? "Disputed; excluded from accuracy" : readable(row.outcome)}</b></div>
+        <div className="two-stage-fact"><span>Settlement status · verified outcome</span><b>{settlementLabel(result.status)} · {result.status === "VERIFIED" ? readable(result.outcome) : "Not verified; outcome excluded"}{result.reason ? ` · ${result.reason}` : ""}</b></div>
         <StageEvidence title="Early Lock" lock={early} />
         <StageEvidence title="Confirmation Lock" lock={confirmation} />
-        <div className="two-stage-fact"><span>Round diagnostics</span><b>Early: {row.earlyReason || "not reported"} · Confirmation: {row.confirmationReason || "not reported"} · data failure {row.dataFailure ? "yes" : "no"}</b></div>
+        <div className="two-stage-fact"><span>No-lock reason · Early</span><b>{early ? "Lock recorded" : row.earlyReason || "Not reported"}</b></div>
+        <div className="two-stage-fact"><span>No-lock reason · Confirmation</span><b>{confirmation ? "Lock recorded" : row.confirmationReason || "Not reported"} · data failure {row.dataFailure ? "yes" : "no"}</b></div>
       </div>
     </details>
   </article>;
@@ -153,6 +189,8 @@ export default function TwoStageHistory() {
 
   const cohort = load.kind === "ready" ? load.data.cohort : null;
   const paired = load.kind === "ready" ? load.data.paired : null;
+  const pairedRates = load.kind === "ready"
+    ? (load.data as TwoStageHistory & { pairedRates?: PairedRates }).pairedRates : undefined;
   const pairedRows: [keyof NonNullable<typeof paired>, string][] = [
     ["BOTH_CORRECT", "Both correct"],
     ["EARLY_WRONG_CONFIRMATION_CORRECT", "Early wrong · confirmation correct"],
@@ -195,11 +233,17 @@ export default function TwoStageHistory() {
       <div className="two-stage-stage-stats"><StageStatsBlock title="Early Lock" stats={load.data.early} /><StageStatsBlock title="Confirmation Lock" stats={load.data.confirmation} /></div>
       <section className="two-stage-paired" aria-label="Paired stage outcomes">
         <header><h3>Paired outcomes</h3><span>round counts · not independent predictions</span></header>
+        {pairedRates && <div className="two-stage-paired-rates">
+          <span>Paired scored cohort n={pairedRates.scoredN}</span>
+          <span>Early win rate <b>{percent(pairedRates.earlyAccuracy)}</b></span>
+          <span>Confirmation win rate <b>{percent(pairedRates.confirmationAccuracy)}</b></span>
+          <span>Agreement / disagreement <b>{pairedRates.agreementN} / {pairedRates.disagreementN}</b></span>
+        </div>}
         <div className="two-stage-paired-grid">{pairedRows.map(([key, label]) => <div key={key}><span>{label}</span><b>{paired?.[key] ?? "Not reported"}</b></div>)}</div>
       </section>
       <section className="two-stage-data-quality" aria-label="Cohort data completeness">
-        <span>Data failure rate · discovered cohort n={cohort?.cohortN ?? "not reported"}</span><b>{percent(load.data.dataFailureRate)} · count not returned</b>
-        <span>Missing-record rate · active discovered rounds n={load.data.expectedCohortN ?? "not reported"}</span><b>{percent(load.data.missingRecordRate)} · {load.data.missingRecordDenominator ?? "denominator unavailable"}</b>
+        <span>Data failure rate · captured cohort n={cohort?.cohortN ?? "not reported"}</span><b>{percent(load.data.dataFailureRate)} · count not returned</b>
+        <span>Missing-record coverage · separately discovered rounds</span><b>{percent(load.data.missingRecordRate)} · {load.data.missingRecordDenominator ?? "denominator unavailable"}</b>
         <span>Active-strategy discovered cohort denominator</span><b>{load.data.expectedCohortN ?? "Not reported"}</b>
       </section>
       {load.data.breakdown != null && <details className="two-stage-learning two-stage-breakdown"><summary>Measured breakdowns · interval and build</summary>

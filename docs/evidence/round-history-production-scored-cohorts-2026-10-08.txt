@@ -1,0 +1,5 @@
+interval_minutes,strategy_version,lock_stage,locks,scored,correct
+5,waterx-two-stage-shadow-v1,EARLY,23,23,22
+5,waterx-two-stage-shadow-v2,EARLY,50,49,37
+15,waterx-two-stage-shadow-v1,EARLY,10,10,8
+15,waterx-two-stage-shadow-v2,EARLY,18,18,16

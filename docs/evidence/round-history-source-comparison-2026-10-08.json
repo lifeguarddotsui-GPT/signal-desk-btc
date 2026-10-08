@@ -1,0 +1,390 @@
+{
+  "capturedAt": "2026-10-08T21:18:07.110Z",
+  "productionBuild": {
+    "id": "sha256:cc27f0af984a67aea94bdc79912218394a16a9bb83bb5f1b769676b33d6fe5c2",
+    "format": 3,
+    "builtAt": "2026-10-08T15:14:26.722Z",
+    "sourceCommit": "8dd2280097901b6a6a7f3ed7ef8f00e05935dd36",
+    "schemaVersion": "schema-sha256:26ac301f39d2cd7528572ae0d582472bd137dcd836c528a1aeae3b2edbaa68e1",
+    "configurationVersion": "policy-sha256:f1c33346311bce18ef8a0ae37564484c10499b62db51f9c77aca0c03d66b4088",
+    "modelArtifactVersion": "btc-logistic-artifact/v1",
+    "sourceSnapshotSha256": "77a77e749a21080d80a294ff0c5c12a4606326835d7fe368f457583729195722",
+    "sourceArchiveUrl": "/source-release.tar.gz"
+  },
+  "githubCommit": "796a787f778a4d52eb13eade7bbca1c1569d18b6",
+  "githubBuild": {
+    "id": "sha256:e8c8231a9d6db0157d094ce66329081b62536e0d9da3a24dbef9a2760e6f5c15",
+    "format": 3,
+    "builtAt": "2026-10-06T17:19:41.366Z",
+    "sourceCommit": null,
+    "schemaVersion": "schema-sha256:5854c06ac7d0a7361ca117ae8e1ee078897cf3590de08ed77c524915369f5709",
+    "configurationVersion": "policy-sha256:08c857703efb855e0c06ead8017d0afdacc6695c34d316f678766d91be1f7db2",
+    "modelArtifactVersion": "btc-logistic-artifact/v1",
+    "sourceSnapshotSha256": "038396a861125cb7f82d08ba109767c243bd7901f82d78fbadf8667cce74a179",
+    "sourceArchiveUrl": "/source-release.tar.gz"
+  },
+  "verifiedProductionFileHashes": 357,
+  "relevantChanges": [
+    {
+      "file": "client/src/CanonicalHistory.tsx",
+      "status": "MODIFIED",
+      "githubSha256": "31336c8e5fc1ddb3de3bb45e301755c2ce8927b9221e505c59e758efb4de6e6d",
+      "productionSha256": "2cd73c375bc1868ac45673f1ae128b36f9aa21a5abbc2be4786ad351beb3c87d"
+    },
+    {
+      "file": "client/src/ManualOpportunity.css",
+      "status": "MODIFIED",
+      "githubSha256": "a9815c79329344393f4862708bc04142e9fc1c3a92e744675797ddd482e4ac76",
+      "productionSha256": "e5008ce52130c9f827b60a95cac32a0bd1226b404919b48aee9bd4d6f929f21e"
+    },
+    {
+      "file": "client/src/ManualOpportunity.tsx",
+      "status": "MODIFIED",
+      "githubSha256": "e89c5eb1c2f55f64c55ee658491f3bbd271cf75c862d2ee21a8ba1476d146050",
+      "productionSha256": "968ba44c15c03169dc64ae7167ac382f31f7196b02a9956cc9f9e5281ede34c4"
+    },
+    {
+      "file": "client/src/TimedDecisionHistory.tsx",
+      "status": "MODIFIED",
+      "githubSha256": "528bc2ec9fe95dbeb00cf81d3fecc9dca4d527f359bee6ecef6780fafdc6918a",
+      "productionSha256": "8c5845034cf5967b18fcf2316e4335b9371ca767557bd4f666f97d841df8d188"
+    },
+    {
+      "file": "client/src/TimedStrategyHistory.tsx",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "4668fce0605de861f775ec6292cebc65e993368725fd2fa3e224bdf763203ebb"
+    },
+    {
+      "file": "client/src/TwoStageHistory.tsx",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "4cde8acc37a9397e6ea0c871c257bfef70b2913fccfa6cfa8a911413deb13e0f"
+    },
+    {
+      "file": "script/build.ts",
+      "status": "MODIFIED",
+      "githubSha256": "3c60cce7c736c8782022cff3241228425009a9b78eb46908d621432006e41491",
+      "productionSha256": "2cf4a811c63b6365297096fddc24c8de9d46c2b5dfb442b2132e9b4c560cbb28"
+    },
+    {
+      "file": "scripts/timed-decision-postgres.test.ts",
+      "status": "MODIFIED",
+      "githubSha256": "bec3b115004ba6bc0a17b522baf5e3bf95f9553b844060e8c73a6141b25fcc71",
+      "productionSha256": "580e5e7ed6a50c2ea20d663175b60a6abae1debc5002e0b49d82745819a10fd7"
+    },
+    {
+      "file": "scripts/two-stage.test.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "559079aa9ac3e84b9775b3059c8b8abe0a4d1b59af6a4e4c497d50fc5666b6d9"
+    },
+    {
+      "file": "scripts/waterx-advisory.test.ts",
+      "status": "MODIFIED",
+      "githubSha256": "2f78d469203f7b134c1d8c62e729f950a737e7066aeb5f3dcb54d0a831173eb1",
+      "productionSha256": "d2c85cdfedac8f3566f04f194b590e807b2fdf223be30602eddc2c5d8bd53b82"
+    },
+    {
+      "file": "scripts/waterx-collector-continuity.test.ts",
+      "status": "MODIFIED",
+      "githubSha256": "7acf2b8c2775c55f977e4f8237b4a981a938283c508cc5ad1177bb552ce8b507",
+      "productionSha256": "28680f2b5f3a36775d0b7f7e562a09589e3da39450f84d1b918d3877fd86a6d1"
+    },
+    {
+      "file": "scripts/waterx-data-incident.test.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "447a7e20a500172e232caaf28c106f446887ff2d7b6b0949b8c694ead7807014"
+    },
+    {
+      "file": "scripts/waterx-source.test.ts",
+      "status": "MODIFIED",
+      "githubSha256": "d9e0d57a6d7db8def72007d557867d5c2d7f99bbab29fdad005f1a6da6dc800a",
+      "productionSha256": "aa18220f255793bf0d2ec9d7f71c184be865e3e7fd2e9bb9b9dabeb6a8c2f9f1"
+    },
+    {
+      "file": "server/index.ts",
+      "status": "MODIFIED",
+      "githubSha256": "79897b8a715e47bbf83d9c0b8f34ffb2e73396647ea1641020e251705a66d161",
+      "productionSha256": "456c64fa5653d59473154010295ce011cfb226eca4df45465c4dea30e1f59acb"
+    },
+    {
+      "file": "server/routes.ts",
+      "status": "MODIFIED",
+      "githubSha256": "2765cc2ecca58ff815c0412f676d9293276eda611dff55dc591cf23902b4f2e4",
+      "productionSha256": "fb2dea1cb99b9abe655b32fe2e1147c91b1f378984d996cc4799f8ec612c83fe"
+    },
+    {
+      "file": "server/waterx/advisory.ts",
+      "status": "MODIFIED",
+      "githubSha256": "f62e54dc5c4255c987efc6766c630d6f4cc7933700075121b26003de5b6d35b1",
+      "productionSha256": "c01d764ddd0254c1f94832157f60e29c5a81eb32f04c23c24a2129d0c5a46e13"
+    },
+    {
+      "file": "server/waterx/collection-cadence.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "5843d4072428cbc3f1725a4de6f60d9d87540500c6cf6f329f359e7ee0041e3c"
+    },
+    {
+      "file": "server/waterx/decision-authority.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "dc3589ffd7a16b833ff41a10dc4eaf7c11756138a0be2bb2268a997ca531e40d"
+    },
+    {
+      "file": "server/waterx/early-horizons.ts",
+      "status": "MODIFIED",
+      "githubSha256": "acb9e2f3480aad694d77ffc4c613e1e008b5f7954041ab9d218caaa12971c475",
+      "productionSha256": "95aaddf116be7c3bf997ecc0deaef5d643862292ebc917679e11c6252635ca23"
+    },
+    {
+      "file": "server/waterx/early-policy.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "48ec49146e84c3668a197694def81fc012a85a2cb6801d86f61d7c7268819dc0"
+    },
+    {
+      "file": "server/waterx/early-stopping.ts",
+      "status": "MODIFIED",
+      "githubSha256": "9913e4c9e4d91a1365ff0c1b8ec7679dd1b9b0b247e596104913b01418830cf1",
+      "productionSha256": "6e3a1ff9d4488d0981a7feeafeb64bff9e34ea8a4d9c0653969e4c7e36b942be"
+    },
+    {
+      "file": "server/waterx/early-training.ts",
+      "status": "MODIFIED",
+      "githubSha256": "f63a117d1190f761f408f56a5ae3e2007f4a7f2d848ee9a37859567a00acebcd",
+      "productionSha256": "b533066d02480f40e93029f552e2389a5687f8a21ee810aa9efbe11523748cf6"
+    },
+    {
+      "file": "server/waterx/event-lock-learning.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "a8a878241c95d54db1d1105b6a75c24efd2e7ab5d04d238dd73d82ab80174bb4"
+    },
+    {
+      "file": "server/waterx/event-lock-report.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "8a4fa8597f0d64a209a2222c3d0edf12cc8f299d84efede214b87aa9c0925eca"
+    },
+    {
+      "file": "server/waterx/event-lock-runtime.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "1bf37efb6b8e0945f94a193c23eb863d6cfc806c0f54a029ebf0e53a8c8cf2a8"
+    },
+    {
+      "file": "server/waterx/event-lock-store.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "468aeee698affef5f4675a1999a10a4ab734540238a4dbd85afdead2e847c14e"
+    },
+    {
+      "file": "server/waterx/event-report-metrics.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "2383507fe3607a43088949addd27f8f3bdbb939d2c5c11b8f28cef64fd98b9d7"
+    },
+    {
+      "file": "server/waterx/event-stability-experiment.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "b730d7c5afc598192de6e31ee65a9b86a0742528679369662ceeccf24ebdc487"
+    },
+    {
+      "file": "server/waterx/event-value-evidence.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "413240332f4e6ffa45d440a62a4db2146a8f2b8fa75f4c03df59e3d8d874af70"
+    },
+    {
+      "file": "server/waterx/gate-history.ts",
+      "status": "MODIFIED",
+      "githubSha256": "371dcc9cb51d52d7ed7a54e016c7879814dcd1b0e9a852ba697893708020ba1e",
+      "productionSha256": "6e0b0d80633cb652810d19150dd9023fd907f25e4167b316a743b9067f89d2cf"
+    },
+    {
+      "file": "server/waterx/gate-research-queue.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "d5cf289201b9fc47167beea70ceeec300db65918d366c27ef0f2ecb4ece4668b"
+    },
+    {
+      "file": "server/waterx/live-observation.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "f4d0e3e0f13f1feadab0352d3fde337b29aa7c18a5b9d94d16f94aae6957325a"
+    },
+    {
+      "file": "server/waterx/pooled-early-training.ts",
+      "status": "MODIFIED",
+      "githubSha256": "0088dbab50d2eaab1671deb138e48c93741a22fad61ab766c20807dab08ed981",
+      "productionSha256": "3a6c1948129655a81b08f9ecd4d32bc8ba40633ff5115cf57b495e68b13fda5a"
+    },
+    {
+      "file": "server/waterx/refresh-health.ts",
+      "status": "MODIFIED",
+      "githubSha256": "6174c878b5efb7588f74f083521a24b27c262c947e5e244955fac64de7e8ac32",
+      "productionSha256": "f66c0ab7209f0115daefe22836396e21cc6a85a5a60ffbd09ef2243a5d18d736"
+    },
+    {
+      "file": "server/waterx/research-store.ts",
+      "status": "MODIFIED",
+      "githubSha256": "b6da4727c90135987f01b46e2156a7bb8f35bad6d0b12bf38c242ee0fe56270e",
+      "productionSha256": "0e6cd6f494f2292d98e955d374777e127f200e769ee817c3f7219d9de888c475"
+    },
+    {
+      "file": "server/waterx/round-decision.ts",
+      "status": "MODIFIED",
+      "githubSha256": "a6e7bbd70d87be2459827a927bc334ac9cd8e214b0c3f21cc26cd0fc65b57747",
+      "productionSha256": "b7ba95e4f5d24a42c1d70667c07f64eac41ab9c133e6aefcc367699a9e7716a7"
+    },
+    {
+      "file": "server/waterx/service.ts",
+      "status": "MODIFIED",
+      "githubSha256": "dd32406a2eea049cc55fcc7ea51208dd5edac8706ede4f4df6a368333198fe4e",
+      "productionSha256": "b39228e5535164cb14936dcb1b535bca34ef626c033d59c11b7334c1f7206c0b"
+    },
+    {
+      "file": "server/waterx/source.ts",
+      "status": "MODIFIED",
+      "githubSha256": "ca93ce14b504bc0cd182de315acdd316b5d77f274e7db562d1f45bab853c7bca",
+      "productionSha256": "02a128627f19784da169fa979e83d5155611a91d6258c50eff99aa1fc1f2e645"
+    },
+    {
+      "file": "server/waterx/timed-db.ts",
+      "status": "MODIFIED",
+      "githubSha256": "a9a9574a9fd080ad84f0555609b256fccb89cd1a345187d2c6214446985c1b82",
+      "productionSha256": "48a6ade6b1a69af98ef86d9edd12830a631c34d20df0aa82890ce1cecbb95a96"
+    },
+    {
+      "file": "server/waterx/timed-decision-coordinator.ts",
+      "status": "MODIFIED",
+      "githubSha256": "e95c5b1441171883c64f4255b893b88f09601815293308922b95965559b133c5",
+      "productionSha256": "e403b12f10d788e2f6c40a1865a741b60f0fbd3734d84e9632e0e4228ed5c3df"
+    },
+    {
+      "file": "server/waterx/timed-decision-store.ts",
+      "status": "MODIFIED",
+      "githubSha256": "ceb335f2e10879aaf23253eda0d1aba9327f69d830a53301ec5d6b724a83edca",
+      "productionSha256": "79dce747f1b8244b66bf3c786badfb6f76ff40ddb01cdfde67a133f735131649"
+    },
+    {
+      "file": "server/waterx/timed-history.ts",
+      "status": "MODIFIED",
+      "githubSha256": "65263240c6ac4f2950d353cb163a28fc98fbb5e0969d5d33a09bea53cc1e5e6f",
+      "productionSha256": "3e958c75b57fa2473ad3536e1944f9560897fa1189a49070838a5a8b707a2836"
+    },
+    {
+      "file": "server/waterx/two-stage-comparison.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "07963a23967d65c75b75aedc40c06b46cab9f004b208809fd6086f80e970671b"
+    },
+    {
+      "file": "server/waterx/two-stage-history.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "443a59596aaaab929005b612f17692465db943dab353c5abdef5b2d1e51a4f6f"
+    },
+    {
+      "file": "server/waterx/two-stage-learning.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "706aae3c160b93357ceb80d7d07bfb4c7b74dab05cff7c7cc925320178adc7a1"
+    },
+    {
+      "file": "server/waterx/two-stage-policy.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "b760417d4cca6ce9fdff1947a025b33e52b4ed3d43cd5361bf5551ead3393087"
+    },
+    {
+      "file": "server/waterx/two-stage-registry.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "7307e9add7a92eacf952d0e96292784c8e02a4ccf7e4e76218ce1ca0b7ec215a"
+    },
+    {
+      "file": "server/waterx/two-stage-runtime.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "6d90910c3214c6d3cb8b7f1c48bf51222fed13c59c00ca5a5583c64530e31a96"
+    },
+    {
+      "file": "server/waterx/two-stage-store.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "fc203c1f8ffe1fc1ba3cb7d5ffb07a149b6ee8db838c754321f9e97db25975fd"
+    },
+    {
+      "file": "server/waterx/two-stage-support.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "1e264eb60eea1c9a198b428d231e4fad9b52595d6a5f0574716579e76b80d17a"
+    },
+    {
+      "file": "server/waterx/worker.ts",
+      "status": "MODIFIED",
+      "githubSha256": "7723cfdbe4f1c1b4347e9a6f16a8e8b53394121a3b79aa9771fb9e0b9e4fde33",
+      "productionSha256": "58e11f2f728528934d05384198644fd697c2c9782b74256e355824fe9e0a7a72"
+    },
+    {
+      "file": "shared/agent-onboarding.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "5d4ae84d95cb87e27bb90127a2ecb58a4f47c7169e93f2eb2ce6d0ab3d6ddf17"
+    },
+    {
+      "file": "shared/agent-policy.ts",
+      "status": "MODIFIED",
+      "githubSha256": "63d284ff25382aef3948f21ac056c43f230897991df539d847e7ba21c1a0350e",
+      "productionSha256": "27d5f7fef41d54e9908139b2d7aa15b2b71bb488e14792c766783af46f93919f"
+    },
+    {
+      "file": "shared/event-lock.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "dc20fff3df5f9ec4d71a998b901ef299959138d541cb31c30e4dfd2d5b0c9ace"
+    },
+    {
+      "file": "shared/lock-economics.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "61af877ab686c4e9b9247abea917aff27202a014e56be91cbc98f97b73a8b41e"
+    },
+    {
+      "file": "shared/price-area.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "8c23890b15b0ad5b8be8e858616af73792474631a86b0e8044e559f39ef3b737"
+    },
+    {
+      "file": "shared/provisional-lean.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "cbb567d558671a1c1023faf6ac3deb65acf2b1d086e927afd2f6047282c809fb"
+    },
+    {
+      "file": "shared/round-decision.ts",
+      "status": "MODIFIED",
+      "githubSha256": "16d254713f5427111d3664f870b97ec575be7205997ce00ae951ea46505ba8af",
+      "productionSha256": "60fdd051adad9df775186eccec11dbf5bdf1cce7cc7fbcfd29bd271d5d3cfc56"
+    },
+    {
+      "file": "shared/two-stage.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "d16ebfb7d445b5214ea6a29ab908d44199fef84ed23d8dc5107a0cb989751a86"
+    },
+    {
+      "file": "shared/waterx-data-health.ts",
+      "status": "ADDED",
+      "githubSha256": null,
+      "productionSha256": "0d414350618ded08f9b0dcdbf1025c18299b8eecba86faab96e9498d6ee8a9b1"
+    }
+  ],
+  "note": "Archive bytes compared; public Git history is independent of workspace Git history. Runtime/database/host configuration parity is not asserted."
+}

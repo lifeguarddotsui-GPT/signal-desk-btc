@@ -14,9 +14,10 @@ import {observeTimedStrategy,timedSourceUnavailable,stopTimedStrategy,startTimed
 import {timedPoolHealth} from "./timed-db";
 import {acceptLiveTimedObservation} from "./live-observation";
 import {healthyCollectionDelay,collectionTimerDelay,collectionCadence,observeCollectionResponse} from "./collection-cadence";
-import { getCurrentWaterxRound, getWaterxRoundAtEpoch, verifiedHistoricalRound, WaterxProviderError } from "./source";
+import { getCurrentWaterxRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
-import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxRound, recordWaterxSettlement, type WaterxRoundInput } from "./learning";
+import { recordWaterxRound, type WaterxRoundInput } from "./learning";
+import { settlementReconciler } from "./settlement-reconciler";
 import {
   getAllWaterxDiagnostics, getWaterxDiagnostics, waterxFetchFailed, waterxFetchFinished,
   waterxFetchStarted, waterxFetchSucceeded, waterxScheduleTick, waterxScheduleNext,
@@ -53,53 +54,6 @@ const REFRESH_WAIT_MS = 5_000;
 const PROVIDER_READ_TIMEOUT_MS = 10_000;
 const watchdogs = new Map<WaterxInterval, NodeJS.Timeout>();
 const refreshControllers = new Map<WaterxInterval, AbortController>();
-const settlementJobs = new Map<WaterxInterval, Promise<void>>();
-const lastSettlementAttempt = new Map<WaterxInterval, number>();
-const SETTLEMENT_POLL_MS = 60_000;
-
-function validOutcome(value: string | null): "UP" | "DOWN" | null {
-  const normalized = value?.trim().toUpperCase();
-  return normalized === "UP" || normalized === "DOWN" ? normalized : null;
-}
-
-async function reconcileKnown(interval: WaterxInterval): Promise<void> {
-  const pending = await listPendingWaterxSettlements(interval, 2);
-  for (const row of pending) {
-    try {
-      if (!Number.isSafeInteger(row.startMs) || !Number.isSafeInteger(row.expiryMs) ||
-          row.startMs % 1000 !== 0 || row.expiryMs % 1000 !== 0) {
-        console.warn(`[waterx-${interval}m] skipped settlement with fractional or invalid round timestamps`);
-        continue;
-      }
-      if (!await markWaterxSettlementAttempt(interval, row.roundId)) continue;
-      const closingEpoch = row.expiryMs / 1000;
-      const historical = await getWaterxRoundAtEpoch(interval, closingEpoch);
-      const resolved = verifiedHistoricalRound(historical, row.roundId, closingEpoch);
-      const status = resolved.resolutionStatus?.trim().toLowerCase();
-      if (!status) continue;
-      const outcome = resolved.settlement?.outcome ?? null;
-      const settledAt = resolved.settlement?.settledAt ?? null;
-      if (status !== "resolved")
-        continue;
-      const observedAt = new Date().toISOString();
-      await recordWaterxSettlement({
-        intervalMinutes: interval,
-        roundId: row.roundId,
-        anchorPrice: resolved.anchorPrice,
-        anchorConfirmed: resolved.anchorPriceConfirmed,
-        settlePrice: resolved.settlePrice,
-        outcome: validOutcome(outcome) ? validOutcome(outcome) : outcome,
-        settledAt: settledAt === null ? null : settledAt * 1000,
-        observedAt,
-        resolutionStatus: status,
-      });
-    } catch (error) {
-      // A settlement endpoint can remain unavailable while the round is not resolved.
-      console.warn(`[waterx-${interval}m] settlement read failed`,
-        error instanceof Error ? error.message.slice(0, 160) : "unknown error");
-    }
-  }
-}
 
 // Persistence and settlement must never own a live polling promise. A stalled
 // database query used to strand *both* intervals after their successful first
@@ -214,19 +168,6 @@ const observationQueue = createWaterxBackgroundQueue<WaterxObservationInput>(
   },
 );
 
-function queueSettlement(interval: WaterxInterval, now = Date.now()): void {
-  if (settlementJobs.has(interval) ||
-      now - (lastSettlementAttempt.get(interval) ?? -Infinity) < SETTLEMENT_POLL_MS) return;
-  lastSettlementAttempt.set(interval, now);
-  const job = reconcileKnown(interval)
-    .catch(error => {
-      console.error(`[waterx-${interval}m] settlement reconciliation failed:`,
-        error instanceof Error ? error.message.slice(0, 180) : "unknown error");
-    }).finally(() => {
-      if (settlementJobs.get(interval) === job) settlementJobs.delete(interval);
-    });
-  settlementJobs.set(interval, job);
-}
 
 export function calculateWaterxRetryDelay(
   interval: WaterxInterval, error: unknown, failureCount: number, random = Math.random(),
@@ -469,7 +410,6 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
     refreshHealth.record({interval,roundId:candidate.id,stage:"IDENTITY_VALIDATION",outcome:"error",errorClass:"ROUND_REGRESSION"});
     waterxFetchSucceeded(interval, candidate, now, false, undefined,
       result.sourceTimestamp, result.requestReceivedAt);
-    queueSettlement(interval, now);
     return;
   }
   // A provider preview of the next round is not evidence that the active,
@@ -477,7 +417,6 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
   if (result.status !== "LIVE" && shouldKeepActiveRoundOnFuture(previous, candidate.startsAt, now)) {
     waterxFetchSucceeded(interval, previous!.round!, now, true, "LIVE",
       result.sourceTimestamp, result.requestReceivedAt);
-    queueSettlement(interval, now);
     return;
   }
   const startMs = candidate.startsAt * 1000;
@@ -559,7 +498,6 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
     };
   }
   snapshots.set(interval, snapshot);
-  queueSettlement(interval, now);
 }
 
 function recordPollFailure(interval: WaterxInterval, error: unknown): void {
@@ -670,6 +608,7 @@ export function startWaterxCapture(options: {
   onStalled?: (interval: WaterxInterval, ageMs: number) => void;
 } = {}): () => void {
   startTimedRecovery();
+  settlementReconciler.start();
   const notifiedStalls = new Set<WaterxInterval>();
   for (const interval of intervals) {
     if (running.has(interval)) continue;
@@ -738,6 +677,7 @@ export function startWaterxCapture(options: {
     watchdogs.set(interval, watchdog);
   }
   return () => {
+    settlementReconciler.stop();
     earlyLockTimers.stop();
     stopTimedStrategy();
     for (const timer of Array.from(timers.values())) clearTimeout(timer);

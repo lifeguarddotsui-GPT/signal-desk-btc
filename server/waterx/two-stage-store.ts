@@ -2,21 +2,25 @@ import {randomUUID} from "node:crypto";
 import type {LockDb} from "./lock-store";
 import {TWO_STAGE_STRATEGY,TWO_STAGE_FEATURES,type StageLock,type StageInput,type LockStage} from "../../shared/two-stage";
 import {assessStage,type LearnedStagePolicy} from "./two-stage-policy";
+import {sameWaterxRound,canonicalWaterxRoundKey} from "../../shared/waterx-round-identity";
 export const stageIdentity=(r:Pick<StageInput,"marketId"|"roundId"|"intervalMinutes">)=>
   ["sui:mainnet",r.marketId,r.roundId,r.intervalMinutes,TWO_STAGE_STRATEGY];
 export async function readStageLocks(input:StageInput,db:LockDb){
+  canonicalWaterxRoundKey(input);
   const rows=await db.query(`SELECT d.decision,o.committed_ack_at_ms FROM waterx_two_stage_locks d
     JOIN waterx_two_stage_outbox o ON o.decision_id=d.id WHERE network=$1 AND market_id=$2
     AND round_id=$3 AND interval_minutes=$4 AND strategy_version=$5`,stageIdentity(input));
   return rows.rows.map(row=>{
     const d={...(row.decision as StageLock),commitVerified:true as const};
-    if(d.marketId!==input.marketId||d.startMs!==input.startMs||d.expiryMs!==input.expiryMs)
+    if(d.marketId!==input.marketId||!sameWaterxRound(d,input)||d.network!=="sui:mainnet"||
+       d.strategyVersion!==TWO_STAGE_STRATEGY||!["EARLY","CONFIRMATION"].includes(d.stage))
       throw new Error("TWO_STAGE_IDENTITY_MISMATCH");
     d.committedAtMs=row.committed_ack_at_ms==null?null:Number(row.committed_ack_at_ms);return d;
   });
 }
 export async function commitStage(input:StageInput,stage:LockStage,early:StageLock|null,policy:LearnedStagePolicy|null,
   db:LockDb,current:()=>boolean,now:()=>number){
+  canonicalWaterxRoundKey(input);
   input={...input,observations:input.observations.filter(o=>o.availableAtMs<=input.nowMs&&o.receivedAtMs<=input.nowMs)};
   const assessment=assessStage(input,stage,early,policy),latest=input.observations.at(-1);
   if(!assessment.eligible||!assessment.side||!assessment.economics||!latest||!current())return null;

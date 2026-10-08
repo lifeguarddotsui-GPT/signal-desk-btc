@@ -7,6 +7,7 @@ import {historyTimeRange} from "./timed-history";
 import {metrics as forecastMetrics} from "./bluewater-metrics";
 import {twoStageRuntime} from "./two-stage-runtime";
 import {compareTwoStage} from "./two-stage-comparison";
+import {sameWaterxRound,stageScore,type SettlementStatus} from "../../shared/waterx-round-identity";
 export const stageHistoryQuery=z.object({
   interval:z.enum(["all","5","15"]).default("all"),window:z.enum(["today","24h","7d","custom"]).default("today"),
   timezoneOffsetMinutes:z.coerce.number().int().min(-840).max(840).default(0),
@@ -23,21 +24,23 @@ export function scoreStageRounds(rows:TwoStageRoundRow[]){
     if(!r.early&&!r.confirmation)paired.NEITHER++;
     else if(!r.early)paired.CONFIRMATION_ONLY++;
     else if(!r.confirmation)paired.EARLY_ONLY++;
-    else if(!r.outcome||r.disputed)paired.BOTH_PENDING_OR_DISPUTED++;
+    else if(!r.outcome||r.disputed||(r.settlementStatus!=null&&r.settlementStatus!=="VERIFIED"))paired.BOTH_PENDING_OR_DISPUTED++;
     else if(r.early.side===r.outcome&&r.confirmation.side===r.outcome)paired.BOTH_CORRECT++;
     else if(r.early.side!==r.outcome&&r.confirmation.side===r.outcome)paired.EARLY_WRONG_CONFIRMATION_CORRECT++;
     else if(r.early.side===r.outcome)paired.EARLY_CORRECT_CONFIRMATION_WRONG++;
     else paired.BOTH_WRONG++;
   }
   const stats=(stage:"early"|"confirmation"):StageStats=>{
-    const locks=rows.filter(r=>r[stage]),scored=locks.filter(r=>r.outcome&&!r.disputed);
+    const locks=rows.filter(r=>r[stage]),scored=locks.filter(r=>r.outcome&&!r.disputed&&
+      (r.settlementStatus==null||r.settlementStatus==="VERIFIED"));
     const correct=scored.filter(r=>r[stage]!.side===r.outcome).length;
     const calibrated=scored.filter(r=>r[stage]!.calibrationStatus==="QUALIFIED"&&r[stage]!.modelVersion);
     const metric=forecastMetrics(calibrated.map(r=>({probability:r[stage]!.probabilityUp,outcome:r.outcome!})));
      const elapsed=(r:TwoStageRoundRow)=>r[stage]!.committedAtMs==null?null:
        Math.max(0,r[stage]!.committedAtMs!-r.startMs);
      const times=locks.flatMap(r=>elapsed(r)==null?[]:[elapsed(r)!]);
-    return {correct,incorrect:scored.length-correct,pending:locks.filter(r=>!r.outcome&&!r.disputed).length,
+    const scoreFor=(r:TwoStageRoundRow)=>stage==="early"?r.earlyScore:r.confirmationScore;
+    return {correct,incorrect:scored.length-correct,pending:locks.filter(r=>!r.outcome&&!r.disputed&&r.settlementStatus!=="WITHHELD").length,
       disputed:locks.filter(r=>r.disputed).length,scoredN:scored.length,accuracy:scored.length?correct/scored.length:null,
       locks:locks.length,cohortN:rows.length,coverage:rows.length?locks.length/rows.length:null,
       medianElapsedMs:percentile(times,.5),p90ElapsedMs:percentile(times,.9),brier:metric.brier,
@@ -45,12 +48,23 @@ export function scoreStageRounds(rows:TwoStageRoundRow[]){
       indicativeN:locks.filter(r=>r[stage]!.economics.kind==="INDICATIVE").length,
        verifiedQuoteN:locks.filter(r=>r[stage]!.economics.kind==="VERIFIED_QUOTE").length,actualTradingPnl:null,
        timingN:times.length,timingUnknownN:locks.length-times.length,timingBasis:"APPLICATION_COMMIT_ACKNOWLEDGEMENT_NOT_WAL_COMMIT",
+       noLockN:rows.length-locks.length,abstainedN:rows.filter(r=>scoreFor(r)==="ABSTAINED").length,
+       dataFailureN:rows.filter(r=>scoreFor(r)==="DATA_FAILURE"||scoreFor(r)==="IDENTITY_MISMATCH").length,
+       withheldN:locks.filter(r=>r.settlementStatus==="WITHHELD").length,
        earlyWindows:(rows.length&&rows.every(r=>r.intervalMinutes===15)?[60,120,180,300]:[30,60,90,120]).map(seconds=>{
          const n=locks.filter(r=>elapsed(r)!=null&&elapsed(r)!<=seconds*1000).length;
          return {seconds,locks:n,rate:rows.length?n/rows.length:null};
        })};
   };
-  return {early:stats("early"),confirmation:stats("confirmation"),paired};
+  const pairedScored=paired.BOTH_CORRECT+paired.EARLY_WRONG_CONFIRMATION_CORRECT+
+    paired.EARLY_CORRECT_CONFIRMATION_WRONG+paired.BOTH_WRONG;
+  const pairedRows=rows.filter(r=>r.early&&r.confirmation);
+  return {early:stats("early"),confirmation:stats("confirmation"),paired,
+    pairedRates:{scoredN:pairedScored,
+      earlyAccuracy:pairedScored?(paired.BOTH_CORRECT+paired.EARLY_CORRECT_CONFIRMATION_WRONG)/pairedScored:null,
+      confirmationAccuracy:pairedScored?(paired.BOTH_CORRECT+paired.EARLY_WRONG_CONFIRMATION_CORRECT)/pairedScored:null,
+      agreementN:pairedRows.filter(r=>r.early!.side===r.confirmation!.side).length,
+      disagreementN:pairedRows.filter(r=>r.early!.side!==r.confirmation!.side).length}};
 }
 export async function twoStageHistory(query:unknown,now=Date.now(),db:LockDb=researchPool):Promise<TwoStageHistory>{
   const q=stageHistoryQuery.parse(query),{since,until}=historyTimeRange({...q,strategy:"all",deployment:"all"},now);
@@ -60,9 +74,13 @@ export async function twoStageHistory(query:unknown,now=Date.now(),db:LockDb=res
     CASE WHEN co.decision_id IS NOT NULL THEN c.decision END AS confirmation,
     eo.committed_ack_at_ms AS early_ack,co.committed_ack_at_ms AS confirmation_ack,
     a.reason AS early_reason,b.reason AS confirmation_reason,
+    a.data_failure AS early_data_failure,b.data_failure AS confirmation_data_failure,
     coalesce(a.data_failure,false) OR coalesce(b.data_failure,false) AS data_failure,
     l.settlement_disputed AS disputed,
+    l.label_status,l.withheld_reason,l.settlement_disputed_reason,l.round_id AS label_round_id,
+    l.start_ms AS label_start_ms,l.expiry_ms AS label_expiry_ms,
     CASE WHEN l.label_status='verified' AND NOT l.settlement_disputed AND
+      l.start_ms=r.start_ms AND l.expiry_ms=r.expiry_ms AND
       (l.settlement_quarantine IS NULL OR l.settlement_quarantine='[]'::jsonb) AND l.settled_at>r.expiry_ms
       AND l.settled_at<=$5 AND l.first_verified_at<=to_timestamp($5::double precision/1000)
       AND l.settle_price>0 AND l.settlement_anchor_price>0 AND l.settle_price<'Infinity'::float8
@@ -81,20 +99,42 @@ export async function twoStageHistory(query:unknown,now=Date.now(),db:LockDb=res
     LEFT JOIN waterx_two_stage_assessments b ON b.network=r.network AND b.market_id=r.market_id AND b.round_id=r.round_id
       AND b.interval_minutes=r.interval_minutes AND b.strategy_version=r.strategy_version AND b.stage='CONFIRMATION'
     LEFT JOIN waterx_learning_rounds l ON l.interval_minutes=r.interval_minutes AND l.round_id=r.round_id
-      AND l.start_ms=r.start_ms AND l.expiry_ms=r.expiry_ms
      WHERE r.network='sui:mainnet' AND r.strategy_version=ANY($1::text[]) AND r.capture_mode='PROSPECTIVE'
       AND ($2::int IS NULL OR r.interval_minutes=$2) AND r.start_ms>=$3 AND r.start_ms<$4
     ORDER BY r.start_ms DESC,r.interval_minutes,r.market_id,r.round_id`,
      [strategies,q.interval==="all"?null:Number(q.interval),since,until,now]);
-  const lock=(d:StageLock|null,ack:unknown)=>d?{...d,commitVerified:true as const,committedAtMs:ack==null?null:Number(ack)}:null;
   const rows:TwoStageRoundRow[]=result.rows.map(r=>{
-    const early=lock(r.early as StageLock|null,r.early_ack),confirmation=lock(r.confirmation as StageLock|null,r.confirmation_ack);
-     return {roundId:String(r.round_id),marketId:String(r.market_id),strategyVersion:String(r.strategy_version),
+    const identity={roundId:String(r.round_id),intervalMinutes:Number(r.interval_minutes) as 5|15,
+      startMs:Number(r.start_ms),expiryMs:Number(r.expiry_ms)};
+    const lock=(d:StageLock|null,ack:unknown,stage:"EARLY"|"CONFIRMATION")=>{
+      if(!d||!sameWaterxRound(d,identity)||d.marketId!==r.market_id||d.network!==r.network||
+        d.strategyVersion!==r.strategy_version||d.stage!==stage)return null;
+      return {...d,commitVerified:true as const,committedAtMs:ack==null?null:Number(ack)};
+    };
+    const early=lock(r.early as StageLock|null,r.early_ack,"EARLY"),
+      confirmation=lock(r.confirmation as StageLock|null,r.confirmation_ack,"CONFIRMATION");
+    const mismatch=r.label_round_id!=null&&!sameWaterxRound(identity,{...identity,
+      startMs:Number(r.label_start_ms),expiryMs:Number(r.label_expiry_ms)});
+    const settlementStatus:SettlementStatus=mismatch?"IDENTITY_MISMATCH":r.disputed===true?"DISPUTED":
+      r.verified_outcome?"VERIFIED":r.label_status==="withheld"?"WITHHELD":
+      r.label_round_id==null?"MISSING":"PENDING";
+    const earlyReason=r.early&&!early?"EARLY_LOCK_IDENTITY_MISMATCH":String(r.early_reason??"MISSING_DURABLE_ASSESSMENT");
+    const confirmationReason=r.confirmation&&!confirmation?"CONFIRMATION_LOCK_IDENTITY_MISMATCH":
+      String(r.confirmation_reason??"MISSING_DURABLE_ASSESSMENT");
+    const outcome=settlementStatus==="VERIFIED"?r.verified_outcome as "UP"|"DOWN":null;
+     return {...identity,marketId:String(r.market_id),strategyVersion:String(r.strategy_version),
        captureBuildId:String(r.capture_build_id??"LEGACY_UNKNOWN"),intervalMinutes:Number(r.interval_minutes) as 5|15,
       startMs:Number(r.start_ms),expiryMs:Number(r.expiry_ms),early,confirmation,
-      outcome:r.verified_outcome as "UP"|"DOWN"|null,disputed:r.disputed===true,dataFailure:r.data_failure===true,
-      relationship:stageRelationship(early,confirmation),earlyReason:String(r.early_reason??"ASSESSMENT_NOT_RECORDED"),
-      confirmationReason:String(r.confirmation_reason??"ASSESSMENT_NOT_RECORDED")};
+       outcome,disputed:r.disputed===true,dataFailure:r.data_failure===true||mismatch||
+         !!(r.early&&!early)||!!(r.confirmation&&!confirmation),settlementStatus,
+       settlementReason:mismatch?"Exact-round start or expiry does not match the settlement":
+         r.settlement_disputed_reason!=null?String(r.settlement_disputed_reason):
+           r.withheld_reason!=null?String(r.withheld_reason):null,
+       relationship:stageRelationship(early,confirmation),earlyReason,confirmationReason,
+       earlyScore:r.early&&!early?"IDENTITY_MISMATCH":stageScore({side:early?.side??null,outcome,settlementStatus,
+         reason:earlyReason,dataFailure:r.early_data_failure===true}),
+       confirmationScore:r.confirmation&&!confirmation?"IDENTITY_MISMATCH":stageScore({side:confirmation?.side??null,
+         outcome,settlementStatus,reason:confirmationReason,dataFailure:r.confirmation_data_failure===true})};
   });
   const training=await db.query(`SELECT DISTINCT ON(interval_minutes) interval_minutes,report
     FROM waterx_two_stage_training ORDER BY interval_minutes,created_at_ms DESC`);

@@ -1,0 +1,9 @@
+{
+  "window": "Returned deployment log slice ending 2026-10-08T21:24:32Z",
+  "lines": 1012,
+  "timedStorageTimeouts": 524,
+  "connectionTimeoutMentions": 313,
+  "scheduleRecoveryTimeouts": 42,
+  "settlementFailures": 52,
+  "note": "Returned log-slice counts, not exhaustive failed runs; provider/database errors and duplicate log entries are not collapsed."
+}

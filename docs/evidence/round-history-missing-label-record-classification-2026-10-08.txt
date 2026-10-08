@@ -1,0 +1,5 @@
+interval_minutes,state,missing_learning_records,provider_uuid_records
+5,FROZEN,32,32
+5,NO_VALID_CHOICE,28,28
+15,FROZEN,8,8
+15,NO_VALID_CHOICE,1,1

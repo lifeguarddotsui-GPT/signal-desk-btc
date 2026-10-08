@@ -1,4 +1,5 @@
 import pg from "pg";
+import {canonicalWaterxRoundKey,sameWaterxRound} from "../../shared/waterx-round-identity";
 import { waterxObservedRoundCoverage } from "./coverage";
 import {
   marketCaptureCoverage,
@@ -314,6 +315,7 @@ export async function recordWaterxRound(
       input.startMs % 1000 !== 0 || input.expiryMs % 1000 !== 0 ||
       input.expiryMs - input.startMs !== input.intervalMinutes * 60_000)
     throw new Error("WaterX round timestamps are invalid");
+  canonicalWaterxRoundKey(input);
   finiteOrNull("anchorPrice", input.anchorPrice);
   finiteOrNull("probabilityUp", input.probabilityUp);
   if (input.anchorPrice !== null && input.anchorPrice <= 0)
@@ -387,6 +389,7 @@ export function waterxSettlementRejection(input: WaterxSettlementInput, round: {
   round_id?: string;
   initial_anchor_price?: string | number | null;
   initial_anchor_confirmed?: boolean | null;
+  start_ms?: number | string;
 }): string | null {
   const expiryMs = Number(round.expiry_ms);
   const storedAnchor = round.anchor_price === null ? null : Number(round.anchor_price);
@@ -394,6 +397,11 @@ export function waterxSettlementRejection(input: WaterxSettlementInput, round: {
     return "Settlement interval does not match the WaterX round identity.";
   if (round.round_id !== undefined && round.round_id !== input.roundId)
     return "Settlement round ID does not match the WaterX round identity.";
+  if(round.start_ms!==undefined&&!sameWaterxRound(
+    {intervalMinutes:input.intervalMinutes,roundId:input.roundId,startMs:Number(round.start_ms),expiryMs},
+    {intervalMinutes:input.intervalMinutes,roundId:input.roundId,
+      startMs:expiryMs-input.intervalMinutes*60_000,expiryMs}))
+    return "Settlement boundaries do not match the canonical WaterX round identity.";
   const observedAtMs = Date.parse(input.observedAt);
   if (!Number.isFinite(observedAtMs))
     return "WaterX settlement observedAt is not a valid timestamp.";

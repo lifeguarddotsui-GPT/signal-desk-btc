@@ -26,3 +26,4 @@
 - [Isolated release validation](isolated-release-validation.md) — passing ordinary tests can hide skipped auth/research regressions; run complete isolated database suites before release claims.
 - [Value-aware opportunity](value-aware-opportunity.md) — $5 returning $6–$7 is a configurable pre-cost preference, not a promise or $7 maximum.
 - [Two-stage scope](two-stage-scope.md) — independent locks do not mean two forced locks; preserve the Desk and never delay Early just to manufacture Confirmation.
+- [Settlement queue coverage](settlement-queue-coverage.md) — zero pending labels does not prove complete history; check saved decisions missing their settlement metadata separately.

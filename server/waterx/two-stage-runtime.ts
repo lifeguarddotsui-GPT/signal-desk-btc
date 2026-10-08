@@ -11,14 +11,15 @@ import {researchPreference} from "./early-policy";
 import {stagePolicyRegistry} from "./two-stage-registry";
 import type {PricePoint} from "../../shared/price-area";
 import type {ResearchPreference} from "../../shared/two-stage";
+import {canonicalWaterxRoundKey} from "../../shared/waterx-round-identity";
 type Db={query:pg.Pool["query"];connect:pg.Pool["connect"]};
 type Entry={round:StageInput;queue:TimedInput[];version:number;observations:EventObservation[];
   early:StageState;confirmation:StageState;job:Promise<void>|null;restored:boolean;error:string|null;
   prices:Map<string,PricePoint>;priceQueue:Map<string,PricePoint>;lastReloadMs:number;lastReceiptMs:number;
   receivedAtMs:number;acceptedAtMs:number;acquisitionStartedAtMs:number|null;acquiredAtMs:number|null;
-  candidates:Map<"EARLY"|"CONFIRMATION",StageInput>};
+  candidates:Map<"EARLY"|"CONFIRMATION",StageInput>;deadlineRecorded:boolean};
 const initial=():StageState=>({lock:null,persistence:"OBSERVING",reason:"BUILDING_EVIDENCE"});
-const identity=(r:StageInput)=>stageIdentity(r).join(":")+`:${r.startMs}:${r.expiryMs}`;
+const identity=(r:StageInput)=>`${r.marketId}:${canonicalWaterxRoundKey(r)}`;
 // Dedicated SHADOW capacity: never contend for the benchmark's reserved pool.
 let defaultPool:pg.Pool|undefined;
 let idlePoolFailure:string|null=null;
@@ -42,7 +43,7 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
   const newEntry=(round:StageInput):Entry=>({round,queue:[],version:0,observations:[],
     early:initial(),confirmation:initial(),job:null,restored:false,error:null,prices:new Map(),priceQueue:new Map(),
     lastReceiptMs:-1,lastReloadMs:0,receivedAtMs:now(),acceptedAtMs:now(),
-    acquisitionStartedAtMs:null,acquiredAtMs:null,candidates:new Map()});
+    acquisitionStartedAtMs:null,acquiredAtMs:null,candidates:new Map(),deadlineRecorded:false});
   const policyFor=(input:StageInput,stage:"EARLY"|"CONFIRMATION")=>options.policies?
     options.policies(input.intervalMinutes)[stage]??null:
       stage==="CONFIRMATION"?stagePolicyRegistry.policy(input,stage):null;
@@ -153,7 +154,15 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
            if(latest?.features.reference!==input.observations.at(-1)?.features.reference)return false;
            return candidateStillValid(input,latest,now());
          };
-        state.reason=assessment.reason;
+         const priorReason=state.reason;
+         state.reason=assessment.reason;
+         if(now()>=e.round.expiryMs&&!state.lock){
+           state.reason=/POLICY_NOT_QUALIFIED/.test(priorReason)?"ABSTAINED_CONFIRMATION_POLICY_NOT_QUALIFIED":
+             e.error?"MISSED_DEADLINE_DATABASE_FAILURE":
+             !e.observations.at(-1)?.sourceHealthy?"MISSED_DEADLINE_DATA_UNAVAILABLE":
+             /BELOW_POLICY|PERSISTENCE_INCOMPLETE|STABILITY_WINDOW|SEPARATION|ADDITIONAL_EVIDENCE/.test(priorReason)?
+               `ABSTAINED_${priorReason}`:"MISSED_DEADLINE_NO_QUALIFIED_LOCK";
+         }
          state.diagnostics=assessment.diagnostics;
          if(!assessment.eligible||!current()){e.candidates.delete(stage);state.persistence="OBSERVING";continue;}
         state.persistence="SAVING";
@@ -171,6 +180,7 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
       }
        // Optional diagnostics and continuous price archival are outside the lock
        // transaction. Their failures cannot undo a durably committed prediction.
+       let assessmentsSaved=true;
        for(const stage of ["EARLY","CONFIRMATION"] as const){
          const state=stage==="EARLY"?e.early:e.confirmation;
          await c.query(`INSERT INTO waterx_two_stage_assessments(network,market_id,round_id,interval_minutes,strategy_version,stage,at_ms,reason,data_failure)
@@ -178,8 +188,9 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
            DO UPDATE SET at_ms=EXCLUDED.at_ms,reason=EXCLUDED.reason,
            data_failure=waterx_two_stage_assessments.data_failure OR EXCLUDED.data_failure`,
            [...stageIdentity(e.round),stage,now(),state.reason,!e.observations.at(-1)?.sourceHealthy])
-           .catch(()=>{optionalFailures++;});
+           .catch(()=>{optionalFailures++;assessmentsSaved=false;});
        }
+       if(now()>=e.round.expiryMs&&assessmentsSaved)e.deadlineRecorded=true;
        const priceBatch=Array.from(e.priceQueue.values()).slice(0,1000);
        if(priceBatch.length)try{
          await c.query(`INSERT INTO waterx_two_stage_prices(network,market_id,round_id,interval_minutes,strategy_version,
@@ -212,6 +223,7 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
     let e=entries.get(input.intervalMinutes);
     if(e&&identity(e.round)!==identity(round)&&round.startMs<=e.round.startMs){rejected++;return Promise.resolve();}
     if(!e||identity(e.round)!==identity(round)){
+       if(e&&!e.deadlineRecorded&&now()>=e.round.expiryMs)void schedule(e);
        e=newEntry(round);
       entries.set(input.intervalMinutes,e);
     }
@@ -302,7 +314,20 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
       if(e.priceQueue.size&&!e.job)void schedule(e);
     }
   }
-  return {observe,observePrice,read,restore,unavailable,health:()=>({shadowOnly:true,failures,dropped,rejected,activeIntervals:entries.size,
+  function tick(){
+    if(!decisionWriterAllowed())return;
+    for(const e of Array.from(entries.values())){
+      if(now()>=e.round.expiryMs){
+        if(!e.deadlineRecorded&&!e.job)void schedule(e);
+        continue;
+      }
+      // Retry valid frozen candidates independently of the next provider tick.
+      // No new input or changed deadline is synthesized by this clock.
+      freezeCandidates(e);
+      if(e.candidates.size&&!e.job)void schedule(e);
+    }
+  }
+  return {observe,observePrice,read,restore,unavailable,tick,health:()=>({shadowOnly:true,failures,dropped,rejected,activeIntervals:entries.size,
     priceRejected,priceArchiveFailures,optionalFailures,independentPricePointN:rawPrices.size,
     priceCapture:{upstreamTicks:priceStreamTicks,captureMinimumSourceSpacingMs:3000,maximumInterpolationGapMs:5000,
       recentSourceCadenceMs:sourceCadence.slice(),recentSourceToReceiptLatencyMs:receiptLatency.slice()},

@@ -1,0 +1,46 @@
+[
+  {
+    "interval": 5,
+    "sourceUrl": "https://api.waterx.app/predict/markets/crypto/crypto-btc-updown-5m?locale=en&epoch=1791493500",
+    "downloadCompletedAt": "2026-10-08T21:18:08.359Z",
+    "roundId": "96e830fc-4a67-4bd7-90e3-238b3da29fca",
+    "startsAtSeconds": 1791493200,
+    "endsAtSeconds": 1791493500,
+    "resolutionStatus": "resolved",
+    "providerSettledAtSeconds": 1791493553,
+    "secondsAfterClose": 53,
+    "settlePriceBtcUsd": 81625.79298490583,
+    "anchorPriceBtcUsd": 81760.31875652121,
+    "anchorConfirmed": true,
+    "outcome": "down",
+    "rawSettlement": {
+      "kind": "win",
+      "outcome": "down",
+      "finalPrice": 1,
+      "settledAt": 1791493553
+    },
+    "note": "Provider-reported consistency proof, not independent Chainlink/on-chain attestation. settlement.finalPrice is not the BTC/USD settlePrice."
+  },
+  {
+    "interval": 15,
+    "sourceUrl": "https://api.waterx.app/predict/markets/crypto/crypto-btc-updown-15m?locale=en&epoch=1791493200",
+    "downloadCompletedAt": "2026-10-08T21:18:08.933Z",
+    "roundId": "eb132123-4c5b-46a9-ad66-59c847fa2901",
+    "startsAtSeconds": 1791492300,
+    "endsAtSeconds": 1791493200,
+    "resolutionStatus": "resolved",
+    "providerSettledAtSeconds": 1791493254,
+    "secondsAfterClose": 54,
+    "settlePriceBtcUsd": 81760.31875652121,
+    "anchorPriceBtcUsd": 81768.12791749314,
+    "anchorConfirmed": true,
+    "outcome": "down",
+    "rawSettlement": {
+      "kind": "win",
+      "outcome": "down",
+      "finalPrice": 1,
+      "settledAt": 1791493254
+    },
+    "note": "Provider-reported consistency proof, not independent Chainlink/on-chain attestation. settlement.finalPrice is not the BTC/USD settlePrice."
+  }
+]

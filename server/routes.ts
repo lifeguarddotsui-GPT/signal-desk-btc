@@ -30,6 +30,7 @@ import { getLockReport } from "./waterx/lock-report";
 import { registerAgentRoutes } from "./agent/routes";
 import { canonicalHistory, historyQuerySchema } from "./waterx/canonical-history";
 import { researchOperations } from "./waterx/research-operations";
+import {settlementReconciler} from "./waterx/settlement-reconciler";
 
 const defaults = { refreshSeconds: 5 };
 const settingsSchema = z.object({
@@ -163,6 +164,7 @@ export function registerRoutes(app: Express) {
     };
     const snapshot = await getLiveWaterx(interval);
     const collector = {
+      settlementReconciler:settlementReconciler.health(),
       ...getWaterxDiagnostics(interval),
       stateScope: "process-memory",
       durableCoverage: "not-established",

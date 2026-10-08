@@ -1,0 +1,21 @@
+# Dependencies and generated bundles
+node_modules/
+dist/
+.vite/
+coverage/
+
+# Local, private, and test runtime data
+.local/
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+*.dump
+*.sqlite
+*.sqlite3
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

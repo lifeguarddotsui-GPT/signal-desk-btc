@@ -1,0 +1,69 @@
+name: BlueWaterAI CI
+
+# Validate every proposed change before a production operator imports it.
+# NO deployment credentials or production database access in this workflow.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bluewater-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    name: Typecheck, test, build, attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify TypeScript
+        run: npm run check
+
+      - name: Run complete regression suite
+        run: npm test
+
+      - name: Verify tests did not modify tracked source
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+
+      # The CI checkout is disposable. Remove only untracked non-ignored
+      # test artifacts; do not erase installed dependencies or tracked files.
+      - name: Remove untracked test artifacts before release hashing
+        run: git clean -fd
+
+      - name: Build production bundles
+        run: npm run build
+
+      - name: Verify build identity and create audit evidence
+        run: node scripts/release-evidence.mjs
+
+      - name: Upload source/build provenance (not production keys)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bluewater-build-evidence-${{ github.sha }}
+          path: |
+            dist/build-info.json
+            dist/release-evidence.json
+          if-no-files-found: error
+          retention-days: 14

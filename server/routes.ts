@@ -27,6 +27,7 @@ import { getBluewaterReport } from "./waterx/bluewater-report";
 import { getLockReport } from "./waterx/lock-report";
 import { registerAgentRoutes } from "./agent/routes";
 import { canonicalHistory, historyQuerySchema } from "./waterx/canonical-history";
+import { pairedHistory, pairedHistoryQuery } from "./waterx/paired-history";
 import { researchOperations } from "./waterx/research-operations";
 
 const defaults = { refreshSeconds: 5 };
@@ -50,6 +51,11 @@ export function registerRoutes(app: Express) {
     res.set("Cache-Control","no-store").download(resolve("dist/public/source-release.tar.gz"));
   });
   registerAgentRoutes(app);
+  app.get("/api/waterx/paired-history",safe(async(req,res)=>{
+    const parsed=pairedHistoryQuery.safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid paired-history filters"});return;}
+    res.set("Cache-Control","no-store").json(await pairedHistory(parsed.data));
+  }));
   app.get("/api/waterx/canonical-history",safe(async(req,res)=>{
     const parsed=historyQuerySchema.safeParse(req.query);
     if(!parsed.success){res.status(400).json({error:"Invalid history cohort, interval or source"});return;}

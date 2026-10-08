@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import "./beta-interface.css";
 import TimedDecisionHistory from "./TimedDecisionHistory";
+import PairedHistory from "./PairedHistory";
 
 type IntervalFilter = "all" | "5" | "15";
 type WindowFilter = "lifetime" | "100" | "50" | "20" | "24h" | "7d";
@@ -116,6 +117,9 @@ function CanonicalHistory() {
   const sourceName = baseline ? "WaterX market baseline" : "Bluewater champion";
 
   return <main className="canonical-history">
+    <PairedHistory />
+    <details className="history-advanced">
+      <summary>Advanced research data and gate journals</summary>
     <header className="history-heading">
       <div>
         <div className="history-eyebrow">BLUEWATERAI / CANONICAL RECORD</div>
@@ -245,6 +249,7 @@ function CanonicalHistory() {
         Withdrawn or disputed outcomes are excluded from active accuracy scoring. Order, collateral, receipt, and realized P/L fields are unavailable in this projection; no trade results are implied.
       </p>
     </>}
+    </details>
   </main>;
 }
 

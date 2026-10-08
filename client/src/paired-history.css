@@ -1,0 +1,83 @@
+/* Large-type round comparison. Intentionally scoped to prevent legacy dashboard bleed. */
+.paired-history {
+  --pair-bg: #101e27;
+  --pair-panel: #172a35;
+  --pair-line: #334957;
+  --pair-text: #eef7f7;
+  --pair-muted: #abc0c8;
+  color: var(--pair-text);
+  font: 500 16px/1.5 "Manrope", system-ui, sans-serif;
+  width: 100%;
+  min-width: 0;
+  padding: clamp(18px,3.2vw,36px);
+  background: var(--pair-bg);
+  border-radius: 18px;
+}
+.paired-history * { box-sizing: border-box; }
+.pair-page-title {display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:25px;}
+.pair-eyebrow {display:block;font-size:12px;font-weight:750;letter-spacing:.12em;color:#71d2bc;}
+.paired-history h1 {font-size:clamp(30px,4vw,48px);font-weight:800;color:var(--pair-text);line-height:1.1;letter-spacing:-.03em;margin:8px 0;}
+.pair-page-title p {font-size:15px;line-height:1.55;color:var(--pair-muted);max-width:720px;margin:6px 0 0;}
+.pair-refresh,.paired-history select {border:1px solid #52727d;border-radius:9px;background:#1c3340;color:var(--pair-text);font:600 15px "Manrope",system-ui;padding:11px 14px;}
+.pair-refresh {cursor:pointer;white-space:nowrap;}
+.pair-refresh:focus-visible,.paired-history select:focus-visible,.pair-details summary:focus-visible {outline:2px solid #68d6c8;outline-offset:2px;}
+.pair-filters {display:flex;flex-wrap:wrap;gap:12px;margin-bottom:22px;}
+.pair-filters label,.pair-toolbar label {display:flex;align-items:center;gap:10px;font-size:14px;color:var(--pair-muted);}
+.pair-stats {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+.pair-stat-card {background:var(--pair-panel);border:1px solid var(--pair-line);border-radius:12px;padding:20px;min-width:0;}
+.pair-stat-heading {font-size:16px;font-weight:750;margin-bottom:12px;}
+.pair-stat-ratio {font-variant-numeric:tabular-nums;font-size:clamp(28px,3vw,40px);line-height:1.1;font-weight:800;letter-spacing:-.035em;display:flex;gap:9px;align-items:center;}
+.pair-stat-ratio>span:not(.pair-correct):not(.pair-incorrect):not(.pair-missing) {color:#8fa7b2;font-weight:400;}
+.pair-correct {color:#76dfab;}.pair-incorrect {color:#ff9c9a;}.pair-missing {color:#f1c677;}
+.pair-stat-caption,.pair-small {font-size:12px;color:var(--pair-muted);line-height:1.45;}
+.pair-stat-caption {margin-top:8px;}
+.pair-stat-footer {display:flex;align-items:flex-end;justify-content:space-between;gap:10px;border-top:1px solid var(--pair-line);margin-top:17px;padding-top:14px;flex-wrap:wrap;font-size:13px;color:var(--pair-muted);}
+.pair-stat-footer strong {color:var(--pair-text);font-size:18px;}.pair-stat-footer small {font-size:12px;font-weight:500;color:var(--pair-muted);}
+.pair-toolbar {display:flex;justify-content:space-between;align-items:end;gap:16px;margin:26px 0 14px;}
+.pair-toolbar h2 {margin:0;font-size:21px;color:var(--pair-text);font-weight:800;}
+.pair-toolbar>div>span {font-size:13px;color:var(--pair-muted);}
+.pair-list {display:flex;flex-direction:column;gap:12px;}
+.pair-round {background:var(--pair-panel);border:1px solid var(--pair-line);border-radius:12px;min-width:0;overflow:hidden;}
+.pair-round-main {display:grid;grid-template-columns:minmax(100px,.85fr) minmax(120px,1fr) minmax(120px,1fr) minmax(120px,1fr) minmax(130px,1fr);gap:15px;align-items:center;padding:16px 18px;}
+.pair-identity,.pair-decision,.pair-compare,.pair-outcome {display:flex;flex-direction:column;gap:5px;min-width:0;}
+.pair-identity strong {font-size:19px;font-weight:800;font-variant-numeric:tabular-nums;}
+.pair-identity span {font-size:13px;color:var(--pair-muted);}
+.pair-decision strong,.pair-compare strong,.pair-outcome strong {font-size:21px;font-weight:800;line-height:1.25;}
+.pair-up {color:#7cd9b0;}.pair-down {color:#9dbefe;}.pair-no-lock {color:#e0b777;}
+.pair-result {font-size:12px;font-weight:800;letter-spacing:.005em;}
+.pair-result-correct {color:#7cd9b0;}.pair-result-incorrect {color:#ff9c9a;}
+.pair-result-pending,.pair-result-data_failure,.pair-result-unrecorded,.pair-result-abstained,.pair-result-disputed {color:#e0b777;}
+.pair-details {border-top:1px solid var(--pair-line);}
+.pair-details summary {cursor:pointer;list-style:revert;font-size:13px;color:#b5d9da;padding:12px 18px;}
+.pair-details[open] summary {background:#1d3440;}
+.pair-detail-grid {padding:18px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px;}
+.pair-detail-grid div {display:flex;flex-direction:column;min-width:0;gap:4px;}
+.pair-detail-grid span {font-size:12px;color:var(--pair-muted);}
+.pair-detail-grid strong {font-size:14px;overflow-wrap:anywhere;font-weight:650;}
+.pair-notice {color:var(--pair-text);background:var(--pair-panel);border:1px solid var(--pair-line);border-radius:9px;padding:20px;font-size:15px;}
+.pair-help {font-size:13px;line-height:1.65;color:var(--pair-muted);margin-top:16px;}
+/* Hide the legacy dense views unless the user explicitly expands them. */
+.history-advanced {margin-top:22px;color:#d7e6e7;}
+.history-advanced > summary {font:650 15px "Manrope",sans-serif;cursor:pointer;padding:16px;border:1px solid #50727d;border-radius:9px;}
+@media(max-width:950px) {
+ .pair-stats {grid-template-columns:repeat(2,minmax(0,1fr));}
+ .pair-pairing {grid-column:1/-1;}
+ .pair-round-main {grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;}
+ .pair-identity {grid-column:1/-1;padding-bottom:10px;border-bottom:1px solid var(--pair-line);}
+ .pair-outcome {grid-column:1/-1;flex-direction:row;align-items:center;flex-wrap:wrap;gap:12px;padding-top:8px;border-top:1px solid var(--pair-line);}
+}
+@media(max-width:600px) {
+ .paired-history {padding:18px 14px;}
+ .pair-page-title {align-items:flex-start;flex-direction:column;gap:14px;}
+ .pair-page-title p {font-size:15px;}
+ .pair-filters label {width:100%;justify-content:space-between;}
+ .pair-filters select {width:66%;}
+ .pair-stats {grid-template-columns:minmax(0,1fr);}
+ .pair-pairing {grid-column:auto;}
+ .pair-toolbar {align-items:flex-start;flex-direction:column;}
+ .pair-toolbar label {width:100%;justify-content:space-between;}
+ .pair-round-main {padding:16px;gap:18px 12px;}
+ .pair-identity strong {font-size:20px;}
+ .pair-decision strong,.pair-compare strong,.pair-outcome strong {font-size:20px;}
+ .pair-detail-grid {grid-template-columns:minmax(0,1fr);}
+}

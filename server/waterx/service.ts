@@ -641,6 +641,13 @@ export function startWaterxCapture(options: {
   onStalled?: (interval: WaterxInterval, ageMs: number) => void;
 } = {}): () => void {
   startTimedRecovery();
+  // Historical outcome recovery is independent from the success of live-market HTTP
+  // requests. Even during provider/market outages, retry already-observed expired
+  // rounds; the queue enforces interval-specific throttling and cooldowns.
+  const settlementRecoveryTimer=setInterval(()=>{
+    for(const interval of intervals)if(running.has(interval))queueSettlement(interval);
+  },SETTLEMENT_POLL_MS);
+  settlementRecoveryTimer.unref?.();
   const notifiedStalls = new Set<WaterxInterval>();
   for (const interval of intervals) {
     if (running.has(interval)) continue;
@@ -697,6 +704,7 @@ export function startWaterxCapture(options: {
     watchdogs.set(interval, watchdog);
   }
   return () => {
+    clearInterval(settlementRecoveryTimer);
     earlyLockTimers.stop();
     stopTimedStrategy();
     for (const timer of Array.from(timers.values())) clearTimeout(timer);

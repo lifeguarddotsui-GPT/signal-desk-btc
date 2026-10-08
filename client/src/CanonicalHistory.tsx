@@ -79,6 +79,7 @@ const readable = (value: string | null | undefined) => value?.trim() || "Not rec
 const shortRound = (id: string) => id.length > 34 ? `${id.slice(0, 18)}…${id.slice(-10)}` : id;
 
 function CanonicalHistory() {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [interval, setInterval] = useState<IntervalFilter>("all");
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("lifetime");
   const [source, setSource] = useState<SourceFilter>("baseline");
@@ -87,6 +88,7 @@ function CanonicalHistory() {
 
   useEffect(() => {
     const controller = new AbortController();
+    if (!advancedOpen) return;
     const params = new URLSearchParams({ interval, window: windowFilter, source });
     setLoad({ kind: "loading" });
     fetch(`/api/waterx/canonical-history?${params.toString()}`, {
@@ -110,7 +112,7 @@ function CanonicalHistory() {
       }
     });
     return () => controller.abort();
-  }, [interval, windowFilter, source, reloadKey]);
+  }, [advancedOpen, interval, windowFilter, source, reloadKey]);
 
   const summary = load.kind === "ready" ? load.data.summary : null;
   const baseline = source === "baseline";
@@ -118,8 +120,9 @@ function CanonicalHistory() {
 
   return <main className="canonical-history">
     <PairedHistory />
-    <details className="history-advanced">
+    <details className="history-advanced" onToggle={event => setAdvancedOpen(event.currentTarget.open)}>
       <summary>Advanced research data and gate journals</summary>
+    {advancedOpen && <>
     <header className="history-heading">
       <div>
         <div className="history-eyebrow">BLUEWATERAI / CANONICAL RECORD</div>
@@ -248,6 +251,7 @@ function CanonicalHistory() {
       <p className="history-footnote">
         Withdrawn or disputed outcomes are excluded from active accuracy scoring. Order, collateral, receipt, and realized P/L fields are unavailable in this projection; no trade results are implied.
       </p>
+    </>}
     </>}
     </details>
   </main>;

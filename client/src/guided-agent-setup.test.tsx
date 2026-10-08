@@ -50,48 +50,51 @@ const render = (overrides: Partial<ComponentProps<typeof GuidedAgentSetup>> = {}
     onRetryCapabilities: () => undefined,
     technicalBlockers: [],
     capabilitySummary: [],
+    onTryShadow: () => undefined,
     ...overrides,
   }));
 
-test("guided setup combines identity, owned account, funding, session, permissions and locked start", () => {
+test("guided setup has exactly four stages and offers an unsigned shadow alternative", () => {
   const html = render();
-  for (const label of ["Connect Slush", "Owned account", "Review funding", "Set session", "Permissions", "Start"]) assert.match(html, new RegExp(label));
-  assert.match(html, /Connect an owner wallet/);
-  assert.match(html, /No setup action starts trading/);
-  assert.doesNotMatch(html, /paper capital|shadow session|Start shadow/i);
+  for (const label of ["Connect", "Fund", "Strategy", "Start"]) assert.match(html, new RegExp(label));
+  assert.match(html, /Connect Slush/i);
+  assert.match(html, /shadow mode/i);
+  assert.doesNotMatch(html, /Set session|Review account creation|Review funding|paper capital/i);
 });
 
-test("account workflow shows only returned account choices and never invents a balance", () => {
-  const html = render({ initialStep: 1, accounts: [{ accountId: "0xowned" }], accountId: "0xowned" });
+test("successful discovery shows an owned account without encouraging duplicate creation", () => {
+  const html = render({ authorized: true, discoveryStatus: "success", accounts: [{ accountId: "0xowned" }], accountId: "0xowned" });
   assert.match(html, /0xowned/);
-  assert.match(html, /No balance is inferred/);
-  assert.match(html, /Review account creation/);
+  assert.doesNotMatch(html, /Create WaterX account/i);
+  const failed = render({ authorized: true, discoveryStatus: "error", discoveryError: "Connection unavailable" });
+  assert.doesNotMatch(failed, /Create WaterX account/i);
+  assert.match(failed, /Try again/i);
+  const empty = render({ authorized: true, discoveryStatus: "success" });
+  assert.match(empty, /Create WaterX account/i);
 });
 
-test("funding step accepts human dollars and reports asset decimals rather than atomics", () => {
-  const html = render({ initialStep: 2, authorized: true, accountId: "0xowned", settlementDecimals: 9, supportedAsset: "settlement coin · Sui mainnet" });
-  assert.match(html, /Settlement-native USD funding/);
-  assert.match(html, /Native USDC conversion/);
-  assert.match(html, /9 decimals reported/);
-  assert.match(html, /USDC · 6 decimals/);
+test("funding offers dollar presets and displays only reported balances", () => {
+  const html = render({ initialStep: 1, authorized: true, accountId: "0xowned", accounts: [{ accountId: "0xowned" }], settlementDecimals: 6, availableBalanceUsd: "25.00" });
+  for (const amount of ["10", "25", "50", "100"]) assert.match(html, new RegExp(`\\$${amount}`));
+  assert.match(html, /Add funds/i);
+  assert.match(html, /\$25\.00/);
   assert.doesNotMatch(html, /amountAtomic/);
+  const unavailable = render({ initialStep: 1, authorized: true, accountId: "0xowned", accounts: [{ accountId: "0xowned" }] });
+  assert.match(unavailable, /Balance unavailable/);
 });
 
-test("winning-return preferences are human dollar policy values, reviewed with explicit constraints", () => {
-  const html = render({ initialStep: 3 });
-  assert.match(html, /Minimum preferred total return on a win/);
-  assert.match(html, /Preferred total return on a win/);
-  assert.match(html, /Return preferences do not currently change active research qualification/);
-  assert.match(html, /Not a maximum: better returns are allowed/);
-  const invalid = render({ initialStep: 3, policy: { ...defaultAgentPolicy, minimumWinningReturnCents: 800, preferredWinningReturnCents: 700 } });
-  assert.match(invalid, /preferred return at or above the minimum/);
-  assert.match(invalid, /\$8\.00/);
-  assert.match(invalid, /\$7\.00/);
+test("strategy cards retain advanced limits and require explicit compounding consent", () => {
+  const html = render({ initialStep: 2, policy: { ...defaultAgentPolicy, compound: true }, dirty: true });
+  for (const label of ["Conservative", "Continuous", "Balanced", "Custom"]) assert.match(html, new RegExp(label));
+  assert.match(html, /Advanced/i);
+  assert.match(html, /Confirm compounding/);
+  assert.match(html, /Saving stores your strategy only/);
+  assert.match(html, /disabled=""[^>]*>Save strategy/);
 });
 
-test("permission approval is separate and live start remains unavailable", () => {
+test("live authorization and start remain unavailable; diagnostics are not user setup tasks", () => {
   const html = render({
-    initialStep: 4,
+    initialStep: 3,
     authorized: true,
     ownerAddress: "0xowner",
     accountAddress: "0xowner",
@@ -103,18 +106,15 @@ test("permission approval is separate and live start remains unavailable", () =>
     pendingDescription: "Review funding operation",
     pendingTransaction: "prepared-transaction",
   });
-  assert.match(html, /Approve this setup transaction in Slush/);
-  assert.match(html, /never prompted on connect/);
-  assert.match(html, /no AUTHORIZE flow/);
+  assert.match(html, /Automatic trading permission is not available yet/);
+  assert.match(html, /Live agent temporarily unavailable/);
+  assert.match(html, /Technical diagnostics/);
   assert.doesNotMatch(html, /Authorize and start live/);
-  const start = render({ initialStep: 5, readiness: { blocker: "Owner signer is not verified.", nextAction: "Provision isolated signer." } });
-  assert.match(start, /Owner signer is not verified/);
-  assert.match(start, /Provision isolated signer/);
-  assert.match(start, /Live beta session unavailable/);
+  assert.match(html, /disabled=""[^>]*>Authorize Agent/);
 });
 
 test("uncertain owner transaction supports confirmation retry without another signing action", () => {
-  const html = render({ initialStep: 4, authorized: true, pendingAction: "FUND", uncertainDigest: "digest-retained" });
+  const html = render({ initialStep: 1, authorized: true, accountId: "0xowned", accounts: [{ accountId: "0xowned" }], pendingAction: "FUND", uncertainDigest: "digest-retained" });
   assert.match(html, /digest-retained/);
-  assert.match(html, /Retry confirmation only/);
+  assert.match(html, /Retry confirmation/);
 });

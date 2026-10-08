@@ -10,7 +10,9 @@ test("public agent SSR is observation-only and never claims execution readiness"
   assert.match(html, /IDENTITY IS NOT AUTHORITY/);
   assert.match(html, /Experimental qualification gates/i);
   assert.match(html, /not reported/i);
-  assert.match(html, /simulate owner actions before a transaction payload is prepared/i);
+  assert.match(html, /Live agent temporarily unavailable/i);
+  assert.match(html, /System diagnostics/);
+  assert.match(html, /shadow mode/i);
   assert.doesNotMatch(html, /qualified for live execution/i);
   assert.match(html, /Connect Slush/);
   assert.doesNotMatch(html, /Paper ledger|Paper counters|paper-ledger starting capital|Start shadow session|ARM_SHADOW/i);

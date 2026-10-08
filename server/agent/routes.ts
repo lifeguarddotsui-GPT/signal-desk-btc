@@ -3,7 +3,7 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { agentPolicySchema, defaultAgentPolicy } from "../../shared/agent-policy";
 import { agentPool, agentTransaction, readAgent, ledger, blockers } from "./store";
-import { address, accountIds, assertAccountOwner, ownerTransaction, simulateOwnerTransaction, protocolClient, protocolStatus, rpc } from "./protocol";
+import { address, accountIds, accountFundingInfo, assertAccountOwner, ownerTransaction, simulateOwnerTransaction, protocolClient, protocolStatus, rpc } from "./protocol";
 import { Transaction } from "@mysten/sui/transactions";
 import { matchesOwnerIntent } from "./intent";
 import {websiteControlPlaneStatus} from "../../infrastructure/agent-signer/control-plane";
@@ -165,9 +165,16 @@ export function registerAgentRoutes(app:Express) {
   app.post("/api/agent/account",safe(async(req,res)=>{
     const id=await assertAccountOwner(req.agentOwner!,req.body?.accountId);
     await agentTransaction(req.agentOwner!,async(c,row)=>{
+      // Reconnecting/discovering the same account must not revoke its delegation.
+      if(row.account_id===id)return;
       await c.query("UPDATE bluewater_agents SET account_id=$2,status='PAUSED',delegate_address=NULL,delegate_expires_at_ms=NULL,revision=revision+1 WHERE owner=$1",[req.agentOwner,id]);
       await ledger(c,req.agentOwner!,"ACCOUNT_LINKED",Number(row.policy_version),{accountId:id,network:"mainnet"});
     });res.json(await readAgent(req.agentOwner!));
+  }));
+  app.post("/api/agent/account-balance",safe(async(req,res)=>{
+    const selected=(await agentPool.query("SELECT account_id FROM bluewater_agents WHERE owner=$1",[req.agentOwner])).rows[0]?.account_id;
+    if(!selected||selected!==address(req.body?.accountId))throw new Error("Select your owned WaterX account first");
+    res.json(await accountFundingInfo(req.agentOwner!,selected));
   }));
   app.post("/api/agent/delegate",safe(async(req,res)=>{
     res.status(409).json({error:"Isolated encrypted mainnet signer service is not provisioned. No key generated."});

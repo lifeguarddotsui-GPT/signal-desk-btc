@@ -5,6 +5,8 @@ import { agentPolicySchema, defaultAgentPolicy, policySummary, type AgentPolicy 
 import { agentDate, asErrorMessage, changePolicyLimitMode, copyPolicy, policyAmountInputValue, policyValueFromInput } from "./agent-format";
 import AgentCurrentRound from "./AgentCurrentRound";
 import GuidedAgentSetup from "./GuidedAgentSetup";
+import AgentRunningView from "./AgentRunningView";
+import { discoveredAccountSelection } from "../../shared/agent-onboarding";
 import { dollarsToAtomicAmount, signReviewedOwnerTransaction } from "./owner-wallet-signing";
 
 type Paper = { startingCents: number; availableCents: number; committedCents: number; turnoverCents: number; realizedPnlCents: number; highWaterCents: number; consecutiveLosses: number; targetCents: number | null; startedAt: number | null };
@@ -12,6 +14,7 @@ type LedgerItem = { id: string; event: string; at: number | string; details: unk
 type AgentState = { owner: string; policy: AgentPolicy; policyVersion: number; status: "PAUSED" | "SHADOW" | "LOSS_STOP" | "TARGET_REACHED"; accountId: string | null; delegateAddress: string | null; delegateExpiresAtMs: number | null; paper: Paper | null; ledger: LedgerItem[]; summary: string[]; blockers: string[]; balances: unknown; walletSessionExpiresAtMs?: number | null };
 type Capabilities = { developmentOnly: boolean; sdkVersion: string; network: "mainnet"; globalExecutionDisabled: boolean; mainnetEnabled: boolean; blockers: string[]; defaultPolicy: AgentPolicy; ownerSetupSigning?: boolean; readiness?: { released: boolean; items: { id: string; label: string; status: "IMPLEMENTED" | "UNVERIFIED" | "BLOCKED" | string; evidence?: string; nextAction?: string }[]; blocker?: string | null; nextAction?: string | null }; capabilities?: { shadow?: boolean; arming?: boolean; execution?: boolean; betaAuthorization?: boolean }; permissions: { prediction: number; account: number }; config: { status: "VERIFIED_IDENTITY_ONLY" | "UNAVAILABLE" | string; reason: string; decimals?: number; marketSemanticsVerified?: false; settlements?: unknown; packages?: unknown } };
 type OwnerTransaction = { transaction: string; description: string; network: "mainnet"; permissions: { account: number; prediction: number } };
+type FundingInfo = { accountId: string; network: string; availableAtomic: string; availableBalanceUsd: string; nativeUsdcSupported: boolean; walletUsdAtomic?: string | null; walletUsdcAtomic?: string | null; readAtMs: number };
 type WalletLike = { name: string; icon?: string; chains?: string[]; features?: Record<string, { connect?: () => Promise<{ accounts?: WalletAccount[] }>; signPersonalMessage?: (input: { message: Uint8Array; account: WalletAccount; chain?: string }) => Promise<{ signature: string; bytes?: string }> } | undefined>; accounts?: WalletAccount[] };
 type WalletIdentity = { address: string; wallet: WalletLike | null; account: WalletAccount | null; generation: number };
 const identityStillCurrent = (expected: WalletIdentity, current: WalletIdentity) =>
@@ -101,6 +104,13 @@ function AgentPage() {
   const [walletRecovery, setWalletRecovery] = useState("");
   const [pendingActionType, setPendingActionType] = useState("");
   const [accounts, setAccounts] = useState<{ accountId: string }[]>([]);
+  const [discoveryStatus, setDiscoveryStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [discoveryError, setDiscoveryError] = useState("");
+  const [fundingInfo, setFundingInfo] = useState<FundingInfo | null>(null);
+  const [shadowPreview, setShadowPreview] = useState(false);
+  const discoverySeq = useRef(0);
+  const balanceSeq = useRef(0);
+  const quickActionActive = useRef(false);
   const [uncertainDigest, setUncertainDigest] = useState(() => readPendingOwnerApproval()?.digest ?? "");
   const [uncertainOwner, setUncertainOwner] = useState(() => readPendingOwnerApproval()?.owner ?? "");
   const [uncertainAction, setUncertainAction] = useState(() => readPendingOwnerApproval()?.action ?? "");
@@ -128,7 +138,7 @@ function AgentPage() {
     try {
       const expectedIdentity = identityRef.current;
       const next = await request<AgentState>("/state", "GET", undefined, expectedIdentity);
-      if (seq !== requestSeq.current || accountRef.current.toLowerCase() !== address.toLowerCase()) return;
+      if (seq !== requestSeq.current || !identityStillCurrent(expectedIdentity, identityRef.current) || accountRef.current.toLowerCase() !== address.toLowerCase()) return;
       if (next.owner.toLowerCase() !== address.toLowerCase()) {
         setState(null);
         setAddress("");
@@ -194,6 +204,27 @@ function AgentPage() {
     return () => window.clearInterval(timer);
   }, [isAuthorized, loadState]);
 
+  // Restore only a live server session whose owner is already exposed by a
+  // connected mainnet wallet. Never request a signature or connect prompt.
+  useEffect(() => {
+    if (address || busy || !wallets.some(w => w.accounts?.some(accountIsMainnet))) return;
+    const generation = identityRef.current.generation;
+    let active = true;
+    void request<AgentState>("/state").then(next => {
+      if (!active || identityRef.current.generation !== generation || identityRef.current.address ||
+          !next.walletSessionExpiresAtMs || next.walletSessionExpiresAtMs <= Date.now()) return;
+      const candidate = wallets.find(w => w.accounts?.some(a => accountIsMainnet(a) && a.address.toLowerCase() === next.owner.toLowerCase()));
+      const account = candidate?.accounts?.find(a => accountIsMainnet(a) && a.address.toLowerCase() === next.owner.toLowerCase());
+      if (!candidate || !account) return;
+      accountRef.current = account.address;
+      identityRef.current = { address: account.address, wallet: candidate, account, generation };
+      setWallet(candidate); setSelectedAccount(account); setAddress(account.address);
+      setState(next); stateRef.current = next; rememberSessionExpiry(next.walletSessionExpiresAtMs);
+      setPolicyDraft(completePolicy(next.policy)); setLastUpdated(Date.now());
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [wallets, address, busy]);
+
   const clearIdentity = useCallback(async (logout = true) => {
     const generation = ++sessionGeneration.current;
     requestSeq.current++;
@@ -219,11 +250,16 @@ function AgentPage() {
     setEdgeOffAck(false);
     setZeroReserveAck(false);
     setAccounts([]);
+    discoverySeq.current++;
+    balanceSeq.current++;
+    setDiscoveryStatus("idle");
+    setDiscoveryError("");
+    setFundingInfo(null);
+    setShadowPreview(false);
     setSettlementInfo(null);
     setLastUpdated(0);
     setFundingAmount("");
     setUsdcFundingAmount("");
-    setCoinIds("");
     setCoinIds("");
     setNotice("");
     setPageError("");
@@ -333,6 +369,7 @@ function AgentPage() {
     if (!wallet || !address) return;
     const events = wallet.features?.["standard:events"] as { on?: (event: string, listener: (change: { accounts?: WalletAccount[] }) => void) => (() => void) } | undefined;
     const unsubscribe = events?.on?.("change", change => {
+      if (!change.accounts) return;
       const next = change.accounts?.find(account => account.address === address && accountIsMainnet(account));
       if (!next || next.address !== address) void clearIdentity(true);
       else {
@@ -380,14 +417,17 @@ function AgentPage() {
       ...(policy.signalSource === "EXPERIMENTAL_QUALIFICATION_GATES" ? { experimentalConfirmed: true } : {}),
       ...(policy.compound ? { compoundingConfirmed: true } : {}),
     };
-    try { const result = await request<AgentState>("/policy", "POST", { policy: validation.data, ...consent }, identityRef.current); rememberSessionExpiry(result.walletSessionExpiresAtMs); setState(result); setPolicyDraft(completePolicy(result.policy)); setDirtyPolicy(false); setNotice("Owner-reviewed policy saved. Limits remain exactly as approved."); }
+    const identity = identityRef.current;
+    try { const result = await request<AgentState>("/policy", "POST", { policy: validation.data, ...consent }, identity); if (!identityStillCurrent(identity, identityRef.current)) return; rememberSessionExpiry(result.walletSessionExpiresAtMs); setState(result); setPolicyDraft(completePolicy(result.policy)); setDirtyPolicy(false); setNotice("Strategy saved. The agent has not started."); }
     catch (error) { setPageError(asErrorMessage(error)); }
     finally { setBusy(""); }
   };
   const control = async (action: "PAUSE") => {
     setBusy(action); setPageError(""); setNotice("");
+    const identity = identityRef.current;
     try {
-      const result = await request<AgentState>("/control", "POST", { action }, identityRef.current);
+      const result = await request<AgentState>("/control", "POST", { action }, identity);
+      if (!identityStillCurrent(identity, identityRef.current)) return;
       rememberSessionExpiry(result.walletSessionExpiresAtMs);
       setState(result); setPolicyDraft(completePolicy(result.policy)); setNotice("Persistent pause requested.");
     } catch (error) { setPageError(asErrorMessage(error)); }
@@ -451,6 +491,7 @@ function AgentPage() {
     setBusy("confirm"); setPageError("");
     try {
       await request("/owner-confirm", "POST", { digest, action }, identity);
+      if (!identityStillCurrent(identity, identityRef.current)) return;
       setUncertainDigest(""); setUncertainOwner(""); setUncertainAction(""); setOwnerSubmissionPending(false);
       window.sessionStorage.removeItem(PENDING_OWNER_APPROVAL_KEY);
       setNotice("Owner transaction confirmed by the service. Refreshing owned account state.");
@@ -463,11 +504,12 @@ function AgentPage() {
       setPageError(`Transaction digest retained; confirmation could not be verified. Retry confirmation only. ${asErrorMessage(error)}`);
     } finally { setBusy(""); }
   };
-  const approvePreparedOwnerTransaction = async () => {
+  const approvePreparedOwnerTransaction = async (review?: { transaction: OwnerTransaction; action: string; passed: boolean; generation: number }) => {
     const identity = identityRef.current;
-    if (!pendingTx || !pendingAction || !simulationPassed || !ownerChoice || !isAuthorized ||
+    const transaction = review?.transaction ?? pendingTx, action = review?.action ?? pendingAction;
+    if (!transaction || !action || !(review?.passed ?? simulationPassed) || !(review || ownerChoice) || !isAuthorized ||
       capabilities?.ownerSetupSigning !== true || !identity.wallet || !identity.account ||
-      ownerSubmissionPending || pendingGeneration.current !== identity.generation ||
+      ownerSubmissionPending || (review?.generation ?? pendingGeneration.current) !== identity.generation ||
       !identityStillCurrent(identity, identityRef.current)) {
       setPageError("Explicit wallet approval is blocked until login, owner identity, ownerSetupSigning capability, simulation checks and review are all current.");
       return;
@@ -475,25 +517,25 @@ function AgentPage() {
     setBusy("sign"); setPageError(""); setNotice("");
     setOwnerSubmissionPending(true);
     setUncertainOwner(identity.address);
-    setUncertainAction(pendingAction);
+    setUncertainAction(action);
     try {
-      window.sessionStorage.setItem(PENDING_OWNER_APPROVAL_KEY, JSON.stringify({ owner: identity.address, action: pendingAction }));
+      window.sessionStorage.setItem(PENDING_OWNER_APPROVAL_KEY, JSON.stringify({ owner: identity.address, action }));
       const isCurrent = () => identityStillCurrent(identity, identityRef.current) &&
-        identityRef.current.address.toLowerCase() === pendingOwner.toLowerCase();
+        (!!review || identityRef.current.address.toLowerCase() === pendingOwner.toLowerCase());
       const signed = await signReviewedOwnerTransaction({
         wallet: identity.wallet as Parameters<typeof signReviewedOwnerTransaction>[0]["wallet"],
         account: identity.account,
-        transaction: pendingTx.transaction,
-        action: pendingAction,
+        transaction: transaction.transaction,
+        action,
         isCurrent,
       });
-      setUncertainDigest(signed.digest); setUncertainOwner(identity.address); setUncertainAction(pendingAction);
-      window.sessionStorage.setItem(PENDING_OWNER_APPROVAL_KEY, JSON.stringify({ digest: signed.digest, owner: identity.address, action: pendingAction }));
+      setUncertainDigest(signed.digest); setUncertainOwner(identity.address); setUncertainAction(action);
+      window.sessionStorage.setItem(PENDING_OWNER_APPROVAL_KEY, JSON.stringify({ digest: signed.digest, owner: identity.address, action }));
       if (!isCurrent()) {
         setPageError("Owner identity changed after wallet approval. The returned digest is retained; reconnect as the same owner to retry confirmation only.");
         return;
       }
-      await confirmOwnerDigest(signed.digest, pendingAction, identity);
+      await confirmOwnerDigest(signed.digest, action, identity);
     } catch (error) {
       const message = asErrorMessage(error, "Owner wallet approval failed or was cancelled.");
       const definitelyNotSubmitted = (error as {submissionState?:unknown})?.submissionState === "NOT_SUBMITTED";
@@ -517,18 +559,99 @@ function AgentPage() {
     await confirmOwnerDigest(uncertainDigest, uncertainAction, identity);
   };
   const accountOptions = async () => {
-    setBusy("accounts");
-    try { const result = await request<{ accounts: { accountId: string }[]; settlementCoinType: string; network: string; decimals?: number; conversionAvailable?: boolean; collateral?: string }>("/accounts", "POST", {}, identityRef.current); setAccounts(result.accounts); setSettlementInfo({ coinType: result.settlementCoinType, network: result.network, decimals: result.decimals, conversionAvailable: result.conversionAvailable, collateral: result.collateral }); setNotice(result.accounts.length ? `${result.accounts.length} agent account${result.accounts.length === 1 ? "" : "s"} returned. Select one below.` : "No agent accounts were returned."); }
-    catch (error) { setPageError(asErrorMessage(error)); }
-    finally { setBusy(""); }
+    const identity = identityRef.current, seq = ++discoverySeq.current;
+    if (!isAuthorized || !identityStillCurrent(identity, identityRef.current)) return;
+    setDiscoveryStatus("loading"); setDiscoveryError("");
+    try {
+      const result = await request<{ accounts: { accountId: string }[]; settlementCoinType: string; network: string; decimals?: number; conversionAvailable?: boolean; collateral?: string }>("/accounts", "POST", {}, identity);
+      if (seq !== discoverySeq.current || !identityStillCurrent(identity, identityRef.current)) return;
+      if (result.network !== "mainnet" || !Array.isArray(result.accounts)) throw new Error("Unexpected mainnet discovery response");
+      setAccounts(result.accounts);
+      setSettlementInfo({ coinType: result.settlementCoinType, network: result.network, decimals: result.decimals, conversionAvailable: result.conversionAvailable, collateral: result.collateral });
+      setDiscoveryStatus("success");
+      const chosen = discoveredAccountSelection(result.accounts.map(a => a.accountId), stateRef.current?.accountId ?? null);
+      if (chosen && chosen !== stateRef.current?.accountId) await setAccount(chosen, true);
+    } catch {
+      if (seq !== discoverySeq.current || !identityStillCurrent(identity, identityRef.current)) return;
+      setDiscoveryStatus("error");
+      setDiscoveryError("We couldn’t check your WaterX accounts. Retry when your connection is available.");
+    }
   };
-  const setAccount = async (accountId: string) => {
-    setBusy("account");
-    try { const result = await request<AgentState>("/account", "POST", { accountId }, identityRef.current); rememberSessionExpiry(result.walletSessionExpiresAtMs); setEveryRoundAck(false); setEdgeOffAck(false); setZeroReserveAck(false); setExperimentalConfirmed(false); setCompoundingConfirmed(false); setPendingTx(null); setPendingAction(""); setOwnerPayload(null); setSimulation(null); setOwnerChoice(false); pendingGeneration.current = null; setState(result); setPolicyDraft(completePolicy(result.policy)); setDirtyPolicy(false); setNotice("Owned account selected."); }
-    catch (error) { setPageError(asErrorMessage(error)); }
-    finally { setBusy(""); }
+  const setAccount = async (accountId: string, automatic = false) => {
+    const identity = identityRef.current;
+    if (!isAuthorized || (!automatic && (busy || ownerSubmissionPending || quickActionActive.current)) || !identityStillCurrent(identity, identityRef.current)) return;
+    setBusy("account"); setFundingInfo(null); balanceSeq.current++; requestSeq.current++;
+    try {
+      const result = await request<AgentState>("/account", "POST", { accountId }, identity);
+      if (!identityStillCurrent(identity, identityRef.current)) return;
+      rememberSessionExpiry(result.walletSessionExpiresAtMs);
+      setEveryRoundAck(false); setEdgeOffAck(false); setZeroReserveAck(false); setExperimentalConfirmed(false); setCompoundingConfirmed(false); setPendingTx(null); setPendingAction(""); setOwnerPayload(null); setSimulation(null); setOwnerChoice(false); pendingGeneration.current = null;
+      setState(result); stateRef.current = result; setPolicyDraft(completePolicy(result.policy)); setDirtyPolicy(false); setNotice("WaterX account selected.");
+    } catch { if (identityStillCurrent(identity, identityRef.current)) setPageError("We couldn’t select that account. Please retry."); }
+    finally { if (identityStillCurrent(identity, identityRef.current)) setBusy(""); }
+  };
+  useEffect(() => {
+    if (isAuthorized && discoveryStatus === "idle") void accountOptions();
+  }, [isAuthorized, discoveryStatus]);
+  useEffect(() => {
+    if (!isAuthorized || discoveryStatus !== "success" || !state?.accountId ||
+        !accounts.some(a => a.accountId === state.accountId)) return;
+    const identity = identityRef.current, selected = state.accountId;
+    let active = true;
+    const refresh = async () => {
+      const seq = ++balanceSeq.current;
+      try {
+        const next = await request<FundingInfo>("/account-balance", "POST", { accountId: selected }, identity);
+        if (!active || seq !== balanceSeq.current || !identityStillCurrent(identity, identityRef.current) ||
+            stateRef.current?.accountId !== selected) return;
+        if (next.network !== "mainnet" || next.accountId !== selected || !/^\d+$/.test(next.availableAtomic)) throw new Error("Invalid balance response");
+        setFundingInfo(next);
+      } catch {
+        if (active && seq === balanceSeq.current && identityStillCurrent(identity, identityRef.current)) setFundingInfo(null);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [isAuthorized, discoveryStatus, state?.accountId, accounts]);
+  const quickOwnerAction = async (requested: string, extra: Record<string, unknown> = {}) => {
+    const identity = identityRef.current;
+    if (quickActionActive.current || busy || !isAuthorized || ownerSubmissionPending ||
+        !identityStillCurrent(identity, identityRef.current) || capabilities?.ownerSetupSigning !== true) return;
+    if (requested === "CREATE_ACCOUNT" && (discoveryStatus !== "success" || accounts.length !== 0)) return;
+    if (!["CREATE_ACCOUNT", "FUND", "FUND_USDC", "REVOKE"].includes(requested)) return;
+    if (requested !== "CREATE_ACCOUNT" && (!state?.accountId || discoveryStatus !== "success" ||
+        !accounts.some(a => a.accountId === state.accountId))) return;
+    if (requested === "REVOKE" && !state?.delegateAddress) return;
+    const atomic = /^(FUND|FUND_USDC)$/.test(requested) ? dollarsToAtomicAmount(String(extra.amountHuman ?? fundingAmount), 6) : null;
+    if (/^(FUND|FUND_USDC)$/.test(requested) && !atomic) { setPageError("Enter a positive funding amount."); return; }
+    const walletUsdEnough = !!atomic && !!fundingInfo?.walletUsdAtomic &&
+      /^\d+$/.test(fundingInfo.walletUsdAtomic) && BigInt(fundingInfo.walletUsdAtomic) >= BigInt(atomic);
+    const action = requested === "FUND" && !walletUsdEnough && fundingInfo?.nativeUsdcSupported ? "FUND_USDC" : requested;
+    const payload = { action, ...(requested !== "CREATE_ACCOUNT" ? { accountId: state!.accountId } : {}),
+      ...(atomic ? { amountAtomic: atomic } : {}), ...(requested === "REVOKE" ? { delegateAddress: state!.delegateAddress } : {}) };
+    quickActionActive.current = true;
+    setBusy("simulate"); setPageError(""); setNotice("");
+    try {
+      const simulation = await request<{ success: boolean; checksEnabled: boolean; network: string }>("/owner-simulation", "POST", payload, identity);
+      if (!identityStillCurrent(identity, identityRef.current)) return;
+      if (!simulation.success || !simulation.checksEnabled || simulation.network !== "mainnet") throw new Error("Wallet checks did not pass");
+      const transaction = await request<OwnerTransaction>("/owner-transaction", "POST", payload, identity);
+      if (!identityStillCurrent(identity, identityRef.current)) return;
+      pendingGeneration.current = identity.generation;
+      setPendingAction(action); setPendingOwner(identity.address);
+      await approvePreparedOwnerTransaction({ transaction, action, passed: true, generation: identity.generation });
+    } catch (error) {
+      if (identityStillCurrent(identity, identityRef.current)) setPageError(`We couldn’t prepare this wallet request. No transaction was submitted. ${asErrorMessage(error)}`);
+    } finally {
+      quickActionActive.current = false;
+      if (identityStillCurrent(identity, identityRef.current)) setBusy("");
+    }
   };
   const cap = capabilities;
+  const desiredFundingAtomic = dollarsToAtomicAmount(fundingAmount, 6);
+  const useUsdcFunding = fundingInfo?.nativeUsdcSupported && !(desiredFundingAtomic && fundingInfo.walletUsdAtomic &&
+    /^\d+$/.test(fundingInfo.walletUsdAtomic) && BigInt(fundingInfo.walletUsdAtomic) >= BigInt(desiredFundingAtomic));
   const status = state?.status ?? "NOT LOADED";
   const accountId = state?.accountId;
   const simulationPassed = !!simulation?.success && simulation.checksEnabled && simulation.network === "mainnet";
@@ -555,11 +678,13 @@ function AgentPage() {
 
   return <div className="page agent-page">
     <header className="agent-mast">
-      <div><div className="eyebrow">BLUEWATERAI / READ-ONLY ROUND RESEARCH DESK</div><h1>Operational view.<em> Authority stays yours.</em></h1><p>Inspect current service state, review explicit policy limits, and simulate owner actions before a transaction payload is prepared.</p></div>
-      <div className="agent-mast-badge"><span className="agent-pulse" />MAINNET · DEVELOPMENT BETA</div>
+      <div><div className="eyebrow">BLUEWATERAI / AGENT</div><h1>Your wallet.<em> Your agent.</em></h1><p>Connect, fund and choose your strategy. You stay in control.</p></div>
+      <div className="agent-mast-badge"><span className="agent-pulse" />SUI MAINNET</div>
     </header>
+    <div className="ao-public-unavailable" role="status"><strong>Live agent temporarily unavailable</strong><span>Secure mainnet trading is not ready yet. No trading permission is activated. You can try shadow mode without connecting or funding.</span></div>
+    {isAuthorized && state?.status === "SHADOW" && <button className="ao-button ao-button-primary ao-run-pause" disabled={!!busy} onClick={() => void control("PAUSE")}>PAUSE AGENT</button>}
 
-    <section className="agent-safety-strip">
+    <details className="agent-card ao-system-diagnostics"><summary>System diagnostics</summary><section className="agent-safety-strip">
       <ShieldCheck size={19} /><div><strong>IDENTITY IS NOT AUTHORITY</strong><span>Wallet connection authenticates the owner only. This console never starts trading or signs or funds automatically. An explicitly reviewed setup transaction remains a separate owner choice; balances, fills, and profit appear only if the service reports them.</span></div>
     </section>
 
@@ -585,14 +710,14 @@ function AgentPage() {
       </section>
     </div>
 
-    <AgentCurrentRound agentStatus={state?.status ?? null} />
+    <AgentCurrentRound agentStatus={state?.status ?? null} /></details>
 
     {(pageError || notice) && <div role={pageError ? "alert" : "status"} className={pageError ? "agent-message error" : "agent-message"}>{pageError ? <AlertTriangle size={16} /> : <Check size={16} />}{pageError || notice}<button aria-label="Dismiss message" onClick={() => { setPageError(""); setNotice(""); }}><X size={14} /></button></div>}
 
-    <div className="agent-columns">
+    {shadowPreview ? <AgentRunningView policy={policy} onPause={() => { setShadowPreview(false); setNotice("Shadow preview paused. No trades were submitted."); }} /> : <div className="agent-columns">
       <main className="agent-main-column">
         <section className="agent-card agent-policy-card">
-          <div className="agent-card-heading"><div><span className="agent-kicker">01 / BOUNDED SESSION</span><h2>Guided agent setup</h2><p>Short, explicit setup for a finite BTC-round session. Existing owner identity, simulation, funding and withdrawal safeguards remain unchanged.</p></div><span className={dirtyPolicy ? "agent-dirty" : "agent-saved"}>{dirtyPolicy ? "UNSAVED REVIEW" : isAuthorized ? `SAVED · V${state?.policyVersion ?? "—"}` : "PUBLIC PREVIEW"}</span></div>
+          <div className="agent-card-heading"><div><span className="agent-kicker">YOUR AGENT</span><h2>Simple setup. You’re in control.</h2></div><span className={dirtyPolicy ? "agent-dirty" : "agent-saved"}>{dirtyPolicy ? "UNSAVED" : isAuthorized ? "SAVED" : "PREVIEW"}</span></div>
           <GuidedAgentSetup
             policy={policy}
             onPolicyChange={changePolicy}
@@ -604,7 +729,7 @@ function AgentPage() {
             wallets={wallets}
             onConnect={index => { const candidate = wallets[index]; if (candidate) void connectWallet(candidate); }}
             accounts={accounts}
-            accountId={accountId}
+            accountId={discoveryStatus === "success" && accounts.some(a => a.accountId === accountId) ? accountId : null}
             onSelectAccount={id => void setAccount(id)}
             supportedAsset={settlementInfo ? `${settlementInfo.coinType} · ${settlementInfo.network}${settlementInfo.decimals == null ? "" : ` · ${settlementInfo.decimals} decimals`}${settlementInfo.collateral ? ` · collateral ${settlementInfo.collateral}` : ""}${settlementInfo.conversionAvailable === false ? " · wallet conversion unavailable" : ""}` : null}
             onRefreshAsset={() => void accountOptions()}
@@ -633,6 +758,18 @@ function AgentPage() {
             ownerSetupSigning={cap?.ownerSetupSigning === true}
             readiness={cap?.readiness ?? null}
             onRetryCapabilities={retryCapabilities}
+            discoveryStatus={discoveryStatus}
+            discoveryError={discoveryError}
+            availableBalanceUsd={fundingInfo?.availableBalanceUsd ?? null}
+            fundingAssetLabel={useUsdcFunding ? "Native USDC → WaterX USD" : "WaterX USD"}
+            fundingAvailable={discoveryStatus === "success" && !!accountId && !!fundingInfo}
+            delegateStatus={state?.delegateExpiresAtMs != null && state.delegateExpiresAtMs <= Date.now() ? "expired" : "unavailable"}
+            onTryShadow={() => setShadowPreview(true)}
+            onQuickOwnerAction={(action, extra) => void quickOwnerAction(action, extra)}
+            experimentalConfirmed={experimentalConfirmed}
+            onExperimentalConfirmedChange={setExperimentalConfirmed}
+            compoundingConfirmed={compoundingConfirmed}
+            onCompoundingConfirmedChange={setCompoundingConfirmed}
             capabilitiesAvailable={!!cap}
             technicalBlockers={technicalBlockers}
             capabilitySummary={capabilitySummary}
@@ -694,12 +831,19 @@ function AgentPage() {
 
       </main>
 
-      <aside className="agent-side-column">
+      <aside className="agent-side-column" hidden>
         <section className="agent-card agent-copy-card"><span className="agent-kicker">RESEARCH IS NOT AUTHORITY</span><p>Frozen round predictions remain research records. They never imply an order, fill or realized trading result.</p><div><span>Prediction permission</span><b>{cap?.permissions.prediction ?? "Not reported"}</b></div><div><span>Account permission</span><b>{cap?.permissions.account ?? "Not reported"}</b></div></section>
       </aside>
-    </div>
+    </div>}
 
-    <footer className="agent-footer"><span>BLUEWATERAI AGENT · MAINNET IDENTITY ONLY</span><span>Balances are never inferred <i /> No background signing <i /> Owner action only</span></footer>
+    <details className="agent-card ao-settings"><summary>Settings</summary>
+      <p>Your wallet owns the WaterX account. Funding does not grant trading permission.</p>
+      {state?.delegateAddress ? <><p>{state.delegateExpiresAtMs && state.delegateExpiresAtMs <= Date.now() ? "The recorded permission has expired. On-chain revocation is a separate wallet action." : "A delegate is recorded. Effective on-chain permissions are not verified here."}</p>
+        <button className="ao-button ao-button-secondary" disabled={!isAuthorized || !!busy || ownerSubmissionPending || cap?.ownerSetupSigning !== true} onClick={() => void quickOwnerAction("REVOKE")}>Revoke Agent in wallet</button></> : <p>No trading permission has been activated by this setup.</p>}
+      {isAuthorized && <><button className="ao-button ao-button-secondary" disabled={!!busy} onClick={() => void control("PAUSE")}>Pause saved agent</button><button className="ao-button ao-button-secondary" disabled={!!busy} onClick={() => void logout()}>Disconnect wallet</button></>}
+      {uncertainDigest && <div role="status"><p>Wallet confirmation is unresolved. Do not submit again.</p><button className="ao-button ao-button-secondary" disabled={!!busy || !isAuthorized} onClick={() => void retryOwnerConfirmation()}>Retry confirmation only</button></div>}
+    </details>
+    <footer className="agent-footer"><span>BLUEWATERAI AGENT</span><span>Your funds stay yours <i /> No hidden signing</span></footer>
 
   </div>;
 }

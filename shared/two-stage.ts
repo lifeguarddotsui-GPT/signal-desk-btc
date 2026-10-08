@@ -37,8 +37,21 @@ export type TwoStageRoundRow=TimedRound&{
   captureBuildId?:string;
   settlementStatus?:import("./waterx-round-identity").SettlementStatus;
   settlementReason?:string|null;
+  settlementEvidence?:{
+    source:"OFFICIAL_WATERX_PROVIDER_ADAPTER";
+    roundId:string;intervalMinutes:5|15;startMs:number;expiryMs:number;
+    verifiedAtMs:number|null;settledAtMs:number|null;anchorPrice:number|null;settlePrice:number|null;
+    providerResolutionStatus?:string|null;provisionalOutcome?:string|null;unverifiedPriceDirection?:string|null;
+    unassociatedDisplay?:unknown;
+    latestProviderEvidence?:unknown;
+    retry?:{attempts?:number;nextAttemptAtMs?:number;lastError?:string|null}|null;
+    note:string;
+  };
   earlyScore?:import("./waterx-round-identity").StageScore;
   confirmationScore?:import("./waterx-round-identity").StageScore;
+  earlyCaptureCause?:import("./stage-capture-status").StageCaptureCause;
+  confirmationCaptureCause?:import("./stage-capture-status").StageCaptureCause;
+  sourceIncident?:boolean;
 };
 export type StageStats={
   correct:number;incorrect:number;pending:number;disputed:number;scoredN:number;accuracy:number|null;
@@ -48,8 +61,14 @@ export type StageStats={
   earlyWindows?:{seconds:number;locks:number;rate:number|null}[];
   timingN?:number;timingUnknownN?:number;timingBasis?:string;
   noLockN?:number;abstainedN?:number;dataFailureN?:number;withheldN?:number;
+  unclassifiedN?:number;observingN?:number;
 };
 export type TwoStageHistory={
+  settlementHealth?:{
+    cohortN:number;verified:number;pending:number;disputed:number;missing:number;unverified:number;
+    identityMismatch:number;coverage:number|null;
+    unresolved:{roundId:string;intervalMinutes:5|15;status:string;reason:string}[];
+  };
   strategyVersion:string;asOfMs:number;shadowOnly:true;activeStrategy:string;
   cohort:{interval:string;window:string;timezoneOffsetMinutes:number;denominator:string;cohortN:number};
   early:StageStats;confirmation:StageStats;

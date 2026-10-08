@@ -17,13 +17,17 @@ export function sameWaterxRound(left: WaterxRoundIdentity, right: WaterxRoundIde
 }
 export type SettlementStatus = "VERIFIED" | "PENDING" | "WITHHELD" | "DISPUTED" | "MISSING" | "IDENTITY_MISMATCH";
 export type StageScore = "CORRECT" | "INCORRECT" | "PENDING" | "WITHHELD" | "DISPUTED" |
-  "NO_LOCK" | "ABSTAINED" | "DATA_FAILURE" | "IDENTITY_MISMATCH";
+  "NO_LOCK" | "ABSTAINED" | "DATA_FAILURE" | "IDENTITY_MISMATCH" | "OBSERVING";
 export function stageScore(input: {
   side: "UP" | "DOWN" | null; outcome: "UP" | "DOWN" | null;
   settlementStatus: SettlementStatus; reason: string; dataFailure: boolean;
 }): StageScore {
   if (!input.side) {
-    if (input.dataFailure || /MISSED_DEADLINE|MISSING.*ASSESSMENT|DATABASE|STALE|FRESH_DATA|COMMIT/.test(input.reason))
+    // A recovered source incident is not the terminal cause of an abstention.
+    if (/POLICY_NOT_QUALIFIED|ABSTAIN|BELOW_POLICY|PERSISTENCE_INCOMPLETE|STABILITY_WINDOW|ADDITIONAL_EVIDENCE|NO_QUALIFYING|NO_QUALIFIED_LOCK|NO_QUALIFIED_SIGNAL|CALIBRATED_DIRECTION_CONFLICT/.test(input.reason) &&
+        !/DATABASE|DATA_UNAVAILABLE|STALE|FRESH_DATA|COMMIT/.test(input.reason))
+      return "ABSTAINED";
+    if (input.dataFailure || /MISSED_DEADLINE|MISSING.*ASSESSMENT|DATABASE|STALE|FRESH_DATA|COMMIT|NO_VALID_INPUT|SERVICE_INTERRUPTED|SCHEDULER_FAILURE|INSUFFICIENT_PRICE_COVERAGE/.test(input.reason))
       return "DATA_FAILURE";
     if (/POLICY_NOT_QUALIFIED|ABSTAIN|BELOW_POLICY|PERSISTENCE_INCOMPLETE|STABILITY_WINDOW/.test(input.reason))
       return "ABSTAINED";

@@ -35,6 +35,7 @@ function pool(){
 export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:(interval:5|15)=>Partial<Record<"EARLY"|"CONFIRMATION",LearnedStagePolicy>>;
   preference?:ResearchPreference;earlyPolicyVersion?:string;provenance?:"PROSPECTIVE"|"SYNTHETIC"}={}){
   const now=options.now??Date.now,entries=new Map<number,Entry>();let failures=0,dropped=0,rejected=0,retryAfterMs=0;
+  const retired=new Map<string,Entry>();
   const rawPrices=new Map<string,PricePoint>();let priceRejected=0,priceArchiveFailures=0,optionalFailures=0;
   let priceStreamTicks=0,lastStreamSourceAt:number|null=null,lastCapturedSourceAt:number|null=null;
   const sourceCadence:number[]=[],receiptLatency:number[]=[];
@@ -159,9 +160,10 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
          if(now()>=e.round.expiryMs&&!state.lock){
            state.reason=/POLICY_NOT_QUALIFIED/.test(priorReason)?"ABSTAINED_CONFIRMATION_POLICY_NOT_QUALIFIED":
              e.error?"MISSED_DEADLINE_DATABASE_FAILURE":
-             !e.observations.at(-1)?.sourceHealthy?"MISSED_DEADLINE_DATA_UNAVAILABLE":
-             /BELOW_POLICY|PERSISTENCE_INCOMPLETE|STABILITY_WINDOW|SEPARATION|ADDITIONAL_EVIDENCE/.test(priorReason)?
-               `ABSTAINED_${priorReason}`:"MISSED_DEADLINE_NO_QUALIFIED_LOCK";
+             !e.observations.at(-1)?.sourceHealthy?"NO_VALID_INPUT":
+             e.round.expiryMs-e.observations.at(-1)!.receivedAtMs>5000?"SOURCE_STALE":
+             /BELOW_POLICY|PERSISTENCE_INCOMPLETE|STABILITY_WINDOW|SEPARATION|ADDITIONAL_EVIDENCE|ABSTAINED|NO_QUALIFYING|CALIBRATED_DIRECTION_CONFLICT/.test(priorReason)?
+               priorReason.startsWith("ABSTAINED_")?priorReason:`ABSTAINED_${priorReason}`:"MISSED_DEADLINE_NO_QUALIFIED_LOCK";
          }
          state.diagnostics=assessment.diagnostics;
          if(!assessment.eligible||!current()){e.candidates.delete(stage);state.persistence="OBSERVING";continue;}
@@ -191,6 +193,7 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
            .catch(()=>{optionalFailures++;assessmentsSaved=false;});
        }
        if(now()>=e.round.expiryMs&&assessmentsSaved)e.deadlineRecorded=true;
+       if(e.deadlineRecorded)retired.delete(identity(e.round));
        const priceBatch=Array.from(e.priceQueue.values()).slice(0,1000);
        if(priceBatch.length)try{
          await c.query(`INSERT INTO waterx_two_stage_prices(network,market_id,round_id,interval_minutes,strategy_version,
@@ -223,7 +226,13 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
     let e=entries.get(input.intervalMinutes);
     if(e&&identity(e.round)!==identity(round)&&round.startMs<=e.round.startMs){rejected++;return Promise.resolve();}
     if(!e||identity(e.round)!==identity(round)){
-       if(e&&!e.deadlineRecorded&&now()>=e.round.expiryMs)void schedule(e);
+       if(e&&!e.deadlineRecorded&&now()>=e.round.expiryMs){
+         retired.set(identity(e.round),e);
+         // Bounded buffer. Durable restart recovery exposes missing finalizations
+         // if an outage exceeds this capacity; never invent a dropped choice.
+         if(retired.size>64)retired.delete(retired.keys().next().value!);
+         void schedule(e);
+       }
        e=newEntry(round);
       entries.set(input.intervalMinutes,e);
     }
@@ -316,7 +325,7 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
   }
   function tick(){
     if(!decisionWriterAllowed())return;
-    for(const e of Array.from(entries.values())){
+    for(const e of [...Array.from(entries.values()),...Array.from(retired.values())]){
       if(now()>=e.round.expiryMs){
         if(!e.deadlineRecorded&&!e.job)void schedule(e);
         continue;
@@ -324,10 +333,11 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
       // Retry valid frozen candidates independently of the next provider tick.
       // No new input or changed deadline is synthesized by this clock.
       freezeCandidates(e);
-      if(e.candidates.size&&!e.job)void schedule(e);
+      if((e.candidates.size||e.queue.length||e.priceQueue.size)&&!e.job)void schedule(e);
     }
   }
   return {observe,observePrice,read,restore,unavailable,tick,health:()=>({shadowOnly:true,failures,dropped,rejected,activeIntervals:entries.size,
+    retiredPendingN:retired.size,
     priceRejected,priceArchiveFailures,optionalFailures,independentPricePointN:rawPrices.size,
     priceCapture:{upstreamTicks:priceStreamTicks,captureMinimumSourceSpacingMs:3000,maximumInterpolationGapMs:5000,
       recentSourceCadenceMs:sourceCadence.slice(),recentSourceToReceiptLatencyMs:receiptLatency.slice()},

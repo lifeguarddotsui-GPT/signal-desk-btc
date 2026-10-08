@@ -151,7 +151,7 @@ test("history SSR accepts a v1 lock only when it matches the historical row vers
     earlyReason: "", confirmationReason: "",
   };
   const html = renderToStaticMarkup(React.createElement(RoundRow, { row: row as never }));
-  assert.match(html, /UP · 22\.0s/);
+  assert.match(html, /elapsed 22\.0s/);
   assert.match(html, /waterx-two-stage-shadow-v1/);
   const mismatched = renderToStaticMarkup(React.createElement(RoundRow, {
     row: { ...row, strategyVersion: TWO_STAGE_STRATEGY } as never,
@@ -168,10 +168,42 @@ test("Early and Confirmation statistics render separate service-provided scores 
   });
   const early = renderToStaticMarkup(React.createElement(StageStatsBlock, { title: "Early Lock", stats: stats(4, 2, 4 / 6) }));
   const confirmation = renderToStaticMarkup(React.createElement(StageStatsBlock, { title: "Confirmation Lock", stats: stats(3, 1, .75) }));
-  assert.match(early, /4 : 2/);
+  assert.match(early, /CORRECT<\/span><\/div><i aria-hidden="true">:<\/i><div><b>2<\/b><span>INCORRECT/);
+  assert.match(early, /UNRECORDED/);
   assert.match(early, /66\.7%/);
   assert.match(early, /Calibration<\/span><b>Not reported/);
-  assert.match(confirmation, /3 : 1/);
+  assert.match(confirmation, /<b>3<\/b><span>CORRECT/);
+  assert.match(confirmation, /<b>1<\/b><span>INCORRECT/);
   assert.match(confirmation, /75\.0%/);
   assert.match(confirmation, /Actual trading P\/L<\/span><b>Unavailable · no fills inferred/);
+});
+
+test("history round cards keep stage records separate and suppress non-verified outcomes", () => {
+  const row = {
+    intervalMinutes: 5, roundId: round.id, startMs, expiryMs, marketId: "market-btc-a",
+    strategyVersion: TWO_STAGE_STRATEGY,
+    early: lock("EARLY", "UP"), confirmation: lock("CONFIRMATION", "DOWN"),
+    relationship: "Changed direction", outcome: "UP", settlementStatus: "PENDING",
+    disputed: false, dataFailure: false, earlyReason: "", confirmationReason: "",
+  };
+  const html = renderToStaticMarkup(React.createElement(RoundRow, { row: row as never }));
+  assert.match(html, /EARLY LOCK/);
+  assert.match(html, /CONFIRMATION/);
+  assert.match(html, /DISAGREE/);
+  assert.match(html, /Not scored as final/);
+  assert.doesNotMatch(html, /WATERX FINAL<\/small><b>UP/);
+  const provisional=renderToStaticMarkup(React.createElement(RoundRow,{row:{...row,settlementStatus:"WITHHELD",
+    settlementEvidence:{source:"OFFICIAL_WATERX_PROVIDER_ADAPTER",roundId:row.roundId,intervalMinutes:5,
+      startMs,expiryMs,verifiedAtMs:null,settledAtMs:null,anchorPrice:null,settlePrice:null,
+      provisionalOutcome:"UP",note:"Provider-reported direction lacks post-expiry timestamp."}} as never}));
+  assert.match(provisional,/PROVISIONAL \/ UNVERIFIED/);
+  assert.doesNotMatch(provisional,/WATERX FINAL<\/small><b>UP/);
+  assert.match(html, /Early committed/);
+  assert.match(html, /Confirmation committed/);
+
+  const legacyWithoutStatus = renderToStaticMarkup(React.createElement(RoundRow, {
+    row: { ...row, settlementStatus: undefined } as never,
+  }));
+  assert.match(legacyWithoutStatus, /Settlement record missing/);
+  assert.doesNotMatch(legacyWithoutStatus, /WATERX FINAL<\/small><b>UP/);
 });

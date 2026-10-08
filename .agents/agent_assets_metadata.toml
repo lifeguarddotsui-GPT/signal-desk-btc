@@ -840,3 +840,17 @@ mtime_ms = 1791495245729
 storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/de329df3-494e-4195-bc9c-70eeab1e03f8/47f428bd-e406-46a5-81e5-ebf5b7fb16fb"
 storage_version_token = "1791495280592364"
 content_type = "text/html"
+
+[[outputs]]
+id = "VwF1NYTRQSBqOWrtIes5r"
+uri = "file://.local/outputs/waterx-settlement-repair-report.html"
+type = "html"
+title = "WaterX settlement repair — before/after report"
+description = "Verified provider fields, development and read-only production coverage, recovery behavior, tests, and remaining release limitations."
+logical_id = "3aec5901-03e5-42e4-a75f-2d36b7d91d4b"
+content_hash = "sha256:0b003a0b346ddd7bc1cb527756decd4683529d0819e100e785da11799d29584c"
+size = 8543
+mtime_ms = 1791500628881
+storage_uri = "gcs://replit-rams-assets-picard/rams/assets/repl:59220537-3b3a-4e91-8873-254fec427632/3aec5901-03e5-42e4-a75f-2d36b7d91d4b/7597fef8-fec7-4c53-a30d-895b068eff4e"
+storage_version_token = "1791500671275356"
+content_type = "text/html"

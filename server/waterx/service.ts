@@ -18,6 +18,7 @@ import { getCurrentWaterxRound, WaterxProviderError } from "./source";
 import type { WaterxInterval, WaterxRound } from "./types";
 import { recordWaterxRound, type WaterxRoundInput } from "./learning";
 import { settlementReconciler } from "./settlement-reconciler";
+import {recentRoundsCollector} from "./recent-rounds";
 import {
   getAllWaterxDiagnostics, getWaterxDiagnostics, waterxFetchFailed, waterxFetchFinished,
   waterxFetchStarted, waterxFetchSucceeded, waterxScheduleTick, waterxScheduleNext,
@@ -392,6 +393,9 @@ async function collectWaterx(interval: WaterxInterval, signal: AbortSignal): Pro
   // An aborted operation is no longer allowed to change snapshots, diagnostics,
   // or enqueue persistence, even if a non-compliant transport resolves late.
   if (signal.aborted) return;
+  // Independent optional archival, never inside or awaited by the provider-read
+  // promise or immutable decision pipeline.
+  recentRoundsCollector.observe(result.detail,interval);
   failures.delete(interval);
   retryDelays.delete(interval);
   const now = Date.now();

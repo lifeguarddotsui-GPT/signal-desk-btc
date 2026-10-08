@@ -187,8 +187,16 @@ export function parseWaterxResponse(payload: unknown, interval: WaterxInterval):
   const neighbors = object(detail.neighbors, "neighbors");
   if (!Array.isArray(neighbors.past) || !Array.isArray(neighbors.upcoming))
     throw new WaterxProviderError("Malformed WaterX neighbors");
+  const display=market.display&&typeof market.display==="object"?
+    market.display as Record<string,unknown>:null;
+  const displayOutcomes=display?.recentOutcomes;
+  // Website badges are unkeyed. Preserve them as diagnostics, never attach one
+  // to a round by array position (the UI even appends an UNKNOWN placeholder).
+  const recentOutcomes=Array.isArray(displayOutcomes)&&displayOutcomes.every(v=>
+    typeof v==="string"&&/^(up|down|unknown)$/i.test(v))?
+    displayOutcomes.slice(-10).map(v=>v.toUpperCase() as "UP"|"DOWN"|"UNKNOWN"):undefined;
   return {
-    market: { slug: expectedSlug, marketId },
+    market: { slug: expectedSlug, marketId,...(recentOutcomes?{recentOutcomes}:{}) },
     round: parseRound(detail.round, expectedSlug, marketId),
     neighbors: { past: neighbors.past, upcoming: neighbors.upcoming },
   };
@@ -216,6 +224,31 @@ function candidateRounds(detail: WaterxDetail, interval: WaterxInterval): Waterx
     const expectedSeconds = interval * 60;
     return round.endsAt - round.startsAt === expectedSeconds;
   });
+}
+
+/** Recent Rounds may include the live round and sparse summaries. Never map the
+ * unkeyed display.recentOutcomes array to IDs by position. */
+export function recentWaterxRounds(detail:WaterxDetail,interval:WaterxInterval,nowMs=Date.now()){
+  const rounds:WaterxRound[]=[],rejected:string[]=[],seen=new Map<string,string>();
+  if(detail.market.slug!==waterxSlug(interval))throw new WaterxProviderError("Recent Rounds interval mismatch");
+  for(const neighbor of [detail.round,...detail.neighbors.past].slice(0,21)){
+    try{
+      const raw=object(neighbor,"recent round");
+      const r=parseRound(raw.round??raw,detail.market.slug,detail.market.marketId);
+      if(r.marketId!==detail.market.marketId)throw new WaterxProviderError("Recent Rounds market mismatch");
+      if(r.endsAt*1000>nowMs)continue;
+      const identity=`${r.startsAt}:${r.endsAt}`;
+      if(seen.has(r.id)){
+        if(seen.get(r.id)!==identity){
+          for(let i=rounds.length-1;i>=0;i--)if(rounds[i].id===r.id)rounds.splice(i,1);
+          throw new WaterxProviderError("Recent Rounds conflicting identity");
+        }
+        continue;
+      }
+      seen.set(r.id,identity);rounds.push(r);
+    }catch(error){rejected.push((error as Error).message);}
+  }
+  return {rounds,rejected};
 }
 
 async function readDetail(

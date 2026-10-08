@@ -1,6 +1,6 @@
 import { canonicalWaterxRoundKey } from "../../shared/waterx-round-identity";
 import { getWaterxRoundAtEpoch, verifiedHistoricalRound } from "./source";
-import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxSettlement } from "./learning";
+import { listPendingWaterxSettlements, markWaterxSettlementAttempt, recordWaterxSettlement,finishWaterxSettlementAttempt } from "./learning";
 import { captureResearchEvent, researchPool } from "./research-store";
 import type { WaterxInterval } from "./types";
 
@@ -10,6 +10,7 @@ type Dependencies = {
   read: typeof getWaterxRoundAtEpoch;
   save: typeof recordWaterxSettlement;
   now: () => number;
+  finish?:typeof finishWaterxSettlementAttempt;
   event: (round: { intervalMinutes: WaterxInterval; roundId: string; startMs: number; expiryMs: number },
     code: string, reason: string) => Promise<void>;
 };
@@ -52,6 +53,7 @@ export function createSettlementReconciler(dependencies: Dependencies, batchSize
           // why they are withheld. Do not infer a price, outcome or timestamp.
           const result = await dependencies.save({
             intervalMinutes: interval, roundId: row.roundId,
+            startMs:row.startMs,expiryMs:row.expiryMs,
             anchorPrice: resolved.anchorPrice, anchorConfirmed: resolved.anchorPriceConfirmed,
             settlePrice: resolved.settlePrice, outcome: resolved.settlement?.outcome ?? null,
             settledAt: resolved.settlement?.settledAt == null ? null : resolved.settlement.settledAt * 1000,
@@ -59,11 +61,15 @@ export function createSettlementReconciler(dependencies: Dependencies, batchSize
           });
           if (status !== "resolved") counts.unresolved++;
           if (result) counts.acceptedOrRecorded++;
+          await dependencies.finish?.(interval,row.roundId,result?null:"Settlement proof incomplete or withheld; see retained provider evidence.");
           await log(round, result ? "SETTLEMENT_LABEL_ACCEPTED" : "SETTLEMENT_PROOF_WITHHELD",
             `Provider status ${status ?? "missing"}; strict validator accepted=${result}. Rejection detail is retained on the round.`);
         } catch (error) {
           counts.failed++;
           const reason = error instanceof Error ? error.message.slice(0, 180) : "Settlement reconciliation failed";
+          try{await dependencies.finish?.(interval,row.roundId,reason,
+            Number((error as {retryAfterMs?:number}).retryAfterMs??0));}
+          catch{counts.auditFailures++;}
           await log(round, /MISMATCH|IDENTITY/.test(reason) ? "SETTLEMENT_IDENTITY_MISMATCH" : "SETTLEMENT_RETRY_FAILED", reason);
           console.warn(`[waterx-${interval}m] independent settlement reconciliation failed:`, reason);
         }
@@ -95,6 +101,7 @@ export function createSettlementReconciler(dependencies: Dependencies, batchSize
 export const settlementReconciler = createSettlementReconciler({
   list: listPendingWaterxSettlements, claim: markWaterxSettlementAttempt,
   read: getWaterxRoundAtEpoch, save: recordWaterxSettlement, now: Date.now,
+  finish:finishWaterxSettlementAttempt,
   event: (round, code, reason) => captureResearchEvent(researchPool, {
     ...round, stage: "SETTLEMENT_RECONCILIATION", code, reason,
   }),

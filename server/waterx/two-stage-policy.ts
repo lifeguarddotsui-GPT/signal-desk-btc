@@ -4,11 +4,14 @@ import {priceAreaFeatures,type PricePoint} from "../../shared/price-area";
 import {TWO_STAGE_FEATURES,type StageInput,type StageLock,type LockStage,type StageDiagnostics} from "../../shared/two-stage";
 import {sigmoid,logit} from "./bluewater-fast";
 import {earlyCandidate,researchPreference} from "./early-policy";
+import {validWaterxProbabilityPair} from "../../shared/round-decision";
 export type LearnedStagePolicy={version:string;stage:LockStage;interval:5|15;modelVersion:string;
   trainedBeforeMs:number;featureVersion:string;minimumStrength:number;
   outcome:{intercept:number;coefficients:number[]};calibration:{intercept:number;coefficients:number[]};
   selectedCalibrationN:number;selectedBothOutcomes:boolean;selectedBrier:number;
   qualified:true;economicQuotesVerified:boolean};
+/** Research safety reserve, not a claim of verified executable order terms. */
+export const CONFIRMATION_ORDER_RESERVE_MS=30000;
 export function accumulatedFeatures(input:StageInput){
   const latest=input.observations.at(-1),f=latest?.features??{};
   const points:PricePoint[]=input.observations.flatMap(o=>{
@@ -48,7 +51,10 @@ export function assessStage(input:StageInput,stage:LockStage,early:StageLock|nul
   const diagnostics:StageDiagnostics="diagnostics" in q?q.diagnostics:{message:q.remainingRequirement??"Building additional evidence",
     measurements:{...q.components},thresholds:{stage,policy:"unchanged-confirmation-guard"}};
   if(input.nowMs>=input.expiryMs)return {eligible:false,reason:"ROUND_EXPIRED"};
-  if(!latest||!latest.sourceHealthy||input.nowMs-latest.receivedAtMs>5000)return {eligible:false,reason:"WAITING_FOR_FRESH_DATA"};
+  if(stage==="CONFIRMATION"&&input.expiryMs-input.nowMs<CONFIRMATION_ORDER_RESERVE_MS)
+    return {eligible:false,reason:"ABSTAINED_INSUFFICIENT_ORDER_TIME"};
+  if(!latest||!latest.sourceHealthy||!validWaterxProbabilityPair(latest.probabilityUp,latest.probabilityDown)||
+    input.nowMs-latest.receivedAtMs>5000)return {eligible:false,reason:"WAITING_FOR_FRESH_DATA"};
   if(stage==="CONFIRMATION"&&early&&latest.id===early.observationIds.at(-1))
     return {eligible:false,reason:"WAITING_FOR_ADDITIONAL_EVIDENCE"};
   if(stage==="CONFIRMATION"&&!validatedStagePolicy(policy,input,stage))

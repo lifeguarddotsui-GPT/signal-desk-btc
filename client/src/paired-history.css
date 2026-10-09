@@ -23,7 +23,7 @@
 .pair-refresh:focus-visible,.paired-history select:focus-visible,.pair-details summary:focus-visible {outline:2px solid #68d6c8;outline-offset:2px;}
 .pair-filters {display:flex;flex-wrap:wrap;gap:12px;margin-bottom:22px;}
 .pair-filters label,.pair-toolbar label {display:flex;align-items:center;gap:10px;font-size:14px;color:var(--pair-muted);}
-.pair-stats {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+.pair-stats {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
 .pair-stat-card {background:var(--pair-panel);border:1px solid var(--pair-line);border-radius:12px;padding:20px;min-width:0;}
 .pair-stat-heading {font-size:16px;font-weight:750;margin-bottom:12px;}
 .pair-stat-ratio {font-variant-numeric:tabular-nums;font-size:clamp(28px,3vw,40px);line-height:1.1;font-weight:800;letter-spacing:-.035em;display:flex;gap:9px;align-items:center;}

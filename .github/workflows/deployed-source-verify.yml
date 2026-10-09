@@ -2,6 +2,9 @@ name: Blue Water deployed-source verification
 on:
   pull_request:
   workflow_dispatch:
+concurrency:
+  group: source-verification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -17,5 +20,8 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npm run check
-      - run: npm test
-      - run: npm run build
+      - name: Bounded full regression suite (never hang)
+        run: timeout --signal=TERM --kill-after=5s 120s npm test
+      - name: Production build (never deploy)
+        if: always()
+        run: npm run build

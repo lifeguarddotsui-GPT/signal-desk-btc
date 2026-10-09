@@ -3,6 +3,7 @@ import { captureCandidateFromPersistedEvidence } from "./candidate-capture";
 import { createWaterxBackgroundQueue } from "./background-queue";
 import { captureLockObservation,loadEarlyDecision } from "./lock-store";
 import { createLockTimers } from "./lock-timers";
+import { adaptiveWaterxPollIntervalMs } from "./poll-policy";
 import { captureResearchObservation } from "./research-store";
 import { roundDecisions } from "./round-decision";
 import {refreshHealth,refreshErrorClass} from "./refresh-health";
@@ -646,6 +647,15 @@ export function startWaterxCapture(options: {
     if (running.has(interval)) continue;
     running.add(interval);
     const periodMs = options.periods?.[interval] ?? 5_000;
+    // An explicit period preserves deterministic tests; the environment flag
+    // provides a production rollback without needing another code release.
+    const adaptive = options.periods?.[interval] === undefined &&
+      process.env.WATERX_ADAPTIVE_POLLING !== "false";
+    const nextPeriodMs = (at: number) => adaptive
+      ? adaptiveWaterxPollIntervalMs(interval,
+          snapshots.get(interval)?.round?.endsAt == null ? null :
+            snapshots.get(interval)!.round!.endsAt * 1000, at)
+      : periodMs;
     const tick = () => {
       timers.delete(interval);
       waterxScheduleTick(interval);
@@ -656,10 +666,12 @@ export function startWaterxCapture(options: {
         }).finally(() => {
           if (!running.has(interval) || timers.has(interval)) return;
           const round=snapshots.get(interval)?.round;
-          const inEarlyWindow=round&&
-            round.endsAt*1000-Date.now()<=(interval===5?120_000:360_000);
-          const nextAt = Date.now() + (options.retryDelayMs ?? retryDelays.get(interval) ??
-            (inEarlyWindow?Math.min(periodMs,3000):periodMs));
+          const now = Date.now();
+          const inEarlyWindow = round &&
+            round.endsAt * 1000 - now <= (interval === 5 ? 120_000 : 360_000);
+          const cadence = adaptive ? nextPeriodMs(now) :
+            (inEarlyWindow ? Math.min(periodMs, 3_000) : periodMs);
+          const nextAt = now + (options.retryDelayMs ?? retryDelays.get(interval) ?? cadence);
           const timer = setTimeout(tick, nextAt - Date.now());
           timer.unref?.();
           timers.set(interval, timer);
@@ -685,7 +697,7 @@ export function startWaterxCapture(options: {
       if (refreshes.has(interval)) return;
       notifiedStalls.delete(interval);
       if (shouldWatchdogPollWaterx(health.lastFetchAttemptAt, health.fetchInFlight,
-        Date.now(), periodMs, health.retryAt)) {
+        Date.now(), nextPeriodMs(Date.now()), health.retryAt)) {
         waterxRecoveryAttempt(interval);
         const scheduled = timers.get(interval);
         if (scheduled) clearTimeout(scheduled);

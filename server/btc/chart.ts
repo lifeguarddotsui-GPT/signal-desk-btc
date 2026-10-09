@@ -1,6 +1,7 @@
 import { comparisonBtc } from "./source";
 import { createCoinbaseStream } from "./coinbase-stream";
 import { persistComparisonTick } from "./chart-history";
+import { archiveSamplePeriodMs, createComparisonArchiveSampler } from "./chart-sampling";
 import { recordComparisonPublication } from "../waterx/latency";
 import { acceptFeatureTick } from "../waterx/bluewater-fast";
 
@@ -280,19 +281,26 @@ export function chartReplayPlan(
   return { reset: null, cursor };
 }
 
+// Keep every real price event in memory; only the PostgreSQL archive is sampled.
+const comparisonArchiveSampler = createComparisonArchiveSampler(
+  archiveSamplePeriodMs(process.env.WATERX_COMPARISON_ARCHIVE_SAMPLING),
+);
 const priceCapture = createPriceCapture({
   onTick: point => {
     publishTick(point);
     acceptFeatureTick({ price: point.price, sourceAtMs: Date.parse(point.sourceAt),
       receivedAtMs: point.at });
-    persistComparisonTick({
-      price: point.price,
-      sourceAt: point.sourceAt,
-      receivedAt: new Date(point.at).toISOString(),
-      source: point.source ?? COMPARISON_SOURCE,
-      ...(point.eventId ? { eventId: point.eventId } : {}),
-      sourceToServerLatencyMs: point.sourceToServerLatencyMs,
-    });
+    if (comparisonArchiveSampler.shouldQueue(point.at)) {
+      const queued = persistComparisonTick({
+        price: point.price,
+        sourceAt: point.sourceAt,
+        receivedAt: new Date(point.at).toISOString(),
+        source: point.source ?? COMPARISON_SOURCE,
+        ...(point.eventId ? { eventId: point.eventId } : {}),
+        sourceToServerLatencyMs: point.sourceToServerLatencyMs,
+      });
+      if (queued) comparisonArchiveSampler.markQueued(point.at);
+    }
   },
 });
 const coinbaseStream = createCoinbaseStream({

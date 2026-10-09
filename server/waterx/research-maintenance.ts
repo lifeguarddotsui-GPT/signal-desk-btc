@@ -131,7 +131,12 @@ export function startResearchMaintenance() {
       if(Date.now()-lastAlertCheck>=60000) lastAlertCheck=Date.now();
     } finally { working=false; }
   }
-  const timer=setInterval(()=>void run(),15000);timer.unref();
+  // Round settlement remains independently polled by the collector.
+  // Reconciliation and scoring may lag by up to one maintenance period;
+  // they must not cause four database scans per minute when idle.
+  const periodMs = process.env.WATERX_RESEARCH_MAINTENANCE_FAST === "true"
+    ? 15_000 : 60_000;
+  const timer=setInterval(()=>void run(),periodMs);timer.unref();
   void run();
   return ()=>{stopped=true;clearInterval(timer);};
 }

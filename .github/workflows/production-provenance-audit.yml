@@ -1,0 +1,24 @@
+name: One-shot production provenance audit (GET only)
+
+on:
+  pull_request:
+    paths:
+      - "scripts/probe-production-readonly.mjs"
+      - ".github/workflows/production-provenance-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  one_shot_audit:
+    name: Read-only public API audit (no Replit Agent)
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Seven bounded GET requests, no production writes
+        run: node scripts/probe-production-readonly.mjs

@@ -14,8 +14,8 @@ export const WATERX_DECISION_POLL_MS = 3_000;
 export const WATERX_DECISION_LEAD_MS: Readonly<Record<WaterxInterval, number>> = {
   // 120s first checkpoint + 45s to establish stable observations.
   5: 165_000,
-  // 360s first checkpoint + 60s for the longer 15m stability requirement.
-  15: 420_000,
+  // 360s first checkpoint + 90s for stability and idle-poll entry jitter.
+  15: 450_000,
 };
 
 export function adaptiveWaterxPollIntervalMs(

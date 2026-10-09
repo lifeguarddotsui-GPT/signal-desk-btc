@@ -43,3 +43,14 @@ jobs:
                 ;;
             esac
           done
+          echo "===== LIVE SOURCE: timed-decision-coordinator.ts lines 22-145 ====="
+          tar -xOzf /tmp/bluewater-prod-source.tar.gz ./server/waterx/timed-decision-coordinator.ts | nl -ba | sed -n '22,145p'
+          echo "===== LIVE SOURCE: timed-decision-store.ts lines 38-190 ====="
+          tar -xOzf /tmp/bluewater-prod-source.tar.gz ./server/waterx/timed-decision-store.ts | nl -ba | sed -n '38,190p'
+          echo "===== LIVE SOURCE: gate-history.ts lines 1-80 ====="
+          tar -xOzf /tmp/bluewater-prod-source.tar.gz ./server/waterx/gate-history.ts | nl -ba | sed -n '1,80p'
+          echo "===== LIVE SOURCE: scripted diff stats ====="
+          for f in server/waterx/timed-decision-store.ts server/waterx/timed-decision-coordinator.ts server/waterx/gate-history.ts; do
+            tar -xOzf /tmp/bluewater-prod-source.tar.gz "./$f" > "/tmp/$(basename "$f").prod"
+            if cmp -s "$f" "/tmp/$(basename "$f").prod"; then echo "$f: identical to PR branch"; else echo "$f: PRODUCTION DIFFERS from PR branch"; fi
+          done

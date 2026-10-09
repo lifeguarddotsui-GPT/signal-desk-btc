@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { researchPool } from "./research-store";
 import { TIMED_STRATEGY } from "../../shared/timed-decision";
-import { stageScore, comparePaired, pairedSummary, type Direction, type PairedRow, type Stage } from "../../shared/paired-history";
+import { stageScore, comparePaired, pairedSummary, projectFrozenBenchmark, type Direction, type PairedRow, type Stage } from "../../shared/paired-history";
 
 export const pairedHistoryQuery = z.object({
   interval: z.enum(["all","5","15"]).default("all"),
@@ -34,6 +34,7 @@ export async function pairedHistory(query:unknown,now=Date.now(),db:PairedHistor
       e.side AS early_side,e.probability_up AS early_probability,e.decision_at_ms AS early_at,
       d.status AS confirmation_status,d.decision AS confirmation_decision,
       g.gate_count,g.missed_gate_count,g.fresh_wait_count,g.qualified_count,
+      b.frozen_choices,
       l.label_status,l.outcome,l.settlement_disputed,
       COALESCE(l.label_status='verified' AND NOT l.settlement_disputed
         AND (l.settlement_quarantine IS NULL OR l.settlement_quarantine='[]'::jsonb)
@@ -60,6 +61,15 @@ export async function pairedHistory(query:unknown,now=Date.now(),db:PairedHistor
       WHERE j.network='sui:mainnet' AND j.strategy_version=$4
         AND j.interval_minutes=r.interval_minutes AND j.round_id=r.round_id
     ) g ON true
+    LEFT JOIN LATERAL (
+      SELECT jsonb_agg(to_jsonb(c) ORDER BY c.decision_at_ms) AS frozen_choices
+      FROM waterx_research_choices c
+      WHERE c.interval_minutes=r.interval_minutes AND c.round_id=r.round_id
+        AND c.start_ms=r.start_ms AND c.expiry_ms=r.expiry_ms
+        AND (c.choice_source IS NULL OR c.choice_source='market_baseline')
+        AND COALESCE(c.evidence->>'tieBreakApplied','false') <> 'true'
+        AND c.state='FROZEN'
+    ) b ON true
     LEFT JOIN waterx_learning_rounds l ON l.interval_minutes=r.interval_minutes AND l.round_id=r.round_id
       AND l.start_ms=r.start_ms AND l.expiry_ms=r.expiry_ms
     ORDER BY r.start_ms DESC,r.interval_minutes,r.round_id`;
@@ -85,6 +95,10 @@ export async function pairedHistory(query:unknown,now=Date.now(),db:PairedHistor
       });
       const early=makeStage(earlySide,earlySide?"LOCKED":"UNRECORDED",earlyAt,number(r.early_probability));
       const confirmation=makeStage(confirmationSide,confirmationStatus,confirmAt,number(confirm.probabilityUp));
+      // This is the Bluewater Decision frozen baseline: a third evidence stream,
+      // NOT a substitute Confirmation Lock or a reconstructed retrospective choice.
+      const choices=Array.isArray(r.frozen_choices)?r.frozen_choices:[];
+      const benchmark=projectFrozenBenchmark(choices,outcome,disputed,Number(r.start_ms),expiryMs);
       const comparison=comparePaired(early,confirmation);
       const missedGates=integer(r.missed_gate_count),waitsForFreshData=integer(r.fresh_wait_count);
       const cause=confirmationStatus==="DATA_FAILURE" ?
@@ -92,15 +106,17 @@ export async function pairedHistory(query:unknown,now=Date.now(),db:PairedHistor
         : confirmationStatus==="ABSTAINED_NO_QUALIFIED_SIGNAL"?"NO_QUALIFIED_SIGNAL":
         confirmationStatus==="UNRECORDED"?"NO_DURABLE_FINAL_DECISION":confirmationStatus;
       return {intervalMinutes:Number(r.interval_minutes) as 5|15,roundId:String(r.round_id),
-        startMs:Number(r.start_ms),expiryMs,early,confirmation,...comparison,
-        outcome,settlement:disputed?"DISPUTED":verified?"VERIFIED":"PENDING",
+        startMs:Number(r.start_ms),expiryMs,early,confirmation,benchmark,...comparison,
+        outcome,settlement:disputed?"DISPUTED":verified?"VERIFIED":
+          r.label_status==null?"NOT_OBSERVED":
+          String(r.label_status).toLowerCase()==="withheld"?"WITHHELD":"PENDING",
         diagnostics:{gateCount:integer(r.gate_count),missedGates,waitsForFreshData,
           qualifiedGates:integer(r.qualified_count),confirmationCause:cause}};
     });
     const summary=pairedSummary(rows);
     return {status:"ok" as const,asOfMs:now,cohort:q,summary,rows:rows.slice(0,150),
       totalRows:rows.length,rowsTruncated:rows.length>150,
-      note:"Exact observed 5m/15m rounds only. UNRECORDED means no saved lock; abstention and operational failure are subtypes. PENDING denotes saved locks awaiting independently verified WaterX settlements. Pairwise correctness is reported only if both saved locks and a verified final outcome exist. No wallet fills or P/L inferred."};
+      note:"Exact observed 5m/15m rounds only. Frozen market-baseline Bluewater Decision is reported separately from qualification-gate Confirmation Lock; neither is retroactively substituted for the other. No lock is not a prediction loss. WITHHELD and NOT_OBSERVED settlement evidence are separate from PENDING. No wallet fills or P/L inferred."};
   }catch(e){
     if(["42P01","42703","3F000"].includes(String((e as {code?:unknown})?.code??"")))
       return {status:"unavailable" as const,reason:"Required paired-history or gate-journal schema is unavailable."};

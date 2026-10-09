@@ -1,0 +1,32 @@
+name: Confirmation and history source checks
+
+on:
+  pull_request:
+    paths:
+      - "client/src/PairedHistory.tsx"
+      - "client/src/paired-history.css"
+      - "server/waterx/paired-history.ts"
+      - "shared/paired-history.ts"
+      - "scripts/paired-history.test.ts"
+      - "docs/CONFIRMATION_LOCK_INVESTIGATION.md"
+      - ".github/workflows/confirmation-history-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Typecheck, regression tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      - run: npm run build

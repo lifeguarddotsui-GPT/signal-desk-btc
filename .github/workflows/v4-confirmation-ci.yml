@@ -8,6 +8,7 @@ on:
       - "server/waterx/live-observation.ts"
       - "server/routes.ts"
       - "scripts/confirmation-v4.test.ts"
+      - "scripts/replit-approved-git-sync.sh"
       - ".github/workflows/v4-confirmation-ci.yml"
   workflow_dispatch:
 permissions:
@@ -27,5 +28,7 @@ jobs:
         run: npm run check
       - name: Isolated V4 regression
         run: timeout --signal=TERM --kill-after=5s 45s node --import tsx --test scripts/confirmation-v4.test.ts
+      - name: Validate source-only Replit sync script
+        run: bash -n scripts/replit-approved-git-sync.sh
       - name: Production build without deployment
         run: npm run build

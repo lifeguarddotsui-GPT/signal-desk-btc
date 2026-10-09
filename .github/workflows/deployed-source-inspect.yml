@@ -28,7 +28,7 @@ jobs:
           echo "Relevant source paths:"
           tar -tzf /tmp/bluewater-prod-source.tar.gz | grep -E '(server/waterx/(timed-decision-store|timed-decision-coordinator|timed-decision-builder|gate-history|background-queue|timed-history)\.ts|server/routes\.ts|client/src/(PairedHistory|App)\.tsx)' | head -n 20 || true
           for needle in 'server/waterx/timed-decision-store.ts' 'server/waterx/timed-decision-coordinator.ts' 'server/routes.ts'; do
-            file="$(tar -tzf /tmp/bluewater-prod-source.tar.gz | grep -E "(^|/)\${needle}$" | head -n1 || true)"
+            file="$(tar -tzf /tmp/bluewater-prod-source.tar.gz | grep -E "(^|/)${needle}$" | head -n1 || true)"
             if [[ -z "$file" ]]; then echo "Missing source: $needle"; continue; fi
             echo "===== RELEASE FILE: $file ====="
             case "$needle" in

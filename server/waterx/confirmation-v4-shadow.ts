@@ -126,15 +126,16 @@ export function createV4ConfirmationShadow(options:{
   // One metadata row per round establishes the prospective cohort denominator.
   // No quote sampling, no retrospective direction, no per-tick storage writes.
   async function recordDiscovery(e:Entry){
-    const c=await getDb().connect();
+    let c:Client|undefined;
     try{
+      c=await getDb().connect();
       await c.query("INSERT INTO waterx_timed_rounds(network,strategy_version,interval_minutes,round_id,start_ms,expiry_ms,discovered_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
         [...identity(e.round),e.round.startMs,e.round.expiryMs,now()]);
       metrics.discoveredRounds++;
     }catch{
       metrics.discoveryFailures++;
       // Failures are counted, not hidden as observed/qualified predictions.
-    }finally{c.release();}
+    }finally{c?.release();}
   }
   function observe(input:TimedInput):Promise<void>{
     if(!enabled||!decisionWriterAllowed())return Promise.resolve();

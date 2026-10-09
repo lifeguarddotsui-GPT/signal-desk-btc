@@ -8,6 +8,7 @@ import {eventLockRuntime} from "./event-lock-runtime";
 import {decisionWriterAllowed,decisionClockDomain,decisionDeploymentId} from "./decision-authority";
 import {entryEconomics} from "../../shared/lock-economics";
 import {twoStageRuntime} from "./two-stage-runtime";
+import {v4ConfirmationShadow} from "./confirmation-v4-shadow";
 
 /** The production ingestion boundary, also used by isolated provider replays.
  * Publishes continuous market evidence before optional storage/research work.
@@ -49,6 +50,8 @@ export function acceptLiveTimedObservation(input:TimedInput,round:WaterxRound,
     // challenger never replaces the benchmark/active strategy or funds orders.
     void eventLockRuntime.observe(accepted);
     void twoStageRuntime.observe(accepted);
+    // Opt-in, event-driven V4 shadow uses the same receipt; zero new provider polls.
+    void v4ConfirmationShadow.observe(accepted);
     observeTimedStrategy(accepted,scheduler);
   }
 }

@@ -1,5 +1,7 @@
 import {scoredTimedHistory,timedHistoryQuery} from "./waterx/timed-history";
 import {eventLockReport} from "./waterx/event-lock-report";
+import {v4ConfirmationShadow} from "./waterx/confirmation-v4-shadow";
+import {v4Comparison,v4ComparisonQuery} from "./waterx/confirmation-v4-compare";
 import {twoStageHistory,stageHistoryQuery} from "./waterx/two-stage-history";
 import {gateHistory,gateHistoryQuery} from "./waterx/gate-history";
 import {earlyLearningReport} from "./waterx/early-training";
@@ -53,6 +55,15 @@ export function registerRoutes(app: Express) {
     res.set("Cache-Control","no-store").download(resolve("dist/public/source-release.tar.gz"));
   });
   registerAgentRoutes(app);
+  // Passive inspection only: never requests WaterX quotes or mutates the collector.
+  app.get("/api/waterx/confirmation-v4/health",(_req,res)=>{
+    res.set("Cache-Control","no-store").json(v4ConfirmationShadow.health());
+  });
+  app.get("/api/waterx/confirmation-v4/compare",safe(async(req,res)=>{
+    const parsed=v4ComparisonQuery.safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid V4 comparison filters"});return;}
+    res.set("Cache-Control","no-store").json(await v4Comparison(parsed.data));
+  }));
   app.get("/api/waterx/canonical-history",safe(async(req,res)=>{
     const parsed=historyQuerySchema.safeParse(req.query);
     if(!parsed.success){res.status(400).json({error:"Invalid history cohort, interval or source"});return;}

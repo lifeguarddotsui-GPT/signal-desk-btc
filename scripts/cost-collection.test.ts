@@ -16,7 +16,7 @@ for (const interval of [5, 15] as const) {
     assert.ok(WATERX_IDLE_POLL_MS[interval] <= (interval === 5 ? 16_000 : 31_000) - 5_000);
     const maxWindowMs = Math.max(...policy.windows) * 1_000;
     assert.ok(WATERX_DECISION_LEAD_MS[interval] >=
-      maxWindowMs + Math.max(policy.earlyPersistenceMs, policy.stabilityWindowMs));
+      maxWindowMs + policy.earlyPersistenceMs + WATERX_IDLE_POLL_MS[interval] + 5_000);
     const expiry = 1_800_000_900_000;
     // The entire lock formation window uses a cadence below maxGapMs and maxAgeMs.
     for (let remaining = 0; remaining <= maxWindowMs; remaining += 1_000)

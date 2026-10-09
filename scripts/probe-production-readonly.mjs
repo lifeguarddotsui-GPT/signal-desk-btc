@@ -54,6 +54,31 @@ const summarise = (name, data) => {
   }
   if(name.startsWith("timed")) {
     const metrics=data?.metrics??{};
+    const entries=Array.isArray(data?.entries)?data.entries:[];
+    const failureRecords=entries.filter(x=>x?.status==="DATA_FAILURE");
+    const expectedGates=name==="timed5"?9:29;
+    const diagnostic={
+      analyzedFailureRecords:failureRecords.length,
+      withMissedGate:0,withFreshDataWait:0,
+      withBoth:0,withIncompleteGateJournal:0,
+      withNeitherMissedNorFresh:0,
+      totalGatesReported:0,gateResults:{},
+    };
+    for(const record of failureRecords) {
+      const g=Array.isArray(record?.evidence?.gateResults)?record.evidence.gateResults:[];
+      const results=new Set(g.map(x=>String(x?.result??"UNKNOWN")));
+      const missed=results.has("MISSED_GATE"),fresh=results.has("WAIT_FRESH_DATA");
+      if(missed)diagnostic.withMissedGate++;
+      if(fresh)diagnostic.withFreshDataWait++;
+      if(missed&&fresh)diagnostic.withBoth++;
+      if(g.length!==expectedGates)diagnostic.withIncompleteGateJournal++;
+      if(!missed&&!fresh)diagnostic.withNeitherMissedNorFresh++;
+      diagnostic.totalGatesReported+=g.length;
+      for(const item of g) {
+        const key=String(item?.result??"UNKNOWN");
+        diagnostic.gateResults[key]=(diagnostic.gateResults[key]??0)+1;
+      }
+    }
     return {strategyVersion:data?.strategyVersion??null,asOfMs:data?.asOfMs??null,
       rowsTruncated:data?.rowsTruncated??null,
       totalCohort:metrics.cohortN??null,committed:metrics.n??null,locks:metrics.locks??null,
@@ -62,7 +87,8 @@ const summarise = (name, data) => {
       abstained:metrics.abstained??null,operationalFailures:metrics.operationalFailures??null,
       correct:metrics.correct??null,incorrect:metrics.incorrect??null,
       pending:metrics.pending??null,disputed:metrics.disputed??null,
-      onTimeLocks:metrics.onTimeLocks??null,medianElapsedMs:metrics.medianElapsedMs??null};
+      onTimeLocks:metrics.onTimeLocks??null,medianElapsedMs:metrics.medianElapsedMs??null,
+      failureRecordDiagnostics:diagnostic};
   }
   if(name==="earlyOps") {
     return {status:data?.status??null,asOfMs:data?.asOfMs??null,

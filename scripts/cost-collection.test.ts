@@ -13,6 +13,7 @@ import {
 for (const interval of [5, 15] as const) {
   test(`${interval}m adaptive polling retains lock stability and exact checkpoints`, () => {
     const policy = lockPolicy(interval);
+    assert.ok(WATERX_IDLE_POLL_MS[interval] <= (interval === 5 ? 16_000 : 31_000) - 5_000);
     const maxWindowMs = Math.max(...policy.windows) * 1_000;
     assert.ok(WATERX_DECISION_LEAD_MS[interval] >=
       maxWindowMs + Math.max(policy.earlyPersistenceMs, policy.stabilityWindowMs));

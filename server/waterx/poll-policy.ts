@@ -6,8 +6,9 @@ import type { WaterxInterval } from "./types";
  * fresh observations. Coinbase chart streaming is independent of this cadence.
  */
 export const WATERX_IDLE_POLL_MS: Readonly<Record<WaterxInterval, number>> = {
-  5: 15_000,
-  15: 30_000,
+  // Keep headroom below the 16s/31s freshness limits in live payloads.
+  5: 10_000,
+  15: 20_000,
 };
 export const WATERX_DECISION_POLL_MS = 3_000;
 export const WATERX_DECISION_LEAD_MS: Readonly<Record<WaterxInterval, number>> = {

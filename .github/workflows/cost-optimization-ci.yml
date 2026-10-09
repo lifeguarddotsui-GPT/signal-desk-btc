@@ -1,0 +1,38 @@
+name: Blue Water source checks
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - "shared/**"
+      - "scripts/**"
+      - "client/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/cost-optimization-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Typecheck, tests and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout proposed branch (no deployment)
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run check
+      - name: Regression suite
+        run: npm test
+      - name: Production build (no publish)
+        run: npm run build

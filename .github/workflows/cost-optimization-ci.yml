@@ -9,6 +9,7 @@ on:
       - "client/**"
       - "package.json"
       - "package-lock.json"
+      - ".npmrc"
       - ".github/workflows/cost-optimization-ci.yml"
   workflow_dispatch:
 

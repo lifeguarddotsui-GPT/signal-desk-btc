@@ -13,7 +13,7 @@ type Client={
 };
 export type V4Database={connect:()=>Promise<Client>};
 type Entry={round:TimedRound;observations:EventObservation[];receipts:Map<number,string>;
-  version:number;latestAtMs:number;pending:Promise<void>|null;saved:TimedDecision|null;
+  version:number;latestAtMs:number;pending:Promise<void>|null;discovery:Promise<void>|null;saved:TimedDecision|null;
   lastAssessment:V4Result|null;conflict:boolean;unknownCommit:boolean;error:string|null};
 const roundOf=(r:TimedInput):TimedRound=>({intervalMinutes:r.intervalMinutes,roundId:r.roundId,
   startMs:r.startMs,expiryMs:r.expiryMs});
@@ -47,7 +47,7 @@ export function createV4ConfirmationShadow(options:{
   const enabled=options.enabled??process.env.WATERX_V4_SHADOW_ENABLED==="true";
   const now=options.now??Date.now;
   const entries=new Map<5|15,Entry>();
-  const metrics={acceptedReceipts:0,qualifiedAttempts:0,committed:0,persistenceFailures:0,
+  const metrics={acceptedReceipts:0,qualifiedAttempts:0,committed:0,discoveredRounds:0,discoveryFailures:0,persistenceFailures:0,
     duplicates:0,outOfOrder:0,sourceInterruptions:0,conflicts:0,lateDecisions:0};
   const getDb=()=>options.db??pool();
   const latestIsCurrent=(e:Entry,version:number)=>entries.get(e.round.intervalMinutes)===e&&
@@ -80,6 +80,8 @@ export function createV4ConfirmationShadow(options:{
         lastAtMs:receipt.receivedAtMs,maxGapMs:null},
       committedAtMs:null,workerReceivedAtMs:null,onTime:null,operationalFailure:null,
       automaticExecutionAllowed:false,evidence};
+    // Parent metadata may still be in-flight on the isolated one-connection pool.
+    if(e.discovery)await e.discovery;
     const c=await getDb().connect();
     let began=false,commitAttempted=false;
     try{
@@ -121,6 +123,19 @@ export function createV4ConfirmationShadow(options:{
       throw error;
     }finally{c.release();}
   }
+  // One metadata row per round establishes the prospective cohort denominator.
+  // No quote sampling, no retrospective direction, no per-tick storage writes.
+  async function recordDiscovery(e:Entry){
+    const c=await getDb().connect();
+    try{
+      await c.query("INSERT INTO waterx_timed_rounds(network,strategy_version,interval_minutes,round_id,start_ms,expiry_ms,discovered_at_ms) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
+        [...identity(e.round),e.round.startMs,e.round.expiryMs,now()]);
+      metrics.discoveredRounds++;
+    }catch{
+      metrics.discoveryFailures++;
+      // Failures are counted, not hidden as observed/qualified predictions.
+    }finally{c.release();}
+  }
   function observe(input:TimedInput):Promise<void>{
     if(!enabled||!decisionWriterAllowed())return Promise.resolve();
     const time=now(),r=roundOf(input),received=input.receivedAtMs;
@@ -134,9 +149,11 @@ export function createV4ConfirmationShadow(options:{
       metrics.outOfOrder++;return e.pending??Promise.resolve();
     }
     if(!e||key(e.round)!==key(r)){
-      e={round:r,observations:[],receipts:new Map(),version:0,latestAtMs:-1,pending:null,
+      e={round:r,observations:[],receipts:new Map(),version:0,latestAtMs:-1,pending:null,discovery:null,
         saved:null,lastAssessment:null,conflict:false,unknownCommit:false,error:null};
       entries.set(r.intervalMinutes,e);
+      // Independent of the critical V3 path; only once for the exact round.
+      e.discovery=recordDiscovery(e);
     }
     const hash=digest({received,up:input.probabilityUp,down:input.probabilityDown,
       sourceFailure:input.features?.sourceFailure??null});

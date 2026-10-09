@@ -19,8 +19,9 @@ function counts(rows:Row[],stage:"v3"|"v4"){
 export async function v4Comparison(query:unknown,now=Date.now(),db:LockDb=researchPool){
   const q=v4ComparisonQuery.parse(query),since=now-(q.window==="24h"?86400000:604800000);
   const sql=[
-    "WITH cohort AS (SELECT network,interval_minutes,round_id,start_ms,expiry_ms FROM waterx_timed_rounds",
-    "WHERE network='sui:mainnet' AND strategy_version=$1 AND interval_minutes=$3 AND start_ms>=$5 AND expiry_ms<$4",
+    "WITH launch AS (SELECT MIN(start_ms) AS at FROM waterx_timed_rounds WHERE network='sui:mainnet' AND strategy_version=$2 AND interval_minutes=$3),",
+    "cohort AS (SELECT r.network,r.interval_minutes,r.round_id,r.start_ms,r.expiry_ms FROM waterx_timed_rounds r CROSS JOIN launch",
+    "WHERE r.network='sui:mainnet' AND r.strategy_version=$1 AND r.interval_minutes=$3 AND r.start_ms>=$5 AND r.start_ms>=launch.at AND r.expiry_ms<$4",
     "ORDER BY start_ms DESC LIMIT 1001)",
     "SELECT r.*,b.decision AS v3,c.decision AS v4,",
     "COALESCE(l.label_status='verified' AND NOT l.settlement_disputed",
@@ -45,6 +46,9 @@ export async function v4Comparison(query:unknown,now=Date.now(),db:LockDb=resear
   if(result.rows.length>1000)return {status:"BOUND_EXCEEDED" as const,
     reason:"History exceeds safe query bound. Select a shorter window; no partial summary presented."};
   const rows=result.rows as Row[],v3=counts(rows,"v3"),v4=counts(rows,"v4");
+  if(rows.length===0)return {status:"NOT_STARTED_OR_NO_COMPLETED_ROUNDS" as const,
+    reason:"No completed V3 rounds since the first durable prospective V4 round record; no coverage or accuracy can yet be claimed.",
+    readyForProduction:false};
   const paired=rows.filter(r=>r.verified===true&&r.v3?.status==="LOCKED"&&r.v4?.status==="LOCKED"&&
     validSide(r.v3.side)&&validSide(r.v4.side));
   const p=paired.map(r=>({

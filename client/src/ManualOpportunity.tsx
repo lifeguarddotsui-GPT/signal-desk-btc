@@ -1,428 +1,352 @@
 import * as React from "react";
-import { useState } from "react";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import type { RoundDecision } from "../../shared/round-decision";
-import type { TimedDecision, TimedState } from "../../shared/timed-decision";
-import { TIMED_STRATEGY } from "../../shared/timed-decision";
-import { indicativeFiveDollar } from "../../shared/manual-opportunity";
 import type { AtomicDecisionView } from "./live-decision-contract";
+import type { AdvisoryPayload } from "./advisory-contract";
+import { EventChallengerPanel } from "./EventChallengerPanel";
+import type { TwoStageProjection, StageLock, LockStage } from "../../shared/two-stage";
+import { TWO_STAGE_STRATEGY } from "../../shared/two-stage";
 
+type Interval = 5 | 15;
+type RoundIdentity = { id: string; startMs: number; expiryMs: number };
 type Props = {
   view: AtomicDecisionView;
   now: number;
+  interval?: Interval;
+  round?: RoundIdentity | null;
+  onIntervalChange?: (interval: Interval) => void;
   onRetry?: () => void;
   refresh?: { pending: boolean; error: string };
-  browserReceivedAtMs?: number;
   marketReference?: { price: number | null; quality: string; source: string };
   comparison?: { price: number | null; source: string; receivedAtMs: number | null };
+  fixtureName?: string | null;
+  children?: React.ReactNode;
+  economics?: AdvisoryPayload | null;
 };
 
-const stamp = (value: number | null | undefined) => value == null || !Number.isFinite(value)
-  ? "Not reported"
-  : new Date(value).toLocaleTimeString([], { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) + " UTC";
-const usd = (value: number | null | undefined, digits = 2) => value == null || !Number.isFinite(value)
-  ? "Unknown" : `$${value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
-const percent = (value: number | null | undefined) => value == null || !Number.isFinite(value) || value < 0 || value > 1
-  ? "Unavailable" : `${(value * 100).toFixed(1)}%`;
-const duration = (value: number | null | undefined) => value == null || !Number.isFinite(value) || value < 0
-  ? "Unknown" : `${value < 10_000 ? (value / 1000).toFixed(1) : Math.floor(value / 1000)} sec`;
-const mmss = (value: number | null | undefined) => {
-  if (value == null || !Number.isFinite(value)) return "—:—";
-  const seconds = Math.max(0, Math.ceil(value / 1000));
+const usd = (value: number | null | undefined) => value == null || !Number.isFinite(value)
+  ? "Unavailable" : `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const percent = (value: number | null | undefined) => value == null || !Number.isFinite(value)
+  ? "—" : `${(value * 100).toFixed(1)}%`;
+const clock = (ms: number | null | undefined) => {
+  if (ms == null || !Number.isFinite(ms)) return null;
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 };
-const elapsedLabel = (value: number) => {
-  const seconds = Math.max(0, Math.floor(value / 1000));
-  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+const time = (ms: number | null | undefined) => ms == null || !Number.isFinite(ms)
+  ? "Time unavailable" : new Date(ms).toLocaleTimeString([], { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) + " UTC";
+const identityMatches = (decision: RoundDecision | null, round: RoundIdentity | null) =>
+  !!decision && !!round && decision.roundId === round.id && decision.startMs === round.startMs && decision.expiryMs === round.expiryMs;
+const twoStageTime = (value: number | null | undefined) => value == null || !Number.isFinite(value)
+  ? "time unavailable" : `${Math.max(0, Math.round(value / 1000))}s elapsed`;
+const elapsedClock = (value: number | null | undefined) => value == null || !Number.isFinite(value)
+  ? "time unavailable" : clock(Math.floor(value / 1000)*1000) ?? "time unavailable";
+const stageReason = (reason: string | undefined, persistence: string | undefined, diagnostics?: { message: string }) => {
+  if (persistence === "FAILED") return "Storage unavailable";
+  if (persistence === "UNKNOWN") return "Commit state unknown · reconciling";
+  if (persistence === "SAVING") return "Saving decision";
+  if (reason === "CONFIRMATION_POLICY_NOT_QUALIFIED") return "Confirmation model not available";
+  if (diagnostics?.message?.trim()) return diagnostics.message;
+  if (reason === "NO_QUALIFYING_EARLY_VALUE" || reason === "ENTRY_TERMS_UNAVAILABLE") return "No qualifying early opportunity";
+  if (reason === "WAITING_FOR_FRESH_DATA" || reason === "SOURCE_STALE") return "Fresh odds unavailable";
+  if (reason === "WAITING_FOR_ADDITIONAL_EVIDENCE") return "Building additional evidence";
+  if (reason === "ROUND_EXPIRED") return "Round complete · no qualifying lock";
+  if (reason === "SAME_SIDE_PERSISTENCE_INCOMPLETE" || reason === "STABILITY_WINDOW_INCOMPLETE" ||
+      reason === "DIRECTIONAL_SEPARATION_BELOW_POLICY" || reason === "NO_VALID_PROBABILITY_INPUT") return "Building evidence";
+  const normalized = reason?.replaceAll("_", " ").trim();
+  if (normalized && !["conditions satisfied", "locked"].includes(normalized.toLowerCase())) return normalized;
+  return reason === "CONDITIONS_SATISFIED" ? "Qualified · awaiting durable commit" : "Building evidence";
 };
-const requirementDuration = (value: number) => `${Math.ceil(Math.max(0, value) / 1000)} second${Math.ceil(Math.max(0, value) / 1000) === 1 ? "" : "s"}`;
-const exactReason = (value: string | null | undefined) => value?.replaceAll("_", " ") ?? "No blocker reported";
 
-function healthLabel(value: string | undefined) {
-  return value?.replaceAll("_", " ") ?? "UNKNOWN";
-}
-
-function sideLabel(side: "UP" | "DOWN" | null | undefined) {
-  return side ?? "Unavailable";
-}
-
-type TimedDisplay = TimedState & { lifecycle?: string; remainingRequirement?: string | null };
-function TimedDecisionCard({ timed: timedState, decision, now, liveFresh, marketReference, comparison }: {
-  timed: TimedState | null; decision: RoundDecision | null; now: number; liveFresh: boolean;
-  marketReference?: Props["marketReference"]; comparison?: Props["comparison"];
+function TwoStageDeskRows({ projection, round, interval, now }: {
+  projection: TwoStageProjection | null | undefined;
+  round: RoundIdentity | null;
+  interval: Interval;
+  now: number;
 }) {
-  const timed = timedState as TimedDisplay | null;
-  const saved: TimedDecision | null = timed?.saved ?? null;
-  const gatePolicy = timed?.strategyVersion === TIMED_STRATEGY;
-  const isLocked = saved?.status === "LOCKED" && saved.side !== null;
-  const stateKind = isLocked ? saved.onTime===false?"failed":"locked"
-    : saved?.status === "NO_VALID_INPUT" || saved?.status === "MISSED_DEADLINE" || saved?.status === "DATA_FAILURE" || timed?.persistence === "FAILED" ? "failed"
-      : timed?.persistence === "SAVING" ? "saving" : "watching";
-  const status = isLocked ? `${saved.side} locked${saved.onTime===false?" · deadline missed":""}`
-    : saved?.status === "NO_VALID_INPUT" ? "Recorded · no valid input"
-      : saved?.status === "MISSED_DEADLINE" ? "Recorded · deadline missed"
-        : saved?.status === "ABSTAINED_NO_QUALIFIED_SIGNAL" ? "Round complete · no qualified signal"
-          : saved?.status === "DATA_FAILURE" ? "Round complete · data failure"
-        : timed?.persistence === "FAILED" ? "Decision persistence failed"
-          : timed?.persistence === "SAVING" ? "Saving decision"
-            : timed?.phase === "EVALUATING" ? "Evaluating"
-                : timed?.phase === "DEADLINE" ? "Legacy deadline state"
-                  : timed?.phase === "EXPIRED" ? "Round expired · no saved decision"
-                  : !liveFresh?"Data delayed":"Observing";
-  const countdown = gatePolicy && timed?.nextGateAtMs != null ? timed.nextGateAtMs - now : null;
-  const savedProbability = saved?.probabilityUp;
-  const sideProbability = saved?.side === "UP" ? savedProbability
-    : saved?.side === "DOWN" ? saved.probabilityDown : null;
-  const liveSide = timed?.liveSide;
-  const liveProbability = timed?.liveProbabilityUp;
-  const displayedLiveProbability = liveSide === "UP" ? liveProbability
-    : liveSide === "DOWN" && liveProbability != null ? decision?.market?.probabilityDown ?? null : null;
-  const targetSeconds = decision && timed ? Math.max(1, Math.round((timed.targetAtMs - decision.startMs) / 1000))
-    : decision?.intervalMinutes === 15 ? 180 : 60;
-  const roundDurationMs = decision ? Math.max(0, decision.expiryMs - decision.startMs) : targetSeconds * 1000;
-  const elapsed = decision
-    ? Math.max(0, Math.min(roundDurationMs, now - decision.startMs))
-    : timed?.elapsedMs ?? saved?.elapsedMs ?? 0;
-  const observationProgress = Math.max(0, Math.min(100, elapsed /
-    roundDurationMs * 100));
-  const probability = liveFresh ? displayedLiveProbability : null;
-  const components = timed?.components;
-  const sourceAge=decision?.market?.receivedAtMs!=null?Math.max(0,now-decision.market.receivedAtMs):timed?.sourceAgeMs;
-  const unmetRequirement = isLocked
-    ? "Choice is frozen. Trading authority remains disabled."
-    : saved?.status === "ABSTAINED_NO_QUALIFIED_SIGNAL" ? "Round ended without a qualifying signal; no prediction was forced."
-      : saved?.status === "DATA_FAILURE" ? "Round ended with insufficient valid data to evaluate a prediction."
-        : saved?.status === "MISSED_DEADLINE" ? "The scheduled deadline was missed; no late choice was substituted."
-          : saved?.status === "NO_VALID_INPUT" ? "No valid probability input was recorded for this round."
-    : timed?.remainingRequirement || (components
-      ? components.sameSideMs < components.requiredSameSideMs
-        ? `Needs ${requirementDuration(components.requiredSameSideMs - components.sameSideMs)} more same-side stability`
-        : components.validCount < components.requiredCount
-          ? `Needs ${components.requiredCount - components.validCount} more valid observation${components.requiredCount - components.validCount === 1 ? "" : "s"}`
-          : components.probabilityRange !== null && components.probabilityRange > components.maximumRange
-            ? `Probability range ${components.probabilityRange.toFixed(3)} exceeds ${components.maximumRange.toFixed(3)}`
-            : components.strength < components.requiredStrength
-              ? `Directional separation ${components.strength.toFixed(3)} is below ${components.requiredStrength.toFixed(3)}`
-              : timed?.blocker?.replaceAll("_", " ") || "No unmet requirement reported"
-      : timed?.blocker?.replaceAll("_", " ") || "Waiting for valid same-round observations");
-  const referencePrice = marketReference?.price ?? decision?.opportunity?.reference.price ?? null;
-  const referenceQuality = marketReference?.quality ?? decision?.opportunity?.reference.status ?? "not reported";
-  const referenceSource = marketReference?.source ?? "WaterX round reference";
-  const comparePrice = comparison?.price ?? null;
-  const comparisonSource = comparison?.source?.trim() || "Not reported";
-  const comparisonAge = comparison?.receivedAtMs == null ? null : Math.max(0, now - comparison.receivedAtMs);
-  const compactHealth = !liveFresh ? "Quote delayed · frozen choice retained"
-    : decision?.componentHealth?.storage === "FAILED" ? "Storage issue · no new saved choice asserted"
-      : decision?.componentHealth?.priceFeed !== "AVAILABLE" ? "Price feed delayed · research only"
-        : "Data current · read-only research";
-  const currentOdds = liveFresh && decision?.market
-    ? `UP ${percent(decision.market.probabilityUp)} · DOWN ${percent(decision.market.probabilityDown)}`
-    : "Unavailable · current same-round snapshot not fresh";
-  const requirementsMet = timed?.requirementsMet ?? (components
-    ? Number((timed?.sourceAgeMs ?? Infinity) <= 10_000) + Number(components.strength >= components.requiredStrength) +
-      Number(components.sameSideMs >= components.requiredSameSideMs) + Number(components.validCount >= components.requiredCount)
-    : 0);
-  const nextGateLabel = countdown == null ? timed?.phase === "EXPIRED" ? "Round complete" : "No further gate scheduled"
-    : mmss(countdown);
-  const elapsedTarget = `${elapsedLabel(elapsed)} / ${mmss(roundDurationMs)}`;
-
-  return <section className="mo-primary-card" aria-label="Authoritative round research state">
-    <div className="mo-primary-main">
-      <span className="mo-primary-eyebrow">{gatePolicy ? "PROVISIONAL LEAN · SCHEDULED QUALIFICATION" : "ROUND RESEARCH · DECISION STATE"}</span>
-      <div className="mo-primary-call">
-        <strong className={`mo-timed-status ${stateKind}`} role="status">
-          {isLocked ? `LOCKED ${saved.side}` :
-            saved?.status === "ABSTAINED_NO_QUALIFIED_SIGNAL" ? "ABSTAINED" :
-              saved?.status === "DATA_FAILURE" ? "DATA FAILURE" :
-                saved?.status === "NO_VALID_INPUT" ? "NO VALID INPUT" :
-                  saved?.status === "MISSED_DEADLINE" ? "MISSED GATE" :
-                    liveFresh && liveSide ? `LEANING ${liveSide}` : liveFresh ? "OBSERVING" : "DATA DELAYED"}
-        </strong>
-        <span className="mo-primary-probability">{percent(isLocked ? sideProbability : probability)}
-          <small>{isLocked ? "FROZEN WATERX PUBLIC MARKET PROBABILITY · UNCALIBRATED" : "CURRENT WATERX PUBLIC MARKET PROBABILITY · UNCALIBRATED"}</small>
-        </span>
-      </div>
-      <span className="mo-primary-round">{decision
-        ? `${decision.intervalMinutes}m · exact active round${isLocked ? " · immutable public prediction" : ""}`
-        : "Awaiting exact-round decision snapshot"}</span>
-    </div>
-    <div className="mo-market-pair" aria-label="Round reference, current odds and comparison price">
-      <div><span className="mo-primary-eyebrow">PRICE TO BEAT · {referenceQuality.toUpperCase()}</span><strong>{usd(referencePrice, 2)}</strong><small>{referenceSource}{!liveFresh && referencePrice != null ? " · retained same-round reference" : ""}</small></div>
-      <div><span className="mo-primary-eyebrow">{isLocked ? "CURRENT MARKET ODDS · NOT FROZEN" : "MARKET ODDS · CURRENT ONLY"}</span><strong className="mo-odds-value">{currentOdds}</strong><small>{liveFresh ? "Same-round live snapshot" : "Delayed · withheld as live"}</small></div>
-      <div><span className="mo-primary-eyebrow">BTC COMPARISON · {comparisonSource}</span><strong>{usd(comparePrice, 2)}</strong><small>{comparisonAge == null ? "Current comparison unavailable" : `${duration(comparisonAge)} source age`}</small></div>
-    </div>
-    <div className="mo-primary-metrics">
-      <div className="mo-indicator observation">
-        <div><span className="mo-indicator-label">CURRENT CONDITIONS · ROUND ELAPSED</span><b>{elapsedTarget}</b></div>
-        <div className="mo-progress-track" role="progressbar" aria-label="Round elapsed progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(observationProgress)}><i style={{ transform: `scaleX(${observationProgress / 100})` }} /></div>
-      </div>
-      <div className="mo-indicator gate-countdown">
-        <div><span className="mo-indicator-label">{gatePolicy ? "NEXT SERVER-SCHEDULED GATE" : "NEXT EVALUATION"}</span><b>{gatePolicy ? nextGateLabel : "Legacy schedule"}</b></div>
-        <small>{gatePolicy ? timed?.nextGateAtMs == null ? "No further gate before round expiry" : "A check, not a forced choice" : "Historical policy · no gate countdown available"}</small>
-      </div>
-      <div className="mo-indicator qualification">
-        <div><span className="mo-indicator-label">{isLocked ? "QUALIFICATION AT LOCK" : "CURRENT CONDITIONS CHECKLIST"}</span><b>{gatePolicy ? `${isLocked ? 4 : requirementsMet} of 4 requirements` : "Legacy criteria"}</b></div>
-        {gatePolicy && <div className="mo-checklist" aria-label={isLocked ? "4 of 4 requirements met at the frozen lock" : `${requirementsMet} of 4 requirements currently met`}>
-          <i className={isLocked || requirementsMet>0 && (timed?.sourceAgeMs ?? Infinity) <= 10_000 ? "met" : ""} title="Fresh source" />
-          <i className={isLocked || requirementsMet>0 && !!components && components.strength >= components.requiredStrength ? "met" : ""} title="Directional separation" />
-          <i className={isLocked || requirementsMet>0 && !!components && components.sameSideMs >= components.requiredSameSideMs ? "met" : ""} title="Same-side persistence" />
-          <i className={isLocked || requirementsMet>0 && !!components && components.validCount >= components.requiredCount &&
-            (components.trendKind==="FLAT_STABLE"||components.trendKind==="STRENGTHENING") ? "met" : ""} title="Stable or same-side strengthening evidence" />
-        </div>}
-      </div>
-    </div>
-    {gatePolicy && <div className={`mo-last-gate ${timed?.lastGate ? timed.lastGate.result.toLowerCase().replaceAll("_", "-") : "not-recorded"}`}>
-      <span className="mo-indicator-label">LAST GATE · SERVER-RECORDED</span>
-      <b>{timed?.lastGate
-        ? `${timed.lastGate.result.replaceAll("_", " ")} · ${stamp(timed.lastGate.scheduledAtMs)}`
-        : "No gate result reported for this exact round"}</b>
-      <small>{timed?.lastGate ? timed.lastGate.reason.replaceAll("_", " ").toLowerCase() : "Current conditions are not a substitute for a recorded gate result."}</small>
-    </div>}
-    <p className="mo-requirement"><b>{isLocked ? "FROZEN" : saved ? "ROUND RESULT" : "NEXT REQUIREMENT"}:</b> {unmetRequirement}</p>
-    <div className="mo-primary-save">
-      <span>{gatePolicy ? "Qualification objective" : "Historical target"} <b>{String(Math.floor(targetSeconds / 60)).padStart(2, "0")}:{String(targetSeconds % 60).padStart(2, "0")}</b></span>
-      <span>Until settlement <b>{decision ? mmss(decision.expiryMs - now) : "—:—"}</b></span>
-      <span>Execution window <b>{timed?.executionCutoffAtMs == null ? "Unverified · unavailable" : mmss(timed.executionCutoffAtMs - now)}</b></span>
-       {saved && <span>Saved elapsed <b>{elapsedLabel(saved.elapsedMs)}</b></span>}
-       {isLocked && saved.gateIndex != null && <span>Gate <b>#{saved.gateIndex} · {saved.gateScheduledAtMs == null ? "time unavailable" : stamp(saved.gateScheduledAtMs)}</b></span>}
-      <span>Freshness <b>{liveFresh ? `Current · ${duration(sourceAge)}` : "Delayed"}</b></span>
-       <span>Research record <b>{saved ? `${stamp(saved.committedAtMs)} · ${saved.status.replaceAll("_", " ")}` : "No committed prediction"}</b></span>
-    </div>
-    <div className="mo-health-compact" role="status"><b>DATA HEALTH</b> · {compactHealth} · no automatic trading authority.</div>
-    <details className="mo-timed-audit">
-      <summary>Decision lifecycle, policy and raw evidence</summary>
-      <div className="mo-timed">
-        <div className="mo-timed-top">
-          <div className="mo-timed-title"><span className="mo-label">LIFECYCLE · {timed?.lifecycle ?? timed?.phase ?? "UNKNOWN"}</span><strong className={`mo-timed-status ${stateKind}`}>{status}</strong><small>{decision ? `Round ${decision.roundId} · strategy ${timed?.strategyVersion ?? "not reported"}` : "Exact-round identity unavailable"}</small></div>
-       <div className="mo-timed-countdown"><span className="mo-label">{saved ? "COMMIT ACKNOWLEDGEMENT" : gatePolicy ? "NEXT SCHEDULED GATE" : "LEGACY POLICY"}</span><strong>{saved ? saved.onTime === false ? "LATE" : saved.onTime === true ? "ON TIME" : "UNKNOWN" : gatePolicy ? nextGateLabel : "Archived"}</strong></div>
-        </div>
-        {components && <div className="mo-timed-result">
-          <span>Same side: {duration(components.sameSideMs)} / {duration(components.requiredSameSideMs)} · valid observations {components.validCount} / {components.requiredCount}</span>
-          <span>Probability range {components.probabilityRange === null ? "unavailable" : components.probabilityRange.toFixed(3)} / max {components.maximumRange.toFixed(3)} · separation {components.strength.toFixed(3)} / {components.requiredStrength.toFixed(3)}</span>
-          <span>{gatePolicy ? `${timed?.requirementsMet ?? 0} of 4 qualification requirements currently met · policy source: ${timed?.policySource ?? "experimental market-based policy"}.` : "Legacy evidence thresholds; not a calibrated outcome confidence."}</span>
-        </div>}
-        {saved && <div className="mo-timed-result">
-          <b className="mo-frozen-lock">{saved.side ?? saved.status} · IMMUTABLE RESEARCH RECORD</b>
-         <span>{saved.lockReason.replaceAll("_", " ")} · decision ID <code>{saved.id}</code> · observation {saved.observationId ?? "not reported"}{saved.gateIndex == null ? "" : ` · gate ${saved.gateIndex} at ${stamp(saved.gateScheduledAtMs)}`}</span>
-          <span>Early blocker: {saved.earlyBlocker.replaceAll("_", " ")}</span>
-          <span>Received {stamp(saved.receivedAtMs)} · decision {stamp(saved.decisionAtMs)} · commit {stamp(saved.committedAtMs)} · policy {saved.strategyVersion}</span>
-          {saved.operationalFailure && <span className="mo-failure-note">Operational failure: {saved.operationalFailure}</span>}
-        </div>}
-        {!saved && <div className="mo-timed-blocker"><b>UNMET POLICY REQUIREMENT</b><span>{exactReason(timed?.blocker)}</span>{timed?.persistence === "FAILED" && <span className="mo-failure-note">Persistence failed · {timed.errorClass ?? "error class not reported"}</span>}</div>}
-        <div className="mo-timed-safety"><b>RESEARCH ONLY · NO TRADING AUTHORITY</b><span>Automatic execution disabled · order adapter unverified.</span><span>Live odds may change after a frozen choice.</span></div>
-      </div>
-    </details>
+  const exact = !!projection && !!round &&
+    projection.roundId === round.id && projection.startMs === round.startMs &&
+    projection.expiryMs === round.expiryMs && projection.intervalMinutes === interval &&
+    projection.strategyVersion === TWO_STAGE_STRATEGY && projection.shadowOnly === true &&
+    projection.automaticExecutionAllowed === false;
+  const candidate = exact ? projection : null;
+  const localObservedAt=React.useMemo(()=>now,[projection]);
+  const getLock = (stage: LockStage): StageLock | null => {
+    const state = stage === "EARLY" ? candidate?.early : candidate?.confirmation;
+    const lock = state?.lock;
+    if (!candidate || state?.persistence !== "COMMITTED" || !lock || lock.stage !== stage ||
+      lock.network !== "sui:mainnet" || lock.roundId !== candidate.roundId ||
+      lock.startMs !== candidate.startMs || lock.expiryMs !== candidate.expiryMs ||
+      lock.intervalMinutes !== candidate.intervalMinutes || lock.strategyVersion !== TWO_STAGE_STRATEGY ||
+      lock.marketId !== candidate.marketId || lock.shadowOnly !== true ||
+      lock.automaticExecutionAllowed !== false || (lock.commitVerified !== true && lock.committedAtMs == null)) return null;
+    return lock;
+  };
+  const early = getLock("EARLY");
+  const confirmation = getLock("CONFIRMATION");
+  const relationship = early && confirmation
+    ? early.side === confirmation.side ? "Agrees with Early Lock" : "Changed direction"
+    : early ? "No confirmation" : confirmation ? "No early decision" : null;
+  const displayStage = (title: string, stage: LockStage, lock: StageLock | null) => {
+    const state = candidate ? stage === "EARLY" ? candidate.early : candidate.confirmation : null;
+    const description = lock
+      ? `${lock.side} · ${twoStageTime(lock.elapsedMs)} · ${lock.probabilitySource}`
+      : !projection ? "Building evidence · two-stage projection unavailable"
+        : !candidate ? "Building evidence · projection does not match this round and interval"
+      : stageReason(state?.reason, state?.persistence, state?.diagnostics);
+    const economics = lock?.economics;
+    const returnText = economics?.totalReturnedIfCorrectUsd != null &&
+      Number.isFinite(economics.totalReturnedIfCorrectUsd) && Number.isFinite(economics.collateralUsd)
+      ? `${economics.kind === "VERIFIED_QUOTE" ? "Verified" : "Indicative"} $${economics.collateralUsd.toFixed(2)} collateral · $${economics.totalReturnedIfCorrectUsd.toFixed(2)} total return if correct`
+      : "Indicative return unavailable";
+    const qualifiedMs = lock?.committedAtMs!=null&&candidate?lock.committedAtMs-candidate.startMs:null;
+    const remainingMs = lock?.committedAtMs!=null&&candidate?Math.max(0,candidate.expiryMs-lock.committedAtMs):null;
+    const status = lock?.valueStatus === "BELOW_PREFERRED" ? "Below preferred return"
+      : lock?.valueStatus === "UNAVAILABLE" ? "Entry return unavailable"
+        : lock ? "Research lock committed" : description;
+    return <div className={`two-stage-desk-row${lock ? " committed" : ""}${stage === "EARLY" ? " early-primary" : " confirmation-secondary"}`} key={stage} data-stage={stage.toLowerCase()}>
+      <span className="two-stage-row-label">{title}</span>
+      <strong>{lock ? lock.side : status}</strong>
+      {lock && <small className="two-stage-lock-timing">{lock.committedAtMs==null?"Commit verified · acknowledgement time unknown":`Locked at ${elapsedClock(qualifiedMs)} · ${clock(remainingMs)??"time unavailable"} remaining`}</small>}
+      {lock && <small className="two-stage-lock-return">{returnText}{lock.valueStatus === "BELOW_PREFERRED" ? " · Below preferred return" : ""}</small>}
+      {lock && <small>{lock.calibrationStatus==="QUALIFIED"?"Stage-selected calibrated forecast":"Market-derived evidence · uncalibrated"} · frozen {percent(lock.probabilityUp)} UP / {percent(1 - lock.probabilityUp)} DOWN</small>}
+    </div>;
+  };
+  return <section className="two-stage-desk" aria-label="Two-stage shadow research">
+    <div className="two-stage-desk-heading"><span>EXPERIMENTAL · SHADOW RESEARCH</span><b>Not activated · no order authority</b></div>
+    {displayStage("EARLY LOCK", "EARLY", early)}
+    {displayStage("CONFIRMATION LOCK", "CONFIRMATION", confirmation)}
+    <p className="two-stage-relationship">{relationship ?? (candidate
+      ? "No stage lock committed"
+      : "Relationship unavailable until exact-round evidence is reported")}</p>
+    {candidate && <details className="two-stage-diagnostics">
+      <summary>Two-stage diagnostics</summary>
+      <div><span>Strategy / market</span><b>{candidate.strategyVersion} · {candidate.marketId}</b></div>
+      <div><span>Settlement rule</span><b>{JSON.stringify(candidate.settlementRule)}</b></div>
+      <div><span>Price features</span><b>{JSON.stringify(candidate.priceFeatures)}</b></div>
+      {candidate.researchPreference && <div><span>Frozen research mode</span><b>{candidate.researchPreference.mode} · collateral {usd(candidate.researchPreference.collateralUsd)} · minimum return {usd(candidate.researchPreference.minimumReturnUsd)} · preferred return {usd(candidate.researchPreference.preferredReturnUsd)}. Research display only; does not change trading settings or execution eligibility.</b></div>}
+      {candidate.policyRegistry != null && <div><span>Policy registry</span><b>{JSON.stringify(candidate.policyRegistry)}</b></div>}
+      <div><span>Browser snapshot timing</span><b>Local UI first observed {time(localObservedAt)}. Browser/server clock synchronization is unverified; this is not a verified network-latency measurement.</b></div>
+      {([["EARLY", candidate.early, early], ["CONFIRMATION", candidate.confirmation, confirmation]] as const).map(([name, state, lock]) =>
+        <div className="two-stage-diagnostic-lock" key={name}><span>{name} diagnostics</span><b>{lock
+          ? `Source ${lock.probabilitySource} · Calibration ${lock.calibrationStatus==="QUALIFIED"?"qualified":"unqualified"} · ${lock.modelVersion??"no qualified model"} · Frozen research preference · ${lock.researchPreference?.mode.toLowerCase()??"not reported"} · ${JSON.stringify(lock.researchPreference??{})} · Policy ${lock.policyVersion} · feature ${lock.featureVersion} · cutoff ${time(lock.evidenceCutoffMs)} · qualified ${time(lock.qualifiedAtMs)} · committed ${time(lock.committedAtMs)} · model ${lock.modelVersion ?? "not reported"} · calibration ${lock.calibrationStatus} · observations ${lock.observationIds.join(", ") || "none reported"} · economics ${JSON.stringify(lock.economics)} · diagnostics ${JSON.stringify(lock.diagnostics ?? state.diagnostics ?? {})} · timing ${JSON.stringify(lock.timing ?? state.timing ?? {})}`
+          : `${state.persistence} · ${stageReason(state.reason, state.persistence, state.diagnostics)} · measurements ${JSON.stringify(state.diagnostics?.measurements ?? {})} · thresholds ${JSON.stringify(state.diagnostics?.thresholds ?? {})} · timing ${JSON.stringify(state.timing ?? {})}`}</b></div>)}
+      <p>Frozen stage evidence is separate from current market odds and current purchase terms. Every stage is shadow-only.</p>
+    </details>}
   </section>;
 }
 
-function safeRoundUrl(value: string | undefined,decision:RoundDecision|null) {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    return decision&&url.protocol==="https:"&&url.hostname==="waterx.app"&&!url.username&&!url.password&&
-      url.pathname===`/en/predict/market/crypto/crypto-btc-updown-${decision.intervalMinutes}m/${decision.expiryMs/1000}`?
-      url.href:null;
-  } catch {
-    return null;
-  }
-}
-
-function DecisionContent({
-  decision, view, now, browserReceivedAtMs, minimumWinningProfit, onMinimumWinningProfitChange,
-}: {
-  decision: RoundDecision | null;
-  view: AtomicDecisionView;
-  now: number;
-  browserReceivedAtMs?: number;
-  minimumWinningProfit: 1 | 2;
-  onMinimumWinningProfitChange: (amount: 1 | 2) => void;
-}) {
-  const early = decision?.earlyDecision ?? null;
-  const canonical = decision?.canonical ?? null;
-  const opportunity = decision?.opportunity ?? null;
-  const sourceValid = !!decision && !!opportunity &&
-    opportunity.sourceId === "waterx.public.crypto.v1" &&
-    !!opportunity.observationId &&
-    Number.isFinite(opportunity.receivedAtMs) &&
-    opportunity.receivedAtMs >= decision.startMs &&
-    opportunity.receivedAtMs <= now;
-  const quoteAgeMs = sourceValid && opportunity ? Math.max(0, now - opportunity.receivedAtMs) : null;
-  const quoteStale = quoteAgeMs !== null && quoteAgeMs > 10_000;
-  const selectedSide = early?.side ?? (view.fresh ? view.lean : null);
-  const purchase = selectedSide === "UP" ? opportunity?.purchase.up
-    : selectedSide === "DOWN" ? opportunity?.purchase.down : null;
-  const candidateAsk = purchase?.status === "reported" ? purchase.askCents : null;
-  const ask = sourceValid && candidateAsk != null && Number.isFinite(candidateAsk) &&
-    candidateAsk >= 0 && candidateAsk <= 100 ? candidateAsk : null;
-  const indicative = indicativeFiveDollar(ask, minimumWinningProfit);
-  const providerUrl = sourceValid ? safeRoundUrl(opportunity?.url,decision) : null;
-  const priceProbability = view.fresh && decision?.market
-    ? selectedSide === "UP" ? decision.market.probabilityUp
-      : selectedSide === "DOWN" ? decision.market.probabilityDown : null
-    : null;
-  const earlyCommit = early?.committedAtMs ?? null;
-  // An absolute browser clock cannot be subtracted from a server commit acknowledgement.
-  // Existing request/render telemetry records monotonic durations; cross-clock latency is unqualified.
-  const browserDuration = null;
-  const workerDuration = earlyCommit != null && early?.workerReceivedAtMs != null &&
-    early.workerReceivedAtMs >= earlyCommit ? early.workerReceivedAtMs - earlyCommit : null;
-  const persistenceStatus = decision?.earlyPersistence?.status;
-  const status = early ? "Adaptive benchmark saved"
-    : persistenceStatus === "FAILED" ? "Conditions met; saving decision failed"
-      : persistenceStatus === "SAVING" ? "Saving decision"
-        : persistenceStatus === "SAVED" ? "Saved record unavailable"
-          : view.fresh && decision?.readiness.score === 100 ? "No saved early choice"
-        : view.fresh ? "Developing" : "Data delayed";
-  const statusKind = early ? "locked" : persistenceStatus === "FAILED" ? "failed"
-    : persistenceStatus === "SAVING" ? "saving"
-      : persistenceStatus === "SAVED" ? "delayed"
-        : view.fresh ? "developing" : "delayed";
-  const sideAvailability = !selectedSide ? "No decision side available"
-    : !sourceValid ? "Purchase evidence unavailable"
-      : purchase?.status === "locked" ? `${selectedSide} purchase locked`
-        : purchase?.status === "unavailable" || !purchase ? `${selectedSide} purchase unavailable`
-          : purchase.askCents == null || !Number.isFinite(purchase.askCents) || purchase.askCents < 0 || purchase.askCents > 100 ? `${selectedSide} purchase price unavailable`
-            : purchase.askCents === 0 ? `${selectedSide} ask is 0¢ · not purchasable`
-              : `${selectedSide} side reported · not a verified fill`;
-  const grossReceipt = indicative.grossReceiptIfCorrect;
-  const health = decision?.componentHealth;
-
-  return <div className="mo-body">
-    <div className="mo-decision-row">
-      <div className="mo-decision">
-        <span className="mo-label">DECISION · EXACT ROUND</span>
-        <strong className={selectedSide ? `mo-side ${selectedSide.toLowerCase()}` : "mo-side unavailable"}>
-          {sideLabel(selectedSide)}
-        </strong>
-        <small>{early ? "Adaptive early benchmark · separate from timed strategy" : view.fresh && view.lean ? "Current live lean · not yet saved" : "No current side is established"}</small>
-      </div>
-      <div className="mo-state-block">
-        <span className="mo-label">STATUS</span>
-        <b className={`mo-status ${statusKind}`} role="status">{status}</b>
-        {early ? <small>Locked at {stamp(early.committedAtMs)}</small>
-          : persistenceStatus === "FAILED" ? <small>{decision?.earlyPersistence?.errorClass ?? "Commit acknowledgement unavailable"}</small>
-            : <small>{view.fresh ? "Readiness is decision progress, not win probability." : view.reason}</small>}
-      </div>
-      <div className="mo-market-time">
-        <span className="mo-label">TIME UNTIL VERIFIED ORDER CUTOFF</span>
-        <strong>Unknown</strong>
-        <small>Round expiry is not assumed to be the order deadline. Safe execution time unknown.</small>
-      </div>
-    </div>
-
-    <div className="mo-value-grid">
-      <div className="mo-value-group">
-        <span className="mo-label">MARKET-DERIVED ESTIMATE</span>
-        <strong>{percent(priceProbability)}</strong>
-        <small>{view.fresh && decision?.market ? "WaterX probability · app-observed snapshot" : "Unavailable · current evidence withheld"}</small>
-        <small>Round reference {opportunity ? usd(opportunity.reference.price, 2) : "Unknown"} · {opportunity?.reference.status ?? "not reported"}</small>
-      </div>
-      <div className="mo-value-group">
-        <span className="mo-label">BLUEWATER CALIBRATED ESTIMATE</span>
-        <strong>Unavailable</strong>
-        <small>No promoted, qualified model estimate is available.</small>
-      </div>
-      <div className="mo-value-group mo-quote-value">
-        <span className="mo-label">$5 ASK-BASED ILLUSTRATION</span>
-        <strong>{ask == null ? "Unavailable" : `${ask}¢ / share`}</strong>
-        <small>{quoteStale ? "Stale source receipt · requote manually" : sourceValid ? "Same-round reported ask · not executable" : "No verified same-round purchase quote"}</small>
-      </div>
-    </div>
-
-    <div className="mo-economics" aria-label="Indicative purchase economics">
-      <div><span>Gross receipt if correct</span><b>{grossReceipt == null ? "Unknown" : usd(grossReceipt)}</b></div>
-      <div><span>Net profit if correct</span><b>Unknown</b></div>
-      <div><span>Loss if incorrect · before unverified fees/gas</span><b>{usd(5)} collateral</b></div>
-      <div><span>Fees · gas · break-even · EV</span><b>Unknown</b></div>
-      <p>Gross receipt is ask-based only. Full $5 fill, net settlement, fees, gas in SUI, its USD conversion basis and break-even are unverified; expected net value is unqualified.</p>
-    </div>
-
-    <div className="mo-last-row">
-      <div className="mo-side-result">
-        <span className="mo-label">SELECTED SIDE AVAILABILITY</span>
-        <strong>{sideAvailability}</strong>
-        <small>{selectedSide && purchase?.selection ? `Provider selection ${purchase.selection}` : "Unavailable side is never replaced with the opposite side."}</small>
-      </div>
-      <div className="mo-age">
-        <span className="mo-label">QUOTE / SOURCE AGE</span>
-        <strong>{quoteAgeMs == null ? "Unknown" : duration(quoteAgeMs)}</strong>
-        <small>Age is measured from app receipt, not last price change{opportunity?.priceLastChangedAtMs != null ? ` · last changed ${stamp(opportunity.priceLastChangedAtMs)}` : ""}.</small>
-      </div>
-      <div className="mo-action">
-        <span className="mo-label">MANUAL ACTION / BLOCKER</span>
-        {providerUrl ? <a href={providerUrl} target="_blank" rel="noopener noreferrer">
-          View verified provider round <ExternalLink size={13} aria-hidden="true" />
-        </a> : <strong>No verified exact-round link</strong>}
-        <small>{providerUrl
-          ? `Read-only route · no in-app order submission · blocker: ${decision?.executionBlocker ?? "No verified order route."} Recheck and requote after navigation or signing delay.`
-          : `Exact-round route is not available from this snapshot. ${decision?.executionBlocker ?? "No order action is enabled."}`}</small>
-      </div>
-    </div>
-
-    <div className="mo-filter-row">
-      <div className="mo-filter" role="group" aria-label="Desired winning profit preference">
-        <span className="mo-label">$5 WINNING-PROFIT PREFERENCE</span>
-        {([1, 2] as const).map(amount => <button key={amount} type="button"
-          aria-pressed={minimumWinningProfit === amount}
-          className={minimumWinningProfit === amount ? "selected" : ""}
-          onClick={() => onMinimumWinningProfitChange(amount)}>
-          ${amount}
-        </button>)}
-        <small>Payout preference only · does not represent expected return. Unverified quote cannot pass this filter.</small>
-        <b className="mo-filter-result">UNQUALIFIED · requires {usd(minimumWinningProfit)} net profit if correct</b>
-      </div>
-      <div className="mo-early-audit">
-        <span className="mo-label">ADAPTIVE / CANONICAL BENCHMARKS</span>
-        <strong>Adaptive early {early ? `${early.side} · ${stamp(early.committedAtMs)}` : persistenceStatus === "FAILED" ? "Save failed" : "Not saved"}</strong>
-        <small>Canonical {canonical ? `${canonical.side} · ${stamp(canonical.committedAtMs)}` : "not committed"}{early ? ` · commit → browser ${duration(browserDuration)} · worker receipt ${duration(workerDuration)}` : ""}</small>
-      </div>
-    </div>
-
-    <div className="mo-health" aria-label="System component health">
-      <div><i className={health?.priceFeed === "AVAILABLE" ? "ok" : "unknown"} /><span>PRICE FEED</span><b>{healthLabel(health?.priceFeed)}</b></div>
-      <div><i className={health?.decisionService === "AVAILABLE" ? "ok" : health?.decisionService === "STALE" ? "warn" : "unknown"} /><span>DECISION SERVICE</span><b>{healthLabel(health?.decisionService)}</b></div>
-      <div><i className={health?.storage === "COMMITTED" ? "ok" : health?.storage === "FAILED" ? "bad" : "unknown"} /><span>STORAGE</span><b>{healthLabel(health?.storage)}</b></div>
-      <div><i className="unknown" /><span>ORDER ADAPTER</span><b>UNVERIFIED</b></div>
-    </div>
-
-    <p className="mo-readiness-note">{view.fresh && decision?.readiness
-      ? `Readiness ${Math.round(decision.readiness.score)} / 100 is decision progress, not win probability and not an order guarantee.`
-      : "Readiness is decision progress, not win probability or an order guarantee."}</p>
-    {view.decision?.earlyDecision?.committedAtMs === null && view.decision.earlyDecision && <p className="mo-receipt-note">Early choice exists, but historical commit acknowledgement time is unknown.</p>}
-  </div>;
-}
-
-export function ManualOpportunity({ view, now, onRetry, refresh, browserReceivedAtMs, marketReference, comparison }: Props) {
-  const [minimumWinningProfit, setMinimumWinningProfit] = useState<1 | 2>(1);
+export function ManualOpportunity({
+  view, now, interval = view.decision?.intervalMinutes ?? 5, round, onIntervalChange, onRetry, refresh,
+  marketReference, comparison, fixtureName, children, economics,
+}: Props) {
+  const [compactPrices,setCompactPrices]=React.useState(()=>typeof window!=="undefined"&&window.matchMedia("(max-width: 900px)").matches);
+  const [pricesExpanded,setPricesExpanded]=React.useState(false);
+  const [researchDisplay,setResearchDisplay]=React.useState<"benchmark"|"event">("benchmark");
+  React.useEffect(()=>{
+    const media=window.matchMedia("(max-width: 900px)");
+    const update=()=>setCompactPrices(media.matches);
+    update();media.addEventListener("change",update);
+    return ()=>media.removeEventListener("change",update);
+  },[]);
   const decision = view.decision;
-  const pending = refresh?.pending ?? false;
-  const error = refresh?.error ?? "";
-  return <section className="manual-opportunity" aria-label="Manual round opportunity" aria-busy={pending}>
-    <header className="mo-header">
-      <div>
-        <span className="mo-kicker">ONE AUTHORITATIVE RESEARCH DECISION · BTC / USD</span>
-          <h2>{decision?.timedDecision?.strategyVersion === TIMED_STRATEGY ? "Qualification gates · exact round" : "Round research · exact round"}</h2>
+  const twoStageProjection = (decision as (RoundDecision & { twoStage?: TwoStageProjection | null }) | null)?.twoStage;
+  const exactRound = round !== undefined ? round : (decision ? { id: decision.roundId, startMs: decision.startMs, expiryMs: decision.expiryMs } : null);
+  const exactDecision = identityMatches(decision, exactRound) && decision?.intervalMinutes === interval ? decision : null;
+  const exactFresh = !!exactDecision && view.fresh;
+  const timed = exactDecision?.timedDecision ?? null;
+  const health = view.dataHealth ?? exactDecision?.dataHealth;
+  // The shared projection owns the saved choice. Do not fall back to legacy canonical data here.
+  const savedProjection = exactDecision ? view.savedDecision : null;
+  const saved = savedProjection && "status" in savedProjection ? savedProjection : null;
+  const fixtureLocked = fixtureName === "locked";
+  const fixtureLean = fixtureName === "high-likelihood-up" ? "UP"
+    : fixtureName === "high-likelihood-down" ? "DOWN" : null;
+  const savedSide = fixtureLocked ? "UP" : saved?.side ?? null;
+  const locked = saved?.status === "LOCKED" && (savedSide === "UP" || savedSide === "DOWN");
+  const currentSide = exactFresh ? view.provisionalLean : fixtureLean;
+  const fixtureOdds = fixtureName && ["normal", "high-likelihood-up", "high-likelihood-down"].includes(fixtureName)
+    ? { probabilityUp: .583, probabilityDown: .417, receivedAtMs: now } : null;
+  const odds = exactFresh ? exactDecision.market : fixtureOdds;
+  const waitingForOdds = !odds && (health?.probabilities.status === "PROBABILITIES_MISSING" ||
+    (!exactDecision?.market && /odds missing|probabilities missing/i.test(view.reason)));
+  const loading = !!refresh?.pending && !decision;
+  const failed = !!refresh?.error;
+  const roundRemaining = exactRound && exactRound.expiryMs > now ? clock(exactRound.expiryMs - now) : null;
+  const roundComplete = !!exactRound && now >= exactRound.expiryMs;
+  const nextGateAtMs = exactDecision ? view.nextGateAtMs ?? timed?.nextGateAtMs ?? null : null;
+  const saving = !!exactDecision && !locked && (timed?.persistence === "SAVING" || view.persistenceState === "WRITING" || view.persistenceState === "QUEUED");
+  const state = fixtureLocked ? "LOCKED UP"
+    : locked ? `LOCKED ${savedSide}`
+      : saving ? "SAVING"
+        : roundComplete ? "ROUND COMPLETE"
+          : currentSide ? `LEANING ${currentSide}` : "WATCHING";
+  const blocker = waitingForOdds ? "Waiting for WaterX odds."
+    : !exactDecision ? "Waiting for an exact active-round snapshot."
+    : timed?.remainingRequirement && timed.remainingRequirement !== "Evidence qualifies; evaluated only at a scheduled gate"
+    ? timed.remainingRequirement
+    : timed?.blocker && timed.blocker !== "CONDITIONS_SATISFIED"
+      ? timed.blocker.replaceAll("_", " ").toLowerCase()
+        : !view.fresh ? view.reason || "Live evidence is stale; provisional lean withheld."
+          : "Waiting for the next 30-second qualification gate.";
+  const message = fixtureName
+    ? "Development visual fixture only. Research display does not authorize a trade."
+    : locked
+      ? "Saved decision is frozen for this exact round. WaterX market odds continue to update separately."
+      : saving
+        ? "The qualifying choice is being persisted. It is not locked until acknowledged."
+        : roundComplete ? "Round complete. No new decision can be inferred from this round."
+          : blocker;
+  const referencePrice = marketReference?.price ?? exactDecision?.opportunity?.reference.price ?? null;
+  const comparisonPrice = comparison?.price ?? null;
+  const priceDifference = referencePrice != null && comparisonPrice != null &&
+    Number.isFinite(referencePrice) && referencePrice > 0 && Number.isFinite(comparisonPrice)
+    ? comparisonPrice - referencePrice : null;
+  const differencePercent = priceDifference != null && referencePrice
+    ? priceDifference / referencePrice * 100 : null;
+  const confirmed = marketReference?.quality === "confirmed" || exactDecision?.opportunity?.reference.status === "confirmed";
+  const frozenUp = saved?.probabilityUp ?? null;
+  const frozenDown = saved?.probabilityDown ?? null;
+  const opportunity=exactDecision?.opportunity;
+  const purchase=exactFresh&&odds&&opportunity?.receivedAtMs===odds.receivedAtMs?opportunity.purchase:null;
+  const cents=(value:number|null|undefined)=>value!=null&&Number.isFinite(value)&&value>0&&value<=100?`${value.toFixed(2).replace(/\.00$/,"")}¢`:null;
+  const upAsk=purchase?.up.status==="reported"?cents(purchase.up.askCents):null;
+  const downAsk=purchase?.down.status==="reported"?cents(purchase.down.askCents):null;
+  const economicsMatch=!!economics&&economics.amountEnteredUsd===5&&!!exactRound&&
+    economics.identity?.roundId===exactRound.id&&economics.identity.startMs===exactRound.startMs&&
+    economics.identity.expiryMs===exactRound.expiryMs&&economics.identity.intervalMinutes===interval&&exactFresh;
+  const indicative=economicsMatch?(["up","down"] as const).flatMap(side=>{
+    const quote=economics!.sides[side]?.quote;
+    const receipt=quote?.grossReceiptIfWinIndicative;
+    return typeof receipt==="number"&&Number.isFinite(receipt)&&receipt>0?
+      [{side,receipt}]:[];
+  }):[];
+  const requirementMet = timed?.requirementsMet ?? null;
+  const requirementsTotal = timed?.requirementsTotal ?? 4;
+  const components = timed?.components;
+  const qualified = [
+    exactFresh && (timed?.sourceAgeMs == null || timed.sourceAgeMs <= 10_000),
+    !!components && components.strength >= components.requiredStrength,
+    !!components && components.sameSideMs >= components.requiredSameSideMs,
+    !!components && components.validCount >= components.requiredCount &&
+      (components.recentReversals ?? 0) === 0 &&
+      (components.probabilityRange == null || components.probabilityRange <= components.maximumRange || components.trendKind === "STRENGTHENING"),
+  ];
+  const savedSource = saved?.status === "LOCKED"
+    ? "Frozen WaterX market probability · not a calibrated forecast" : null;
+  const stale = health?.probabilities.lastValid;
+  const staleSameRound = !!exactRound && !!stale &&
+    stale.receivedAtMs >= exactRound.startMs && stale.receivedAtMs < exactRound.expiryMs &&
+    stale.receivedAtMs <= now;
+
+  return <section className={`manual-opportunity compact-decision${children ? " has-chart" : ""}${locked ? " is-locked" : ""}`} aria-label="Exact-round research state" aria-busy={loading}>
+    <div className="desk-primary-card">
+    <header className="desk-round-header">
+      <div className="desk-round-identity">
+        <span className="desk-round-symbol">BTC</span><span>· {interval}m</span>
+        {onIntervalChange && <div className="desk-interval-control" role="group" aria-label="Research interval">
+          {([5, 15] as const).map(value => <button key={value} type="button" aria-pressed={interval === value} onClick={() => onIntervalChange(value)}>{value}m</button>)}
+        </div>}
       </div>
-      <div className="mo-header-tools">
-        {pending && <span className="mo-refreshing" role="status">Refreshing snapshot</span>}
-        {onRetry && <button className="mo-retry" type="button" onClick={onRetry} aria-label="Retry live snapshot"><RefreshCw size={14} /> Retry</button>}
-      </div>
+      <span className="desk-round-close">{roundComplete ? "Round complete" : roundRemaining ? `Closes in ${roundRemaining}` : "Round not confirmed"}</span>
     </header>
-    {error && <div className="mo-refresh-error" role="status">Snapshot refresh failed · same-round decision retained only while valid. {error}</div>}
-    {!decision && pending && <div className="mo-loading" role="status" aria-label="Loading exact-round snapshot">
-      <div className="mo-skeleton-lines" aria-hidden="true"><i /><i /><i /></div>
-      <strong>Waiting for exact-round snapshot</strong>
+
+    <div className="desk-percentage-board" aria-label="WaterX market odds">
+      <h3 className="desk-section-title">WaterX market</h3>
+      <div className="desk-probability probability-up"><span>UP</span><strong>{odds ? percent(odds.probabilityUp) : "—"}</strong></div>
+      <div className="desk-probability probability-down"><span>DOWN</span><strong>{odds ? percent(odds.probabilityDown) : "—"}</strong></div>
+      <div className="desk-probability-source">
+        <small>{odds ? `WaterX · ${Math.max(0,Math.floor((now-odds.receivedAtMs)/1000))}s ago · app observed` : "WaterX · no current probability receipt"}</small>
+      </div>
+      {purchase&&(upAsk||downAsk)&&<div className="desk-purchase-prices"><span>Purchase price (not probability)</span><b>UP {upAsk??"Not reported"} · DOWN {downAsk??"Not reported"}</b></div>}
+    </div>
+
+    <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
+    {locked && <div className="desk-frozen-evidence">
+      <span>Frozen lock · {savedSide} · active benchmark</span>
+      <strong>UP {percent(frozenUp)} <i>·</i> DOWN {percent(frozenDown)}</strong>
+      <small>{savedSource} · saved {time(saved?.committedAtMs ?? saved?.decisionAtMs)} · {clock(exactRound!.expiryMs-(saved?.committedAtMs??saved?.decisionAtMs??exactRound!.expiryMs))} before close</small>
     </div>}
-    {!decision && !pending && <div className="mo-missing-state" role="status">
-      <span className="mo-missing-mark" aria-hidden="true">—</span>
-      <div><strong>Data delayed · no exact-round decision snapshot</strong><p>{view.reason} Quotes and decisions are withheld until a matching snapshot arrives.</p></div>
-    </div>}
-    <TimedDecisionCard timed={decision?.timedDecision ?? null} decision={decision} now={now} liveFresh={view.fresh} marketReference={marketReference} comparison={comparison} />
-    <details className="mo-benchmark-details">
-      <summary>BENCHMARK DISCLOSURE · legacy canonical readiness, reference provenance &amp; diagnostics</summary>
-      {(!pending || decision) && <DecisionContent decision={decision} view={view} now={now} browserReceivedAtMs={browserReceivedAtMs}
-        minimumWinningProfit={minimumWinningProfit} onMinimumWinningProfitChange={setMinimumWinningProfit} />}
+
+    <div className={`desk-decision-card${locked ? " locked" : ""}`}>
+      <h3 className="desk-section-title">Bluewater decision <span className="desk-active-policy">ACTIVE · 30-SECOND BENCHMARK</span></h3>
+      <div className="desk-decision-main">
+        <div className="desk-state-line">
+          {!loading && <span className={`desk-state-tag${locked ? " locked" : currentSide ? " leaning" : ""}`} role="status">{state}</span>}
+          {exactDecision && <span className="desk-round-version">Round {interval}m · snapshot v{exactDecision.stateVersion}</span>}
+        </div>
+        {loading ? <div className="desk-skeleton" aria-label="Loading exact-round decision"><i /><i /><i /></div>
+          : <p>{message}</p>}
+        {failed && <p className="desk-error" role="status">Live snapshot could not refresh. {onRetry && <button type="button" onClick={onRetry}><RefreshCw size={13} /> Retry</button>}</p>}
+      </div>
+      <div className="desk-decision-side">
+        {locked && <div className="desk-next-evaluation"><span>Benchmark saved choice</span><strong>{time(saved?.committedAtMs ?? saved?.decisionAtMs)}</strong></div>}
+        {!locked && <div className="desk-checklist" aria-label={waitingForOdds?"Not evaluated: missing odds":`Qualification progress: ${requirementMet ?? "—"} of ${requirementsTotal} conditions met`}>
+          {!waitingForOdds&&qualified.map((met, index) => <span key={index} className={met ? "met" : ""} title={["Fresh input", "Directional strength", "Same-side persistence", "Stable evidence"][index]} />)}
+          <small>{waitingForOdds?"Not evaluated: missing odds":requirementMet == null ? "Qualification" : `${requirementMet} of ${requirementsTotal} conditions`}</small>
+        </div>}
+      </div>
+      <div className={`desk-data-health${exactFresh ? " current" : ""}`}>
+        <span>MARKET DATA</span><b>{health?.probabilities.status?.replaceAll("_", " ") ?? (exactFresh ? "CURRENT" : "UNAVAILABLE")}</b>
+      </div>
+      {waitingForOdds&&locked&&<p className="desk-odds-notice" role="status">Waiting for WaterX odds.</p>}
+      {fixtureName && <span className="desk-fixture-indicator">Development visual fixture · {fixtureName.replaceAll("-", " ")}</span>}
+    </div>
+    {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>
+      <p>Before fees, minimums and price impact. Not an executable quote or expected profit.</p>
+      {indicative.map(row=><p key={row.side}>{row.side.toUpperCase()} · indicative gross winning receipt {usd(row.receipt)}</p>)}
+    </details>}
+    </div>
+
+    <details className="desk-price-details" open={!compactPrices||pricesExpanded}
+      onToggle={event=>{if(compactPrices)setPricesExpanded(event.currentTarget.open);}}>
+    <summary>BTC, reference and price difference</summary>
+    <div className="desk-price-strip" aria-label="BTC comparison and WaterX reference prices">
+      <div className="desk-price-item">
+        <span>BTC comparison</span><strong>{usd(comparisonPrice)}</strong>
+        <small>{comparison?.source && comparisonPrice != null ? `Updated ${time(comparison.receivedAtMs)}` : "Waiting for a live comparison"}</small>
+      </div>
+      <div className="desk-price-item">
+        <span>WaterX price to beat</span><strong>{usd(referencePrice)}</strong>
+        <small>{confirmed ? "Confirmed round reference" : referencePrice != null ? "Provisional WaterX reference" : "Reference unavailable"}</small>
+      </div>
+      <div className={`desk-price-difference${priceDifference == null ? "" : priceDifference >= 0 ? " is-above" : " is-below"}`}>
+        <span>Difference</span>
+        <strong>{priceDifference == null ? "—" : `${priceDifference >= 0 ? "+" : "−"}${usd(Math.abs(priceDifference))}`}</strong>
+        <small>{differencePercent == null ? "Both prices required" : `${differencePercent >= 0 ? "+" : "−"}${Math.abs(differencePercent).toFixed(2)}% from reference`}</small>
+      </div>
+    </div>
     </details>
-    <p className="mo-safety">Research display only · no wallet connection, signing, funded order or in-app submission. Requote after any navigation delay.</p>
+    {children&&<div className="desk-chart-slot">{children}</div>}
+    <details className="desk-details">
+      <summary>Details</summary>
+      <div className="desk-policy-choice">
+        <span>Research-policy display · display only</span>
+        <div role="group" aria-label="Research policy display">
+          <button type="button" aria-pressed={researchDisplay==="benchmark"} onClick={()=>setResearchDisplay("benchmark")}>30-second benchmark · active</button>
+          <button type="button" aria-pressed={researchDisplay==="event"} onClick={()=>setResearchDisplay("event")}>Event challenger · shadow</button>
+        </div>
+      </div>
+      {researchDisplay==="event" && <EventChallengerPanel
+        projection={exactDecision?.eventChallenger}
+        round={exactRound}
+        now={now}
+      />}
+      <div className="desk-details-grid">
+        <span>Live odds source</span><b>{odds ? "WaterX market" : "Unavailable; no trained-model fallback"}</b>
+        <span>Data condition</span><b>{health?.primaryReason?.replaceAll("_", " ") ?? (view.fresh ? "Current" : "Waiting for snapshot")}</b>
+        <span>Saved round choice</span><b>{saved ? `${savedSide ?? "No side"} · immutable · ${time(saved.committedAtMs ?? saved.decisionAtMs)}` : fixtureLocked ? "Synthetic visual lock · not saved" : "No saved choice reported"}</b>
+        {saved && <><span>Frozen probability</span><b>{savedSource} · UP {percent(frozenUp)} · DOWN {percent(frozenDown)}</b></>}
+        <span>Exact round</span><b>{exactRound?.id ?? "Not available"}</b>
+        <span>Strategy</span><b>{exactDecision ? view.strategyVersion ?? exactDecision.policyVersion : "Not reported"}</b>
+        <span>Timed blocker</span><b>{timed?.blocker?.replaceAll("_", " ") ?? "Not reported"}</b>
+        {timed?.lastGate && <><span>Last gate</span><b>{timed.lastGate.result.replaceAll("_", " ")} · {time(timed.lastGate.scheduledAtMs)}</b></>}
+        {nextGateAtMs != null && <><span>Next benchmark gate</span><b>{time(nextGateAtMs)}</b></>}
+        <span>30-second benchmark countdown</span><b>{nextGateAtMs == null ? "No further scheduled checkpoint" : `${clock(nextGateAtMs - now) ?? "Not scheduled"} · scheduled benchmark evaluation only; not a challenger lock deadline`}</b>
+        {staleSameRound && <><span>Last same-round odds</span><b>Stale · UP {percent(stale.up)} · DOWN {percent(stale.down)} · observed {time(stale.receivedAtMs)}</b></>}
+        <span>Snapshot revision</span><b>{!exactDecision || view.snapshotVersion == null ? "Not available" : `v${view.snapshotVersion} · ${time(view.componentTimestamps.snapshotPublishedAtMs)}`}</b>
+      </div>
+      <p className="desk-detail-note">This is read-only market research, not a forecast or trading instruction. Comparison price does not determine WaterX settlement. Automatic execution is disabled.</p>
+    </details>
   </section>;
 }

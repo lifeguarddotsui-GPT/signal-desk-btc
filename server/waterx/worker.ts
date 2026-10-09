@@ -2,6 +2,7 @@ import pg from "pg";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { startPriceCapture } from "../btc/chart";
+import {startTwoStageSupport} from "./two-stage-support";
 import { startWaterxCapture } from "./service";
 import {
   runScheduledWaterxCandidateEvaluation,
@@ -12,6 +13,7 @@ import {
   type ResearchTrainingQueryable,
 } from "./research-training";
 import { startResearchMaintenance } from "./research-maintenance";
+import {setDecisionWorkerLease} from "./decision-authority";
 
 type WorkerDatabase = {
   query<T = unknown>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>;
@@ -39,7 +41,8 @@ const DAILY_CANDIDATE_SCHEDULE_MS = 24 * 60 * 60_000;
 export async function startWaterxWorker(
   db: WorkerDatabase,
   options: WorkerOptions = {
-    startPriceCapture,
+    startPriceCapture:()=>{const stopSupport=startTwoStageSupport(),stopPrice=startPriceCapture();
+      return ()=>{stopPrice();stopSupport();};},
     startWaterxCapture: () => startWaterxCapture({
       onStalled: () => { process.exit(1); },
     }),
@@ -62,6 +65,7 @@ export async function startWaterxWorker(
   const stop = (): Promise<void> => {
     if (stopPromise) return stopPromise;
     stopping = true;
+    setDecisionWorkerLease(false);
     if (heartbeat) unschedule(heartbeat);
     if (candidateSchedule) unschedule(candidateSchedule);
     if (researchSchedule) unschedule(researchSchedule);
@@ -105,6 +109,7 @@ export async function startWaterxWorker(
       throw new Error("Another WaterX collector worker holds the database lease.");
 
     leaseOwned = true;
+    setDecisionWorkerLease(true);
     stopPrice = options.startPriceCapture();
     stopWaterx = options.startWaterxCapture();
     heartbeat = schedule(() => {
@@ -253,7 +258,8 @@ async function main() {
   const db = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
   const worker = await startWaterxWorker(db, {
-    startPriceCapture,
+    startPriceCapture:()=>{const stopSupport=startTwoStageSupport(),stopPrice=startPriceCapture();
+      return ()=>{stopPrice();stopSupport();};},
     startWaterxCapture: () => startWaterxCapture({
       onStalled: () => { process.exit(1); },
     }),

@@ -1,16 +1,16 @@
 {
   "build": {
-    "id": "sha256:e8c8231a9d6db0157d094ce66329081b62536e0d9da3a24dbef9a2760e6f5c15",
+    "id": "sha256:cfb864048c825da43fb4a64e54c766d090ed319bb2c9e22b04b1e4a14ce8529c",
     "format": 3,
-    "builtAt": "2026-10-06T17:19:41.366Z",
-    "sourceCommit": null,
-    "schemaVersion": "schema-sha256:5854c06ac7d0a7361ca117ae8e1ee078897cf3590de08ed77c524915369f5709",
-    "configurationVersion": "policy-sha256:08c857703efb855e0c06ead8017d0afdacc6695c34d316f678766d91be1f7db2",
+    "builtAt": "2026-10-08T23:11:18.853Z",
+    "sourceCommit": "09c0f4c74d9fac5da03946cb1b1a21bd57d7b8fe",
+    "schemaVersion": "schema-sha256:26ac301f39d2cd7528572ae0d582472bd137dcd836c528a1aeae3b2edbaa68e1",
+    "configurationVersion": "policy-sha256:068f81d18b330c687dca630bfb6acbfdb66192b6d8abe10ec371366ce38e3f5c",
     "modelArtifactVersion": "btc-logistic-artifact/v1",
-    "sourceSnapshotSha256": "038396a861125cb7f82d08ba109767c243bd7901f82d78fbadf8667cce74a179",
+    "sourceSnapshotSha256": "cf51487ba409d10bdd7363e20461d0465d0367d29a7fc6d7cd91987afa097ce7",
     "sourceArchiveUrl": "/source-release.tar.gz"
   },
-  "sourceDigest": "038396a861125cb7f82d08ba109767c243bd7901f82d78fbadf8667cce74a179",
+  "sourceDigest": "cf51487ba409d10bdd7363e20461d0465d0367d29a7fc6d7cd91987afa097ce7",
   "scope": "Source-only current release. No workspace Git history, uploads, runtime keys or database data.",
   "files": [
     {
@@ -27,11 +27,11 @@
     },
     {
       "file": "client/src/AdvisoryCards.tsx",
-      "sha256": "a8cfc1b25f99c4bccdea61223278ee9ebca89a37357f77f70ef43a78444b91b1"
+      "sha256": "868aaacf641b17c627a2c2cfa9c80a7d533f25c7fd27826bfc35a2784c4bc605"
     },
     {
       "file": "client/src/AgentCurrentRound.tsx",
-      "sha256": "5bbadc2e4f3e0eb6e2ec7c0bae5f11bbf25f61a7751e2a8b2320eb48d8616685"
+      "sha256": "14e4c111320103c2f4bb6971560d2c488079b03c48678f10e78cd62393551e29"
     },
     {
       "file": "client/src/AgentFundingPreview.tsx",
@@ -39,11 +39,15 @@
     },
     {
       "file": "client/src/AgentPage.tsx",
-      "sha256": "e4a25ba9b4523c29ace8fcbff2d0083204a8a5a23a7b34beb4eca29774c3b7f1"
+      "sha256": "fc6b0c124322185e84189170b7be7e147aef28994ad962e0100ab550123474b4"
+    },
+    {
+      "file": "client/src/AgentRunningView.tsx",
+      "sha256": "8b66bb99f21385864558739e4d0c90098e2b99aab2c9d6ead827e1880942f1de"
     },
     {
       "file": "client/src/App.tsx",
-      "sha256": "e5f64c942973006e6b29a64f73e758e0fb77fff00da56526cf96e23f326f6f6a"
+      "sha256": "46c36542b9cfc12457e6289c0171d93ecbea5d9ca2fbc279f562fa6e746a38d3"
     },
     {
       "file": "client/src/BluewaterResearchPanel.tsx",
@@ -51,11 +55,23 @@
     },
     {
       "file": "client/src/CanonicalHistory.tsx",
-      "sha256": "31336c8e5fc1ddb3de3bb45e301755c2ce8927b9221e505c59e758efb4de6e6d"
+      "sha256": "2cd73c375bc1868ac45673f1ae128b36f9aa21a5abbc2be4786ad351beb3c87d"
     },
     {
       "file": "client/src/EarlyLearningJobsPanel.tsx",
       "sha256": "578dd3da96fb16379eb504ce1a459bf973c6774d3606a618a5555115b3de006b"
+    },
+    {
+      "file": "client/src/EarlyLearningSummary.tsx",
+      "sha256": "43bead8bb488b1add6ecd08014fa75522137079fba97818d39f0b01df9183cde"
+    },
+    {
+      "file": "client/src/EventChallengerPanel.tsx",
+      "sha256": "f58d64c8801232b6b9ed4b03f193983afa0acdb2502ebe096d803ad5d7916ac2"
+    },
+    {
+      "file": "client/src/GuidedAgentSetup.tsx",
+      "sha256": "6afd77ace847e1d46b7df84ee8a7390f590d6a0363ae821aa38bf433fc6ca2ac"
     },
     {
       "file": "client/src/IndicativeEstimate.tsx",
@@ -67,11 +83,11 @@
     },
     {
       "file": "client/src/ManualOpportunity.css",
-      "sha256": "a9815c79329344393f4862708bc04142e9fc1c3a92e744675797ddd482e4ac76"
+      "sha256": "dea537903e89b70829e529b36c8f6a91f831daa5535ca7ccc3d28377b893ae25"
     },
     {
       "file": "client/src/ManualOpportunity.tsx",
-      "sha256": "e89c5eb1c2f55f64c55ee658491f3bbd271cf75c862d2ee21a8ba1476d146050"
+      "sha256": "968ba44c15c03169dc64ae7167ac382f31f7196b02a9956cc9f9e5281ede34c4"
     },
     {
       "file": "client/src/ResearchChoiceCard.tsx",
@@ -83,31 +99,43 @@
     },
     {
       "file": "client/src/TimedDecisionHistory.tsx",
-      "sha256": "528bc2ec9fe95dbeb00cf81d3fecc9dca4d527f359bee6ecef6780fafdc6918a"
+      "sha256": "8c5845034cf5967b18fcf2316e4335b9371ca767557bd4f666f97d841df8d188"
+    },
+    {
+      "file": "client/src/TimedStrategyHistory.tsx",
+      "sha256": "4668fce0605de861f775ec6292cebc65e993368725fd2fa3e224bdf763203ebb"
+    },
+    {
+      "file": "client/src/TwoStageHistory.tsx",
+      "sha256": "d9d7ece98ee4e46d8108de921f58ad6506866addae3ccda1a6f5129585aa7be3"
     },
     {
       "file": "client/src/advisory-contract.test.ts",
-      "sha256": "7a64f3926655d7dfbc32a54d9150d41afaeb4b64b8275043010c164086f20bff"
+      "sha256": "f6544e7f69d80f387c3595ea41ae80c8cb5479e00890d0a678630e1ad915ea8c"
     },
     {
       "file": "client/src/advisory-contract.ts",
-      "sha256": "adce0460854d2fa1e65bdfa9065ddfcd30d0006492efe5309f03d773cb735367"
+      "sha256": "47553131134ecdf1694c04af5bd8d5eb8901d7dc21c6d5cb2b7c34048834ff3c"
     },
     {
       "file": "client/src/agent-format.test.ts",
-      "sha256": "66496466c12211f86895a30677b9c9b13071a4f577dc91f1d05cd4a5afc0d078"
+      "sha256": "31c4226b2d6f5db2082b9a42ffaead03ca4504d8d801bd76bd98f64e3c7b52fb"
     },
     {
       "file": "client/src/agent-format.ts",
-      "sha256": "1131ade7a07d48fa75dd517098f2c025aa653270d4e30dfff9d88fdd3fc42e05"
+      "sha256": "39c1088d7d624d26084988b6bd3037cf58bb4923fe9e13b69ceaa3adc7c379f6"
     },
     {
       "file": "client/src/agent-funding-preview-ui.test.ts",
       "sha256": "ea530b80b1f690f314e879ad680d87d00e23d7469fde33230cc911644c7c13c1"
     },
     {
+      "file": "client/src/agent-onboarding.css",
+      "sha256": "b2b2e2f50066970e2b0c2fc0cb87d5b8e344f14d038e6ac808225438bc410313"
+    },
+    {
       "file": "client/src/agent-page-ui.test.ts",
-      "sha256": "15bc2d809c0ad83df248c2758c8c08a67e25f06a2139869890cb779965e21bcf"
+      "sha256": "91d090ee9fbae3bb903c6f5dfa674ca0957aa70db2453f85acbc6ca339b3abd7"
     },
     {
       "file": "client/src/agent-round-contract.test.ts",
@@ -116,6 +144,14 @@
     {
       "file": "client/src/agent-round-contract.ts",
       "sha256": "4403797fa1539e5ec30b812eb11afe8b4ee8ee008d8342a64736dc8860a2ca7d"
+    },
+    {
+      "file": "client/src/agent-running.css",
+      "sha256": "36adc6b2a3d72d862172c640e70ac4241188042170674b0ef0a981807af6db17"
+    },
+    {
+      "file": "client/src/agent.css",
+      "sha256": "e172172d4bb5a9ba545e3424a1c19281dd58d63b814652117bd7abf0752c2901"
     },
     {
       "file": "client/src/beta-interface.css",
@@ -134,6 +170,14 @@
       "sha256": "d5b421c439c4af16cd9c06fc8da84c6d01015930352777c61dcdd015617cb6f5"
     },
     {
+      "file": "client/src/chart-axis.test.ts",
+      "sha256": "8e92591aa11838f933c8695af3c63f4c0913d7e5984d65da0501b4e4eb3e1cc2"
+    },
+    {
+      "file": "client/src/chart-axis.ts",
+      "sha256": "23124d7cb47db58e655d0ad5f511952e424d363fe5a269432df764912b79c148"
+    },
+    {
       "file": "client/src/chart-contract.test.ts",
       "sha256": "fc61a3e78c40e61b9eabc0e45cd288262e53d0c817f7ed408eca3876db3976d8"
     },
@@ -150,20 +194,32 @@
       "sha256": "72dd871d53102f87eb636549ba92314bef97c7cf3dda9b7b74a82372f9e76f21"
     },
     {
+      "file": "client/src/event-challenger-ui.test.ts",
+      "sha256": "7b42000c137e8407528c8e64c21dcbb714a10ac5da7d681e5224ec63440aa4e7"
+    },
+    {
+      "file": "client/src/guided-agent-setup.test.tsx",
+      "sha256": "74cc50764272a665867ee159f7efbf9c9ca5cbc8e81ce7c82795ba3316e738e2"
+    },
+    {
       "file": "client/src/index.css",
-      "sha256": "1cccbd37685a1b13cbaee75bbe1072264bb6b6ab61ac4e7845f9f6335a15013f"
+      "sha256": "12f9500c3340d6bec4338900a2567fe8d496f203b7c7ac4c2a7f47eef86f48cf"
     },
     {
       "file": "client/src/live-decision-contract.ts",
-      "sha256": "21c00548489c9bdac59812edb77a0d9fd75ff6254a7adff32d87ac516603cdb0"
+      "sha256": "0e81e626f4736f91876b950c107fad7f3902e5945a932aec8c0d3904e9be76e0"
+    },
+    {
+      "file": "client/src/live-decision-projection.test.ts",
+      "sha256": "af138338d5402aac261c850216758eda0537a6a3031374b8cc50f000862e1851"
     },
     {
       "file": "client/src/live-desk-ui.test.ts",
-      "sha256": "8cc082d2fef9ac0537d7fcf8a5f311109f3ad279a5c0172895f92b501a778e0c"
+      "sha256": "a8f14da62b5b6f2e6baabdc7ea8b10a6e04b0082fa71651e11ae1c90afc77a65"
     },
     {
       "file": "client/src/lock-readiness-ui.test.ts",
-      "sha256": "a649f331b6f17b68619fbcf58019bd7069da591c6da5ea387e3469804aca6bfb"
+      "sha256": "04275cffd565d501307b6380e70a92ba148bf5f6a8a038e56105a9743db53fb1"
     },
     {
       "file": "client/src/main.tsx",
@@ -171,7 +227,11 @@
     },
     {
       "file": "client/src/manual-opportunity-ui.test.ts",
-      "sha256": "37de8a4a97c6fb3ee11921dab12d90d1ee6a377b4b421aaf7eb459612b3c2154"
+      "sha256": "23d6b7eccc55b588ba4de7ce21118c3c1fab7d29ceb3d369102eca8a49fe0af9"
+    },
+    {
+      "file": "client/src/owner-wallet-signing.ts",
+      "sha256": "cdabad484b44d42a16cdddfb4637898d45ee62f5250345c7a71f61f7a703764e"
     },
     {
       "file": "client/src/research-lifecycle.test.ts",
@@ -179,19 +239,23 @@
     },
     {
       "file": "client/src/research-ui.test.ts",
-      "sha256": "e641f111c2d9f6c3c1f6778ff8108b89281781ef52e0337001bb92c929f460ad"
+      "sha256": "d533649eb1db087b0b9e1932f6e1e55efa122ace0241f3548a00ce49570bb2ce"
     },
     {
       "file": "client/src/timed-decision-ui.test.ts",
-      "sha256": "69024ae0c948a86d79e830e38789a57c40a128df701c9132daee0787affe5891"
+      "sha256": "9be1000dadf095955714840c36a190d2ffaa2fd95e161cfacbaf452642d3cd0f"
+    },
+    {
+      "file": "client/src/two-stage-ui.test.ts",
+      "sha256": "07bcb0f456e95fb33b012ab86368ea117e13bf9627c278348e21daf6c69dfd4b"
     },
     {
       "file": "client/src/useLiveSnapshot.ts",
-      "sha256": "b185a3980c1aadf8e26534c381d63106a64ae7820a019c397580e4de4f559f80"
+      "sha256": "c44ee3929c6429d059625259ccb280637584b8c77e5df8c0d3c4b52fd63740a1"
     },
     {
       "file": "client/src/waterx-ui-contract.test.ts",
-      "sha256": "734506bc3c401b084bab2110e76cc4c8b8e620b377f7e1358b0f8be8b6a99d1a"
+      "sha256": "c439f5dcab8ca08bc35b5249b26a4dbf017804c4923a0bb3b7cd8c6e3c441571"
     },
     {
       "file": "client/src/waterx-ui-contract.ts",
@@ -338,6 +402,14 @@
       "sha256": "2b7d9b9657b18bb46620e57b564a7616b27ff9d0e70d9fbce650ef0c0e1efcf4"
     },
     {
+      "file": "migrations/waterx-two-stage-prices.sql",
+      "sha256": "a5ada4c2bfa84895fcd8c1f82214dc7ef3d2a0a0f598295537a55310abde259f"
+    },
+    {
+      "file": "migrations/waterx-two-stage.sql",
+      "sha256": "1794d31a66056f77c86c352661fabad2ddf4ad5cf34173193ab6f51015199609"
+    },
+    {
       "file": "package-lock.json",
       "sha256": "dc6d4d0759f17e47e2f00894246b247e2c4caf6ade5ddb664427e5aa591a4141"
     },
@@ -347,7 +419,7 @@
     },
     {
       "file": "script/build.ts",
-      "sha256": "3c60cce7c736c8782022cff3241228425009a9b78eb46908d621432006e41491"
+      "sha256": "2cf4a811c63b6365297096fddc24c8de9d46c2b5dfb442b2132e9b4c560cbb28"
     },
     {
       "file": "script/source-snapshot.ts",
@@ -370,8 +442,16 @@
       "sha256": "dd503ff634278d5622dac10c9b94a95dce77a117383c863e78c18d68a72a562a"
     },
     {
+      "file": "scripts/agent-onboarding-browser.mjs",
+      "sha256": "5ec649f7396749a3dbd25d9374b3dc2a73861c4e6e5aa3a383f4fe875e4f6843"
+    },
+    {
+      "file": "scripts/agent-onboarding.test.ts",
+      "sha256": "583a33667cf961cea75237f1fdd3b1da4ae531244e5ee76a3b6b53a30159d616"
+    },
+    {
       "file": "scripts/agent-postgres.test.ts",
-      "sha256": "f4a35f659002e2df2775f3884e7dca9fa4e644b38bad0f859874ddf67841d987"
+      "sha256": "bd7ecef3a4768902bee10ef3d803234d65756081b0d6e2bec53826489d8a67f0"
     },
     {
       "file": "scripts/agent-risk.test.ts",
@@ -384,6 +464,10 @@
     {
       "file": "scripts/artifact.test.ts",
       "sha256": "10a5a45e2e737325ad2cc45bd5179e35b2de959aba817c9c45fb744768d95095"
+    },
+    {
+      "file": "scripts/audit-round-history-source.mjs",
+      "sha256": "0f548549a9dd2687ca9d8f092d78e548597bddbe295571b3112bb1b0d0b8d728"
     },
     {
       "file": "scripts/audit-waterx-prior-day.ts",
@@ -486,12 +570,28 @@
       "sha256": "9c8594d859d980a9c99615c87d3cf9d153a9db4e2b2d6c556fddde8b2f9abc7a"
     },
     {
+      "file": "scripts/collection-cadence.test.ts",
+      "sha256": "f091737bc20e550fecc9df5457f03f64987f11d681d2573cf3b08c4a510222b9"
+    },
+    {
+      "file": "scripts/confirmation-repair.test.ts",
+      "sha256": "d2dcb0698e72872e9a4abc9d05b7891cd82a8c84f9514880f6db5fef34fd5927"
+    },
+    {
       "file": "scripts/early-decision-release.test.ts",
       "sha256": "47cdeca0ff2872b56a3de735900e76bae8e4db0d69ae2dbf18febc9414886745"
     },
     {
       "file": "scripts/early-engine.test.ts",
-      "sha256": "2141ae1afe571f98a5a0edacf5edaded011fcf4a2b4d34fa8c4d4aacf2ff651f"
+      "sha256": "a09499eae07f0b766674c1db5bd1d37e1fd465ee6cc628e458e4ed698c2f902b"
+    },
+    {
+      "file": "scripts/early-repair-evidence.ts",
+      "sha256": "9effabae9275c8888106cc6fc122f321915f87e7be9601e2c21af358d3f1dbe1"
+    },
+    {
+      "file": "scripts/early-repair.test.ts",
+      "sha256": "edf9103a7999bd8878ae011fe3648939f7cad980aa96f7b3d6a7e5e1feb3ecbb"
     },
     {
       "file": "scripts/economics-client.test.ts",
@@ -504,6 +604,14 @@
     {
       "file": "scripts/economics.test.ts",
       "sha256": "a41f96c5a143105e1c0703786162df8b5192e15e6de32b10bbbd20d319b4d766"
+    },
+    {
+      "file": "scripts/entry-value.test.ts",
+      "sha256": "5acad8a25757c1400f3d9a5046f7575271be3b72dbce665570cee8ac1218e87d"
+    },
+    {
+      "file": "scripts/event-lock.test.ts",
+      "sha256": "52f41c5351b57bff501de40d8624ad2fd04eac1c6a7b830a18d9334229153ec4"
     },
     {
       "file": "scripts/evidence.test.ts",
@@ -526,12 +634,32 @@
       "sha256": "d51564bb089fe9e881e7b5dbcbff4e5a2ecac1012058ab013ce3605680b0619c"
     },
     {
+      "file": "scripts/export-value-update-evidence.ts",
+      "sha256": "f07b4d0ed8951545c834c655d1668931580552ed3ba5c8678dc7448c07b819a1"
+    },
+    {
+      "file": "scripts/gate-reliability-postgres.test.ts",
+      "sha256": "206d7b6a187984d1e95bd1a6d5537efa741a0c9be65f01abf81ab623a6acd8fd"
+    },
+    {
+      "file": "scripts/lean-lock-replay.test.ts",
+      "sha256": "b7991a243d67704eda87c4cfb2cd3ece8bae4aced7fd7635c7884286554c195d"
+    },
+    {
+      "file": "scripts/lean-lock-restart-probe.ts",
+      "sha256": "bd86c5e2d2a348435bf274f719857ef6fa9fb660bcc9eb041f0c10b7d7f683eb"
+    },
+    {
+      "file": "scripts/lean-lock-restoration.test.ts",
+      "sha256": "5735674b9845659fa751d159f46acf7325cca9d2a1631467787c4edc063a74ad"
+    },
+    {
       "file": "scripts/live-snapshot-contract.test.ts",
       "sha256": "f3ffda71b3f85ee007b1a03c072802535f908d863a1d67b2932eef4b27d94147"
     },
     {
       "file": "scripts/lock-postgres.test.ts",
-      "sha256": "303d456ffb59e9f30f23bbef2d90a2bbfc18d1d7f8fa671801d33d461495f969"
+      "sha256": "4381e86255a515fa1d725f5d3fdfa0f023891fd3d8672d0829de92422ed37f96"
     },
     {
       "file": "scripts/lock-readiness.test.ts",
@@ -567,7 +695,7 @@
     },
     {
       "file": "scripts/pooled-gate-training.test.ts",
-      "sha256": "c66654d652c114a7221f9d9381a42dbb981a201085ef286fa1af2ffefefa028a"
+      "sha256": "45596e17bc8b41dc6502da328993a69c983676dc693f86ebac3a20004ae9ea1d"
     },
     {
       "file": "scripts/probe-mainnet-rounds.ts",
@@ -582,6 +710,10 @@
       "sha256": "ff1ea3aaf30735482f0fa9f1e24316501af64a62984286b304e9b7a541f3c4b0"
     },
     {
+      "file": "scripts/render-event-lock-qa.ts",
+      "sha256": "29bd414d451bd7b5a0d263baeae67d51015365fe932ce8e64f0a4be137038e79"
+    },
+    {
       "file": "scripts/replay-backup-research.ts",
       "sha256": "70ed7a395e1ee14ea88d9ab3a36e9507a5a0785e94e9f2f4d70f9324c1ac269e"
     },
@@ -592,6 +724,10 @@
     {
       "file": "scripts/round-decision-state.test.ts",
       "sha256": "d52475106e2c8f56c0e2c17f879b6bf6ee5ad41418435edefcb6da1215f9fab5"
+    },
+    {
+      "file": "scripts/round-history-integrity.test.ts",
+      "sha256": "a020067a709f7958e1ebc8d6dd8822c1cba636bb147261594062115968627d18"
     },
     {
       "file": "scripts/round-repair.test.ts",
@@ -615,15 +751,23 @@
     },
     {
       "file": "scripts/timed-decision-postgres.test.ts",
-      "sha256": "bec3b115004ba6bc0a17b522baf5e3bf95f9553b844060e8c73a6141b25fcc71"
+      "sha256": "580e5e7ed6a50c2ea20d663175b60a6abae1debc5002e0b49d82745819a10fd7"
     },
     {
       "file": "scripts/train-early-horizons.ts",
-      "sha256": "f7c47a45de99b49c24129c876dc6c327939566101117a17854ee120135bcdf2e"
+      "sha256": "011fd538c92842a8d1dc041d61380971e128bdf7f07f7cc82f6a9b90f1914d9a"
+    },
+    {
+      "file": "scripts/train-two-stage.ts",
+      "sha256": "864777729996daff2fc0055517284f52b6cdbdf35b9a84d1f527201df25e9dc1"
     },
     {
       "file": "scripts/train-waterx-candidate.ts",
       "sha256": "6a2a480dbc2aea59d278cb2c078404278624d24e781cefc47248dde886f0cc17"
+    },
+    {
+      "file": "scripts/two-stage.test.ts",
+      "sha256": "559079aa9ac3e84b9775b3059c8b8abe0a4d1b59af6a4e4c497d50fc5666b6d9"
     },
     {
       "file": "scripts/verify-production-backup.ts",
@@ -639,7 +783,7 @@
     },
     {
       "file": "scripts/waterx-advisory.test.ts",
-      "sha256": "2f78d469203f7b134c1d8c62e729f950a737e7066aeb5f3dcb54d0a831173eb1"
+      "sha256": "d2c85cdfedac8f3566f04f194b590e807b2fdf223be30602eddc2c5d8bd53b82"
     },
     {
       "file": "scripts/waterx-availability.test.ts",
@@ -667,7 +811,7 @@
     },
     {
       "file": "scripts/waterx-collector-continuity.test.ts",
-      "sha256": "7acf2b8c2775c55f977e4f8237b4a981a938283c508cc5ad1177bb552ce8b507"
+      "sha256": "28680f2b5f3a36775d0b7f7e562a09589e3da39450f84d1b918d3877fd86a6d1"
     },
     {
       "file": "scripts/waterx-coverage.test.ts",
@@ -676,6 +820,10 @@
     {
       "file": "scripts/waterx-daily-audit.test.ts",
       "sha256": "0b2c1ce37ac2c1aaa46ccb8890b610ce70800d8cd6d50301b6b9b26f969f2516"
+    },
+    {
+      "file": "scripts/waterx-data-incident.test.ts",
+      "sha256": "447a7e20a500172e232caaf28c106f446887ff2d7b6b0949b8c694ead7807014"
     },
     {
       "file": "scripts/waterx-diagnostics.test.ts",
@@ -704,6 +852,10 @@
     {
       "file": "scripts/waterx-passive-state.test.ts",
       "sha256": "c0694c8f1139d192688ac3003ce977375bb0e40937168416b5bedf6544eb3795"
+    },
+    {
+      "file": "scripts/waterx-recent-rounds.test.ts",
+      "sha256": "ab274e31be4b30d31b3342843392bfbd0f497a8dcd4385ae9af0b665503d6821"
     },
     {
       "file": "scripts/waterx-reference-confirmations.test.ts",
@@ -751,7 +903,7 @@
     },
     {
       "file": "scripts/waterx-source.test.ts",
-      "sha256": "d9e0d57a6d7db8def72007d557867d5c2d7f99bbab29fdad005f1a6da6dc800a"
+      "sha256": "aa18220f255793bf0d2ec9d7f71c184be865e3e7fd2e9bb9b9dabeb6a8c2f9f1"
     },
     {
       "file": "scripts/waterx-ui.test.ts",
@@ -782,12 +934,16 @@
       "sha256": "ef1b1baa8248c638840cbc07657a75d540b14ae4c2daa3aaf4c4687985c99281"
     },
     {
+      "file": "server/agent/live-readiness.ts",
+      "sha256": "a4d44462291c11d25e5c0804eccbef934c8f29fce00af2a5040fc6aad63b06f1"
+    },
+    {
       "file": "server/agent/order-adapter.ts",
       "sha256": "2bfebc4d1559ff2d67108baafbb1bfd4fd0c549230a4451f705d360b09a47061"
     },
     {
       "file": "server/agent/protocol.ts",
-      "sha256": "936b29fa70cbe19b8d3f45a6b4d834c678e11736ec5fc67d5166bf24fa9f271f"
+      "sha256": "eafa22e85bb5d655db4b008476ce1d6c58e95eb52f64b1b591b05ff506aa607e"
     },
     {
       "file": "server/agent/risk.ts",
@@ -795,7 +951,7 @@
     },
     {
       "file": "server/agent/routes.ts",
-      "sha256": "efc69d750e8a12c162cd89129a75801661f0075ba0813a990dfdb34ebdface48"
+      "sha256": "5cac3944617fe4caeb539653de626c853a282e5b813dce15c86d3b04aff86dbe"
     },
     {
       "file": "server/agent/store.ts",
@@ -871,11 +1027,11 @@
     },
     {
       "file": "server/index.ts",
-      "sha256": "79897b8a715e47bbf83d9c0b8f34ffb2e73396647ea1641020e251705a66d161"
+      "sha256": "456c64fa5653d59473154010295ce011cfb226eca4df45465c4dea30e1f59acb"
     },
     {
       "file": "server/routes.ts",
-      "sha256": "2765cc2ecca58ff815c0412f676d9293276eda611dff55dc591cf23902b4f2e4"
+      "sha256": "2ab05222a3242f138fbde53d9f90b41a3c6fa311663517fbc630956acf30048b"
     },
     {
       "file": "server/static.ts",
@@ -887,7 +1043,7 @@
     },
     {
       "file": "server/waterx/advisory.ts",
-      "sha256": "f62e54dc5c4255c987efc6766c630d6f4cc7933700075121b26003de5b6d35b1"
+      "sha256": "c01d764ddd0254c1f94832157f60e29c5a81eb32f04c23c24a2129d0c5a46e13"
     },
     {
       "file": "server/waterx/background-queue.ts",
@@ -950,12 +1106,20 @@
       "sha256": "de8b1147886c0c5817854e8a4c55b36afd584be64f161ea6e301224167077665"
     },
     {
+      "file": "server/waterx/collection-cadence.ts",
+      "sha256": "5843d4072428cbc3f1725a4de6f60d9d87540500c6cf6f329f359e7ee0041e3c"
+    },
+    {
       "file": "server/waterx/coverage.ts",
       "sha256": "3cd938cb6b5325bdc21bb459a796b6fde768defd0257952299a9d8e62cb93c71"
     },
     {
       "file": "server/waterx/daily-audit.ts",
       "sha256": "8edb69cd8d00372d3d7a5db4dd5b5b8f524bef6cc31c804fa5f69e1aa0007efd"
+    },
+    {
+      "file": "server/waterx/decision-authority.ts",
+      "sha256": "dc3589ffd7a16b833ff41a10dc4eaf7c11756138a0be2bb2268a997ca531e40d"
     },
     {
       "file": "server/waterx/diagnostics.ts",
@@ -971,7 +1135,7 @@
     },
     {
       "file": "server/waterx/early-horizons.ts",
-      "sha256": "acb9e2f3480aad694d77ffc4c613e1e008b5f7954041ab9d218caaa12971c475"
+      "sha256": "95aaddf116be7c3bf997ecc0deaef5d643862292ebc917679e11c6252635ca23"
     },
     {
       "file": "server/waterx/early-model-comparison.ts",
@@ -982,16 +1146,48 @@
       "sha256": "886af7b02912dc4a4da2004d33a5a34fb119024086bf80696fa0c191aa49c773"
     },
     {
+      "file": "server/waterx/early-policy.ts",
+      "sha256": "48ec49146e84c3668a197694def81fc012a85a2cb6801d86f61d7c7268819dc0"
+    },
+    {
       "file": "server/waterx/early-shadow-runtime.ts",
       "sha256": "85d6c9198b354a9e85988e56d5270c4fc4b235fa2d61d3ef888a7c2ab2614a93"
     },
     {
       "file": "server/waterx/early-stopping.ts",
-      "sha256": "9913e4c9e4d91a1365ff0c1b8ec7679dd1b9b0b247e596104913b01418830cf1"
+      "sha256": "6e3a1ff9d4488d0981a7feeafeb64bff9e34ea8a4d9c0653969e4c7e36b942be"
     },
     {
       "file": "server/waterx/early-training.ts",
-      "sha256": "f63a117d1190f761f408f56a5ae3e2007f4a7f2d848ee9a37859567a00acebcd"
+      "sha256": "b533066d02480f40e93029f552e2389a5687f8a21ee810aa9efbe11523748cf6"
+    },
+    {
+      "file": "server/waterx/event-lock-learning.ts",
+      "sha256": "a8a878241c95d54db1d1105b6a75c24efd2e7ab5d04d238dd73d82ab80174bb4"
+    },
+    {
+      "file": "server/waterx/event-lock-report.ts",
+      "sha256": "8a4fa8597f0d64a209a2222c3d0edf12cc8f299d84efede214b87aa9c0925eca"
+    },
+    {
+      "file": "server/waterx/event-lock-runtime.ts",
+      "sha256": "1bf37efb6b8e0945f94a193c23eb863d6cfc806c0f54a029ebf0e53a8c8cf2a8"
+    },
+    {
+      "file": "server/waterx/event-lock-store.ts",
+      "sha256": "468aeee698affef5f4675a1999a10a4ab734540238a4dbd85afdead2e847c14e"
+    },
+    {
+      "file": "server/waterx/event-report-metrics.ts",
+      "sha256": "2383507fe3607a43088949addd27f8f3bdbb939d2c5c11b8f28cef64fd98b9d7"
+    },
+    {
+      "file": "server/waterx/event-stability-experiment.ts",
+      "sha256": "b730d7c5afc598192de6e31ee65a9b86a0742528679369662ceeccf24ebdc487"
+    },
+    {
+      "file": "server/waterx/event-value-evidence.ts",
+      "sha256": "413240332f4e6ffa45d440a62a4db2146a8f2b8fa75f4c03df59e3d8d874af70"
     },
     {
       "file": "server/waterx/final-events.ts",
@@ -999,7 +1195,11 @@
     },
     {
       "file": "server/waterx/gate-history.ts",
-      "sha256": "371dcc9cb51d52d7ed7a54e016c7879814dcd1b0e9a852ba697893708020ba1e"
+      "sha256": "6e0b0d80633cb652810d19150dd9023fd907f25e4167b316a743b9067f89d2cf"
+    },
+    {
+      "file": "server/waterx/gate-research-queue.ts",
+      "sha256": "d5cf289201b9fc47167beea70ceeec300db65918d366c27ef0f2ecb4ece4668b"
     },
     {
       "file": "server/waterx/latency.ts",
@@ -1007,7 +1207,11 @@
     },
     {
       "file": "server/waterx/learning.ts",
-      "sha256": "4d82bd399d670724f133b818eefbd2c03b4bc244cade99b516ebaa21d1f983bc"
+      "sha256": "9241ed305ebe7a74307e960b8f7fc085a2e86af188f9e87d22ac4ea5b7ebcc5f"
+    },
+    {
+      "file": "server/waterx/live-observation.ts",
+      "sha256": "f4d0e3e0f13f1feadab0352d3fde337b29aa7c18a5b9d94d16f94aae6957325a"
     },
     {
       "file": "server/waterx/lock-maintenance.ts",
@@ -1035,11 +1239,15 @@
     },
     {
       "file": "server/waterx/pooled-early-training.ts",
-      "sha256": "0088dbab50d2eaab1671deb138e48c93741a22fad61ab766c20807dab08ed981"
+      "sha256": "3a6c1948129655a81b08f9ecd4d32bc8ba40633ff5115cf57b495e68b13fda5a"
+    },
+    {
+      "file": "server/waterx/recent-rounds.ts",
+      "sha256": "5e81f3fff2bfe4b47f9f9f931b682c5dc9f824e3c00251f6dbd655989caafe47"
     },
     {
       "file": "server/waterx/refresh-health.ts",
-      "sha256": "6174c878b5efb7588f74f083521a24b27c262c947e5e244955fac64de7e8ac32"
+      "sha256": "f66c0ab7209f0115daefe22836396e21cc6a85a5a60ffbd09ef2243a5d18d736"
     },
     {
       "file": "server/waterx/research-audit.ts",
@@ -1079,7 +1287,7 @@
     },
     {
       "file": "server/waterx/research-store.ts",
-      "sha256": "b6da4727c90135987f01b46e2156a7bb8f35bad6d0b12bf38c242ee0fe56270e"
+      "sha256": "0e6cd6f494f2292d98e955d374777e127f200e769ee817c3f7219d9de888c475"
     },
     {
       "file": "server/waterx/research-training-model.ts",
@@ -1091,15 +1299,19 @@
     },
     {
       "file": "server/waterx/round-decision.ts",
-      "sha256": "a6e7bbd70d87be2459827a927bc334ac9cd8e214b0c3f21cc26cd0fc65b57747"
+      "sha256": "b7ba95e4f5d24a42c1d70667c07f64eac41ab9c133e6aefcc367699a9e7716a7"
     },
     {
       "file": "server/waterx/service.ts",
-      "sha256": "dd32406a2eea049cc55fcc7ea51208dd5edac8706ede4f4df6a368333198fe4e"
+      "sha256": "b38a9356cd961c244957b4030f17a52cee4f59509bdf8640f5d490c95fc7a903"
+    },
+    {
+      "file": "server/waterx/settlement-reconciler.ts",
+      "sha256": "6cd9d08c9ef0619f6f51097a6a9104e8ad48015b996af0bd678c8915f98bd1ee"
     },
     {
       "file": "server/waterx/source.ts",
-      "sha256": "ca93ce14b504bc0cd182de315acdd316b5d77f274e7db562d1f45bab853c7bca"
+      "sha256": "ef3d0c159cf6609bae7e85f02d8e55a5a1da434a0edfdc03170c9bd451f06e7c"
     },
     {
       "file": "server/waterx/timed-acknowledgement.ts",
@@ -1107,7 +1319,7 @@
     },
     {
       "file": "server/waterx/timed-db.ts",
-      "sha256": "a9a9574a9fd080ad84f0555609b256fccb89cd1a345187d2c6214446985c1b82"
+      "sha256": "48a6ade6b1a69af98ef86d9edd12830a631c34d20df0aa82890ce1cecbb95a96"
     },
     {
       "file": "server/waterx/timed-decision-builder.ts",
@@ -1115,27 +1327,71 @@
     },
     {
       "file": "server/waterx/timed-decision-coordinator.ts",
-      "sha256": "e95c5b1441171883c64f4255b893b88f09601815293308922b95965559b133c5"
+      "sha256": "e403b12f10d788e2f6c40a1865a741b60f0fbd3734d84e9632e0e4228ed5c3df"
     },
     {
       "file": "server/waterx/timed-decision-store.ts",
-      "sha256": "ceb335f2e10879aaf23253eda0d1aba9327f69d830a53301ec5d6b724a83edca"
+      "sha256": "79dce747f1b8244b66bf3c786badfb6f76ff40ddb01cdfde67a133f735131649"
     },
     {
       "file": "server/waterx/timed-history.ts",
-      "sha256": "65263240c6ac4f2950d353cb163a28fc98fbb5e0969d5d33a09bea53cc1e5e6f"
+      "sha256": "3e958c75b57fa2473ad3536e1944f9560897fa1189a49070838a5a8b707a2836"
+    },
+    {
+      "file": "server/waterx/two-stage-comparison.ts",
+      "sha256": "07963a23967d65c75b75aedc40c06b46cab9f004b208809fd6086f80e970671b"
+    },
+    {
+      "file": "server/waterx/two-stage-history.ts",
+      "sha256": "c23b5645097a23a7ea2e30b552d82233e5e8ef9decaa37b44bc9082dfc19498b"
+    },
+    {
+      "file": "server/waterx/two-stage-learning.ts",
+      "sha256": "706aae3c160b93357ceb80d7d07bfb4c7b74dab05cff7c7cc925320178adc7a1"
+    },
+    {
+      "file": "server/waterx/two-stage-policy.ts",
+      "sha256": "6fb0f32149e3cbdf2f59f76445f0a679eb08c8ad7f30506a683e3185d05c72f5"
+    },
+    {
+      "file": "server/waterx/two-stage-recovery.ts",
+      "sha256": "23822dc0bb2f75585cd45aa751c701a01ec5b579e3012721385ab07d29ce6367"
+    },
+    {
+      "file": "server/waterx/two-stage-registry.ts",
+      "sha256": "7307e9add7a92eacf952d0e96292784c8e02a4ccf7e4e76218ce1ca0b7ec215a"
+    },
+    {
+      "file": "server/waterx/two-stage-runtime.ts",
+      "sha256": "e4a38bf088c5ba11b5c9a6966f0644d83866c55d4be81d6017afb761043f7f41"
+    },
+    {
+      "file": "server/waterx/two-stage-schedule.ts",
+      "sha256": "3680bfdd86fe52809c86374bd6f222ad5d3f3e7c997b38e8163924a878dbba58"
+    },
+    {
+      "file": "server/waterx/two-stage-store.ts",
+      "sha256": "ce9f62b719abacc6ac488e244960fa12ef1009d2d52564cc0c8b1669391ec10d"
+    },
+    {
+      "file": "server/waterx/two-stage-support.ts",
+      "sha256": "92d6ed87448d96338bffd8d6f056a117217f2adfafb4ea3418675ae4195de458"
     },
     {
       "file": "server/waterx/types.ts",
-      "sha256": "bd00e73591396dcca9ce924d2d8f65444ca3853e7a79fafb220da4e5f4a2c5ea"
+      "sha256": "b6e6e30b24885a3942d09138f8d226193dfea66ab8a9eeda721ef1a224edb398"
     },
     {
       "file": "server/waterx/worker.ts",
-      "sha256": "7723cfdbe4f1c1b4347e9a6f16a8e8b53394121a3b79aa9771fb9e0b9e4fde33"
+      "sha256": "58e11f2f728528934d05384198644fd697c2c9782b74256e355824fe9e0a7a72"
+    },
+    {
+      "file": "shared/agent-onboarding.ts",
+      "sha256": "5d4ae84d95cb87e27bb90127a2ecb58a4f47c7169e93f2eb2ce6d0ab3d6ddf17"
     },
     {
       "file": "shared/agent-policy.ts",
-      "sha256": "63d284ff25382aef3948f21ac056c43f230897991df539d847e7ba21c1a0350e"
+      "sha256": "27d5f7fef41d54e9908139b2d7aa15b2b71bb488e14792c766783af46f93919f"
     },
     {
       "file": "shared/bluewater-display.ts",
@@ -1158,6 +1414,14 @@
       "sha256": "d2e3b2ea96137f68a0dd56272f56aebf7518dc12b1e6203515ca73e354cc4ba9"
     },
     {
+      "file": "shared/event-lock.ts",
+      "sha256": "dc20fff3df5f9ec4d71a998b901ef299959138d541cb31c30e4dfd2d5b0c9ace"
+    },
+    {
+      "file": "shared/lock-economics.ts",
+      "sha256": "61af877ab686c4e9b9247abea917aff27202a014e56be91cbc98f97b73a8b41e"
+    },
+    {
       "file": "shared/lock-readiness.ts",
       "sha256": "b08e9c644fbc873f940892935dff1a386554623157724b94418b3827ce87ebe4"
     },
@@ -1166,8 +1430,20 @@
       "sha256": "b3cfd5a7d18e6d4ff0bb70dfa16b005f23fbf44b878ca0bb2104d128e07ef35f"
     },
     {
+      "file": "shared/price-area.ts",
+      "sha256": "8c23890b15b0ad5b8be8e858616af73792474631a86b0e8044e559f39ef3b737"
+    },
+    {
+      "file": "shared/provisional-lean.ts",
+      "sha256": "cbb567d558671a1c1023faf6ac3deb65acf2b1d086e927afd2f6047282c809fb"
+    },
+    {
       "file": "shared/round-decision.ts",
-      "sha256": "16d254713f5427111d3664f870b97ec575be7205997ce00ae951ea46505ba8af"
+      "sha256": "60fdd051adad9df775186eccec11dbf5bdf1cce7cc7fbcfd29bd271d5d3cfc56"
+    },
+    {
+      "file": "shared/stage-capture-status.ts",
+      "sha256": "165ad3e6314b0783ca4302eee338e9f1059dd11289e1d3a4981115deb29aeaec"
     },
     {
       "file": "shared/timed-completion.ts",
@@ -1178,8 +1454,20 @@
       "sha256": "4babfd11c4c3d977ef33d4ce64e6f688799f9caeb6b815635ddf44acb0c72dce"
     },
     {
+      "file": "shared/two-stage.ts",
+      "sha256": "724d6bcda5b436ed3de9e56b06d90103151e49cb7d15f1ee64e6ef7e6a6a5109"
+    },
+    {
+      "file": "shared/waterx-data-health.ts",
+      "sha256": "0d414350618ded08f9b0dcdbf1025c18299b8eecba86faab96e9498d6ee8a9b1"
+    },
+    {
       "file": "shared/waterx-research.ts",
       "sha256": "f546fada82ca1481fbaafc6a51b26b5caa83adbcd6b8927102046ff6f84c0b08"
+    },
+    {
+      "file": "shared/waterx-round-identity.ts",
+      "sha256": "13a542304efbdcdcc485e5a8f88e32358e1e40f5f22ed5ebe697c05213037fee"
     },
     {
       "file": "shared/waterx-value-policy.ts",

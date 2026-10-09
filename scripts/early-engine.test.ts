@@ -68,13 +68,15 @@ test("sequential policy counts one decision per round, uses calibration to selec
     expiryMs:now-(i<70?3:1)*day+i*300000+300000,horizon,
     probability:i%2?.2:.8,outcome:i%2?"DOWN" as const:"UP" as const,
     labelAvailableAtMs:now-(i<70?3:1)*day+i*300000+301000,snapshotDigest:"fixture",
+     features:{sameSideMs:horizon===30?0:30000,sourceAgeMs:0,validObservationCount:4,
+       recentReversals:0,probabilityRange:0,missingProbabilities:false},
   }))).flat();
   const report=evaluateEarlyStopping(rows,5,forecasts,now);
   assert.equal(report.status,"EVALUATED");
   assert.equal(report.promotion,"RETAIN_BASELINE");
   if("test"in report){
     assert.equal(report.test.roundN,70);assert.equal(report.test.decisionN,70);
-    assert.equal(report.test.meanElapsedSeconds,30);
+    assert.equal(report.test.meanElapsedSeconds,60);
     assert.equal(report.test.quoteAdjustedEconomics,null);
   }
 });

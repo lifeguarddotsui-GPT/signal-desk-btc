@@ -10,6 +10,7 @@ const MAX_RESPONSE_BYTES = 1_000_000;
 const cache = new Map<string, { expiresAt: number; detail: WaterxDetail }>();
 const inflight = new Map<string, Promise<WaterxDetail>>();
 const requestMetadata = new WeakMap<WaterxDetail, { receivedAt: string; sourceTimestamp: string | null }>();
+const embargoes=new Map<WaterxInterval,{untilMs:number;status:number}>();
 
 export class WaterxProviderError extends Error {
   constructor(
@@ -22,6 +23,11 @@ export class WaterxProviderError extends Error {
     super(message);
     this.name = "WaterxProviderError";
   }
+}
+export function parseWaterxRetryAfter(value:string|null,now=Date.now()):number|null{
+  const at=value&&/^\d+(?:\.\d+)?$/.test(value)?now+Number(value)*1000:
+    value?Date.parse(value):NaN;
+  return Number.isFinite(at)?Math.max(0,at-now):null;
 }
 
 export function waterxSlug(interval: WaterxInterval): string {
@@ -181,8 +187,16 @@ export function parseWaterxResponse(payload: unknown, interval: WaterxInterval):
   const neighbors = object(detail.neighbors, "neighbors");
   if (!Array.isArray(neighbors.past) || !Array.isArray(neighbors.upcoming))
     throw new WaterxProviderError("Malformed WaterX neighbors");
+  const display=market.display&&typeof market.display==="object"?
+    market.display as Record<string,unknown>:null;
+  const displayOutcomes=display?.recentOutcomes;
+  // Website badges are unkeyed. Preserve them as diagnostics, never attach one
+  // to a round by array position (the UI even appends an UNKNOWN placeholder).
+  const recentOutcomes=Array.isArray(displayOutcomes)&&displayOutcomes.every(v=>
+    typeof v==="string"&&/^(up|down|unknown)$/i.test(v))?
+    displayOutcomes.slice(-10).map(v=>v.toUpperCase() as "UP"|"DOWN"|"UNKNOWN"):undefined;
   return {
-    market: { slug: expectedSlug, marketId },
+    market: { slug: expectedSlug, marketId,...(recentOutcomes?{recentOutcomes}:{}) },
     round: parseRound(detail.round, expectedSlug, marketId),
     neighbors: { past: neighbors.past, upcoming: neighbors.upcoming },
   };
@@ -212,11 +226,41 @@ function candidateRounds(detail: WaterxDetail, interval: WaterxInterval): Waterx
   });
 }
 
+/** Recent Rounds may include the live round and sparse summaries. Never map the
+ * unkeyed display.recentOutcomes array to IDs by position. */
+export function recentWaterxRounds(detail:WaterxDetail,interval:WaterxInterval,nowMs=Date.now()){
+  const rounds:WaterxRound[]=[],rejected:string[]=[],seen=new Map<string,string>();
+  if(detail.market.slug!==waterxSlug(interval))throw new WaterxProviderError("Recent Rounds interval mismatch");
+  for(const neighbor of [detail.round,...detail.neighbors.past].slice(0,21)){
+    try{
+      const raw=object(neighbor,"recent round");
+      const r=parseRound(raw.round??raw,detail.market.slug,detail.market.marketId);
+      if(r.marketId!==detail.market.marketId)throw new WaterxProviderError("Recent Rounds market mismatch");
+      if(r.endsAt*1000>nowMs)continue;
+      const identity=`${r.startsAt}:${r.endsAt}`;
+      if(seen.has(r.id)){
+        if(seen.get(r.id)!==identity){
+          for(let i=rounds.length-1;i>=0;i--)if(rounds[i].id===r.id)rounds.splice(i,1);
+          throw new WaterxProviderError("Recent Rounds conflicting identity");
+        }
+        continue;
+      }
+      seen.set(r.id,identity);rounds.push(r);
+    }catch(error){rejected.push((error as Error).message);}
+  }
+  return {rounds,rejected};
+}
+
 async function readDetail(
   interval: WaterxInterval, epoch: number | undefined, signal: AbortSignal,
   onRequestReceived?: (at: string) => void,
 ): Promise<WaterxDetail> {
   const slug = waterxSlug(interval);
+  const embargo=embargoes.get(interval);
+  if(embargo&&embargo.untilMs>Date.now())
+    throw new WaterxProviderError("WaterX provider Retry-After embargo remains active",
+      embargo.status,embargo.untilMs-Date.now());
+  embargoes.delete(interval);
   const url = new URL(`${API}/${slug}`);
   url.searchParams.set("locale", "en");
   if (epoch !== undefined) url.searchParams.set("epoch", String(epoch));
@@ -238,11 +282,9 @@ async function readDetail(
   }
   if (!response.ok) {
     const retryAfter = response.headers.get("retry-after");
-    const retryAt = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter)
-      ? Date.now() + Number(retryAfter) * 1000
-      : retryAfter ? Date.parse(retryAfter) : NaN;
-    const retryAfterMs = Number.isFinite(retryAt)
-      ? Math.max(0, Math.min(5 * 60_000, retryAt - Date.now())) : null;
+    const retryAfterMs = parseWaterxRetryAfter(retryAfter);
+    if(retryAfterMs!==null&&retryAfterMs>0)
+      embargoes.set(interval,{untilMs:Date.now()+retryAfterMs,status:response.status});
     throw new WaterxProviderError(
       `WaterX HTTP ${response.status}${response.status === 429 ? " (rate limited)" : ""}`,
       response.status, retryAfterMs);

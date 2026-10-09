@@ -62,7 +62,7 @@ test("one valid quote stays available without a reference; missing probabilities
   assert.equal(result.sides.up.quote.grossReceiptIfWinIndicative, 20);
   assert.equal(result.sides.up.marketProbability, null);
   assert.equal(result.sides.down.quote.grossReceiptIfWinIndicative, null);
-  assert.match(result.sides.down.reason, /price|quote/i);
+  assert.match(result.sides.down.reason, /probabilities missing/i);
 });
 
 test("expired, stale, mismatched, out-of-window and locked inputs immediately withhold both quotes", () => {
@@ -80,7 +80,8 @@ test("expired, stale, mismatched, out-of-window and locked inputs immediately wi
   assert.equal(wrongSource.sides.up.quote.priceCents, null);
 
   const oldQuote = buildWaterxAdvisory({
-    ...fresh, odds: { ...fresh.odds!, asOf: new Date(now - 25_000).toISOString() },
+    ...fresh, odds: { ...fresh.odds!, asOf: new Date(now - 25_000).toISOString(),
+      priceAsOf: new Date(now-25_000).toISOString() },
   }, 5, 5, now);
   assert.equal(oldQuote.state, "OBSERVE");
   assert.ok(oldQuote.reasonCodes.includes("QUOTE_EXPIRED_OR_MISMATCHED"));

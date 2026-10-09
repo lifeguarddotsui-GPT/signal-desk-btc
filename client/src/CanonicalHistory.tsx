@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import "./beta-interface.css";
 import TimedDecisionHistory from "./TimedDecisionHistory";
+import TimedStrategyHistory from "./TimedStrategyHistory";
+import TwoStageHistory from "./TwoStageHistory";
 
 type IntervalFilter = "all" | "5" | "15";
 type WindowFilter = "lifetime" | "100" | "50" | "20" | "24h" | "7d";
@@ -77,7 +79,7 @@ const metric = (value: number | null, digits = 1) =>
 const readable = (value: string | null | undefined) => value?.trim() || "Not recorded";
 const shortRound = (id: string) => id.length > 34 ? `${id.slice(0, 18)}…${id.slice(-10)}` : id;
 
-function CanonicalHistory() {
+export function LegacyCanonicalHistory() {
   const [interval, setInterval] = useState<IntervalFilter>("all");
   const [windowFilter, setWindowFilter] = useState<WindowFilter>("lifetime");
   const [source, setSource] = useState<SourceFilter>("baseline");
@@ -150,7 +152,12 @@ function CanonicalHistory() {
       </div>
     </section>
 
-    <TimedDecisionHistory />
+    <TimedStrategyHistory interval={interval === "15" ? 15 : 5} />
+    {interval === "all" && <TimedStrategyHistory interval={15} />}
+    <details className="history-old-benchmarks">
+      <summary>Full gate audit and historical strategy filters</summary>
+      <TimedDecisionHistory />
+    </details>
 
     <p className="history-source-note">
       {baseline
@@ -248,4 +255,23 @@ function CanonicalHistory() {
   </main>;
 }
 
-export default CanonicalHistory;
+export default function CanonicalHistory(){
+  const [archiveOpen,setArchiveOpen]=useState(false);
+  const [priorArchiveOpen,setPriorArchiveOpen]=useState(false);
+  return <main className="canonical-history">
+    <header className="history-heading"><div>
+      <div className="history-eyebrow">BLUEWATERAI / IMMUTABLE RESEARCH RECORD</div>
+      <h1>Round history</h1>
+      <p>Compare frozen choices with verified outcomes. Entry estimates are not fills or trading profit.</p>
+    </div></header>
+    <TwoStageHistory/>
+    <details className="history-old-benchmarks" onToggle={event=>setPriorArchiveOpen(event.currentTarget.open)}>
+      <summary>Prior-strategy archive · qualification benchmark and earlier strategies</summary>
+      {priorArchiveOpen&&<TimedDecisionHistory/>}
+    </details>
+    <details className="history-old-benchmarks" onToggle={event=>setArchiveOpen(event.currentTarget.open)}>
+      <summary>Legacy checkpoint archive · separate cohorts</summary>
+      {archiveOpen&&<LegacyCanonicalHistory/>}
+    </details>
+  </main>;
+}

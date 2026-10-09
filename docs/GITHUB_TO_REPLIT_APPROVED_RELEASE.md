@@ -19,6 +19,22 @@ Production currently reports build source commit `09c0f4c74d9fac5da03946cb1b1a21
 7. Initial publishing should keep `WATERX_V4_SHADOW_ENABLED` **unset or false**. Confirm V3 locks, chart, history, and learning continue normally. A later separate owner-approved shadow toggle can collect prospective V4 evidence.
 8. Compare both intervals' V3/V4 prospective locked/abstained/missing coverage, latency, and verified correct/incorrect. V4 is not a proven replacement for V3 before a monitored trial. Mainnet trading stays off.
 
+## Approved-SHA source sync helper (optional, after one-time Git setup)
+
+For future low-cost source updates, the existing Replit shell can run the
+reviewed, fail-closed helper **only after you authorize the SHA**:
+
+```bash
+bash scripts/replit-approved-git-sync.sh FULL_40_CHARACTER_APPROVED_SHA canonical-release-branch
+```
+
+It checks that the Replit origin is the known GitHub repository, that there
+are no uncommitted files, that the branch still points at the approved SHA,
+and that the update is a clean fast-forward. It does not force-reset or
+publish. If the Replit Git history is unrelated to GitHub, it intentionally
+stops and requires a one-time reviewed reconciliation. Never skip that check.
+This helper is **not yet installed in your existing Replit workspace**.
+
 ## GitHub release controls
 
 - GitHub CI on PRs: `npm ci`, `npm run check`, `npm test`, `npm run build`.

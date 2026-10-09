@@ -4,7 +4,7 @@
 
 ## What changes
 
-- `server/waterx/poll-policy.ts`: per-interval WaterX polling is 10s (5m market) and 20s (15m market) outside the decision window. It increases to 3s for 165s/420s before expiration respectively and briefly through rollover. Existing exact lock checkpoint timers still issue their deadline reads independently.
+- `server/waterx/poll-policy.ts`: per-interval WaterX polling is 10s (5m market) and 20s (15m market) outside the decision window. It increases to 3s for 165s/450s before expiration respectively and briefly through rollover. Existing exact lock checkpoint timers still issue their deadline reads independently.
 - `server/btc/chart-sampling.ts`: Coinbase prices continue to reach the live chart and in-memory model features at full WebSocket cadence, but accepted records enter the PostgreSQL comparison-tick writer only once per **5 seconds**. The writer retains its queue, retries, event identity and no-fabrication checks. This does **not** alter WaterX settlement or canonical decision evidence.
 - `server/waterx/research-maintenance.ts`: background reconciliation and history-scoring scans run once per 60s rather than 15s. Per-round settlement capture is separate; history may therefore refresh up to ~60s later than before. Do not reduce lock checkpoint cadence.
 - No retention/deletion statements, migrations, schema changes, autonomous trading, paid services, or hosting changes.

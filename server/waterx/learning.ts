@@ -1,4 +1,5 @@
 import pg from "pg";
+import {canonicalWaterxRoundKey,sameWaterxRound} from "../../shared/waterx-round-identity";
 import { waterxObservedRoundCoverage } from "./coverage";
 import {
   marketCaptureCoverage,
@@ -19,6 +20,8 @@ export type WaterxRoundInput = {
   source: "WaterX";
 };
 export type WaterxSettlementInput = {
+  startMs?:number;
+  expiryMs?:number;
   intervalMinutes: WaterxInterval;
   roundId: string;
   anchorPrice: number | null;
@@ -314,6 +317,7 @@ export async function recordWaterxRound(
       input.startMs % 1000 !== 0 || input.expiryMs % 1000 !== 0 ||
       input.expiryMs - input.startMs !== input.intervalMinutes * 60_000)
     throw new Error("WaterX round timestamps are invalid");
+  canonicalWaterxRoundKey(input);
   finiteOrNull("anchorPrice", input.anchorPrice);
   finiteOrNull("probabilityUp", input.probabilityUp);
   if (input.anchorPrice !== null && input.anchorPrice <= 0)
@@ -387,13 +391,22 @@ export function waterxSettlementRejection(input: WaterxSettlementInput, round: {
   round_id?: string;
   initial_anchor_price?: string | number | null;
   initial_anchor_confirmed?: boolean | null;
+  start_ms?: number | string;
 }): string | null {
   const expiryMs = Number(round.expiry_ms);
+  if(input.startMs!==undefined&&input.startMs!==Number(round.start_ms)||
+    input.expiryMs!==undefined&&input.expiryMs!==expiryMs)
+    return "Settlement opening or expiration timestamp does not match the exact WaterX round identity.";
   const storedAnchor = round.anchor_price === null ? null : Number(round.anchor_price);
   if (round.interval_minutes !== undefined && round.interval_minutes !== input.intervalMinutes)
     return "Settlement interval does not match the WaterX round identity.";
   if (round.round_id !== undefined && round.round_id !== input.roundId)
     return "Settlement round ID does not match the WaterX round identity.";
+  if(round.start_ms!==undefined&&!sameWaterxRound(
+    {intervalMinutes:input.intervalMinutes,roundId:input.roundId,startMs:Number(round.start_ms),expiryMs},
+    {intervalMinutes:input.intervalMinutes,roundId:input.roundId,
+      startMs:expiryMs-input.intervalMinutes*60_000,expiryMs}))
+    return "Settlement boundaries do not match the canonical WaterX round identity.";
   const observedAtMs = Date.parse(input.observedAt);
   if (!Number.isFinite(observedAtMs))
     return "WaterX settlement observedAt is not a valid timestamp.";
@@ -460,6 +473,11 @@ export async function recordWaterxSettlement(
     if (!rows[0]) {
       if (client) await db.query("COMMIT");
       return waterxSettlementResult(false, false);
+    }
+    if(input.startMs!==undefined&&input.startMs!==Number(rows[0].start_ms)||
+      input.expiryMs!==undefined&&input.expiryMs!==Number(rows[0].expiry_ms)){
+      if(client)await db.query("COMMIT");
+      return false;
     }
     const evidence = {
       source: "WaterX",
@@ -634,20 +652,31 @@ export async function listPendingWaterxSettlements(
     // research choice for an entire archive-retry cycle. This is optional
     // until the reviewed additive schema is installed; legacy reads still work.
     const schema = await pool.query(
-      "SELECT to_regclass('waterx_research_choices')::text AS research",
+      `SELECT to_regclass('waterx_research_choices')::text AS research,
+        to_regclass('waterx_two_stage_locks')::text AS stages,
+        EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('waterx_learning_rounds')
+          AND attname='source_proof' AND NOT attisdropped) AS retry_proof`,
     );
-    const researchPriority = schema.rows[0]?.research
-      ? `EXISTS (SELECT 1 FROM waterx_research_choices c
+    const priorities:string[]=[];
+    if(schema.rows[0]?.research)priorities.push(`EXISTS (SELECT 1 FROM waterx_research_choices c
           WHERE c.interval_minutes=waterx_learning_rounds.interval_minutes
             AND c.round_id=waterx_learning_rounds.round_id AND c.state='FROZEN'
             AND c.start_ms=waterx_learning_rounds.start_ms
-            AND c.expiry_ms=waterx_learning_rounds.expiry_ms) DESC,`
-      : "";
+             AND c.expiry_ms=waterx_learning_rounds.expiry_ms)`);
+    if(schema.rows[0]?.stages)priorities.push(`EXISTS (SELECT 1 FROM waterx_two_stage_locks s
+      WHERE s.interval_minutes=waterx_learning_rounds.interval_minutes
+        AND s.round_id=waterx_learning_rounds.round_id
+        AND (s.decision->>'startMs')::bigint=waterx_learning_rounds.start_ms
+        AND (s.decision->>'expiryMs')::bigint=waterx_learning_rounds.expiry_ms)`);
+    const researchPriority=priorities.length?`(${priorities.join(" OR ")}) DESC,`:"";
+    const dueFilter=schema.rows[0]?.retry_proof?
+      "AND coalesce((source_proof#>>'{settlementRecovery,nextAttemptAtMs}')::bigint,0)<=$2":"";
     const { rows } = await pool.query(
       `SELECT round_id,start_ms,expiry_ms,label_status,outcome,last_settlement_attempt_at
          FROM waterx_learning_rounds
         WHERE interval_minutes=$1 AND expiry_ms < $2
           AND label_status IN ('unresolved','withheld') AND outcome IS NULL
+           ${dueFilter}
           AND (last_settlement_attempt_at IS NULL OR
                last_settlement_attempt_at <= to_timestamp($2::double precision/1000)-interval '30 seconds')
          ORDER BY ${researchPriority} last_settlement_attempt_at ASC NULLS FIRST,expiry_ms ASC,round_id ASC
@@ -686,10 +715,16 @@ export async function markWaterxSettlementAttempt(
   try {
     const { rows } = await pool.query(
       `UPDATE waterx_learning_rounds
-          SET last_settlement_attempt_at=clock_timestamp()
+          SET last_settlement_attempt_at=clock_timestamp(),
+              source_proof=source_proof||jsonb_build_object('settlementRecovery',
+                coalesce(source_proof->'settlementRecovery','{}'::jsonb)||jsonb_build_object(
+                  'attempts',coalesce((source_proof#>>'{settlementRecovery,attempts}')::int,0)+1,
+                  'nextAttemptAtMs',floor(extract(epoch FROM clock_timestamp())*1000)+30000))
         WHERE interval_minutes=$1 AND round_id=$2
           AND expiry_ms < floor(extract(epoch FROM clock_timestamp())*1000)
           AND label_status IN ('unresolved','withheld') AND outcome IS NULL
+           AND coalesce((source_proof#>>'{settlementRecovery,nextAttemptAtMs}')::bigint,0)
+             <=floor(extract(epoch FROM clock_timestamp())*1000)
           AND (last_settlement_attempt_at IS NULL OR
                last_settlement_attempt_at <= clock_timestamp()-interval '30 seconds')
         RETURNING round_id`,
@@ -700,6 +735,21 @@ export async function markWaterxSettlementAttempt(
     if (!isMissingSchema(error)) throw error;
     return false;
   }
+}
+
+/** Retry delay and failure survive host restarts; the expiring claim remains
+ * atomic. No failed attempt can overwrite an accepted or disputed label. */
+export async function finishWaterxSettlementAttempt(interval:WaterxInterval,roundId:string,
+  reason:string|null,retryAfterMs=0,executor:WaterxQueryable=pool){
+  await executor.query(`UPDATE waterx_learning_rounds SET source_proof=source_proof||
+    jsonb_build_object('settlementRecovery',coalesce(source_proof->'settlementRecovery','{}'::jsonb)||
+      jsonb_build_object('lastError',$3::text,'nextAttemptAtMs',
+        floor(extract(epoch FROM clock_timestamp())*1000)+greatest($4::double precision,
+          least(3600000,30000*power(2,least(7,greatest(0,
+            coalesce((source_proof#>>'{settlementRecovery,attempts}')::int,1)-1)))))))
+    WHERE interval_minutes=$1 AND round_id=$2 AND outcome IS NULL`,
+    [interval,roundId,reason?.slice(0,180)??null,
+      Number.isFinite(retryAfterMs)?Math.max(0,retryAfterMs):0]);
 }
 
 export type WaterxEvaluationRow = {

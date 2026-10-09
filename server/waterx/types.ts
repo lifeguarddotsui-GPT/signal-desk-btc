@@ -25,7 +25,7 @@ export type WaterxRound = {
 };
 
 export type WaterxDetail = {
-  market: { slug: string; marketId: string };
+  market: { slug: string; marketId: string;recentOutcomes?:("UP"|"DOWN"|"UNKNOWN")[] };
   round: WaterxRound;
   neighbors: { past: unknown[]; upcoming: unknown[] };
 };

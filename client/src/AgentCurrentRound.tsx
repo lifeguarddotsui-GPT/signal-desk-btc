@@ -5,8 +5,9 @@ import type { LockReadinessReport } from "../../shared/lock-readiness";
 import type { ResearchReport } from "../../shared/waterx-research";
 import { currentBaselineChoice, currentChampionForecast, currentLockReadiness, currentResearchRound } from "./agent-round-contract";
 import { ManualOpportunity } from "./ManualOpportunity";
-import { getAtomicDecisionView, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
+import { projectExactRoundDecision, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
 import { useLiveSnapshot } from "./useLiveSnapshot";
+import { EventChallengerPanel } from "./EventChallengerPanel";
 
 type Interval = 5 | 15;
 type Props = { agentStatus?: string | null };
@@ -83,7 +84,7 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
   const timedNow = Number.isFinite(timedServerTime) && timedLive.atomicUpdated
     ? projectServerClock(timedServerTime, timedLive.atomicUpdated, now) : now;
   const timedRound = timedEnvelope?.round ?? null;
-  const timedView = getAtomicDecisionView(timedEnvelope, interval, timedRound, timedNow);
+  const timedView = projectExactRoundDecision(timedEnvelope, interval, timedRound, timedNow);
   const choice = round ? currentBaselineChoice(reports.research, interval, round, now) : null;
   const forecast = round ? currentChampionForecast(reports.bluewater, interval, round, now) : null;
   const readiness = round ? currentLockReadiness(reports.readiness, interval, round, now) : null;
@@ -101,11 +102,8 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
   return <section className="agent-current-round" aria-labelledby="agent-round-title">
     <div className="agent-current-head">
       <div><span className="agent-kicker">LIVE CONTEXT · RESEARCH IS NOT AUTHORITY</span><h2 id="agent-round-title">Current round</h2><p>Exact active-round evidence only. Latest historical choices never substitute for the current round.</p></div>
-      <div className="agent-round-controls" role="group" aria-label="Research interval">
-        {([5, 15] as const).map(value => <button key={value} type="button" aria-pressed={interval === value} className={interval === value ? "selected" : ""} onClick={() => setInterval(value)}>{value}m</button>)}
-      </div>
     </div>
-    <ManualOpportunity view={timedView} now={timedNow} browserReceivedAtMs={timedLive.atomicUpdated}
+    <ManualOpportunity view={timedView} now={timedNow} interval={interval} round={timedRound} onIntervalChange={setInterval}
       onRetry={timedLive.reload} refresh={{ pending: timedLive.loading, error: timedLive.error }} />
     <details className="agent-round-identity-audit">
       <summary>Active round identity &amp; snapshot diagnostics</summary>
@@ -119,6 +117,7 @@ export default function AgentCurrentRound({ agentStatus }: Props) {
     <details className="agent-benchmarks">
       <summary>Canonical, champion &amp; readiness benchmarks · separate research references</summary>
       <div className="agent-round-evidence">
+      <EventChallengerPanel projection={timedEnvelope?.decision?.eventChallenger ?? null} round={timedRound} now={timedNow} />
       <article className={`agent-round-evidence-card${choice ? " current" : ""}`}>
         <span className="agent-kicker">IMMUTABLE CANONICAL CHOICE</span>
         <h3>WaterX Market Baseline</h3>

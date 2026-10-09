@@ -16,7 +16,8 @@ export function freezeEarlyHorizon(input:TimedInput,horizon:number,history:Timed
   if(now<scheduledAtMs)throw new Error("Horizon not reached");
   const prior=history.filter(v=>v.receivedAtMs!=null&&v.receivedAtMs<=scheduledAtMs&&v.receivedAtMs>=input.startMs)
     .sort((a,b)=>a.receivedAtMs!-b.receivedAtMs!),latest=prior.at(-1);
-  const rows=prior.filter(v=>validWaterxProbabilityPair(v.probabilityUp,v.probabilityDown)).map(v=>({
+  const interruptedAt=prior.filter(v=>!validWaterxProbabilityPair(v.probabilityUp,v.probabilityDown)).at(-1)?.receivedAtMs??-Infinity;
+  const rows=prior.filter(v=>v.receivedAtMs!>interruptedAt&&validWaterxProbabilityPair(v.probabilityUp,v.probabilityDown)).map(v=>({
     atMs:v.receivedAtMs!,receivedAtMs:v.receivedAtMs!,providerSourceAtMs:null,
     probabilityUp:v.probabilityUp!,probabilityDown:v.probabilityDown!,sourceHealthy:true}));
   const evaluated=evaluateTimedDecision(input,rows,scheduledAtMs);
@@ -26,9 +27,22 @@ export function freezeEarlyHorizon(input:TimedInput,horizon:number,history:Timed
   const reference=latest?.anchorPrice??null,comparison=latest?.features?.comparison as
     {price?:number;source?:string;asOf?:string}|null|undefined;
   const comparisonAt=Date.parse(comparison?.asOf??""),comparisonValid=Number.isFinite(comparisonAt)&&
+     Number(latest?.features?.contextAvailableAtMs??latest?.receivedAtMs??Infinity)<=scheduledAtMs&&
     comparisonAt<=scheduledAtMs&&scheduledAtMs-comparisonAt<=10000&&
     typeof comparison?.price==="number"&&Number.isFinite(comparison.price)&&comparison.price>0;
-  const referenceValid=latest?.anchorConfirmed===true&&typeof reference==="number"&&Number.isFinite(reference)&&reference>0;
+   const contextTimely=Number(latest?.features?.contextAvailableAtMs??latest?.receivedAtMs??Infinity)<=scheduledAtMs;
+   const referenceAvailable=contextTimely&&typeof reference==="number"&&Number.isFinite(reference)&&reference>0;
+   const referenceValid=referenceAvailable&&latest?.anchorConfirmed===true;
+   const independent=prior.flatMap(v=>{
+     const c=v.features?.comparison as {price?:number;asOf?:string}|undefined;
+     const at=Date.parse(c?.asOf??"");
+     return c&&typeof c.price==="number"&&Number.isFinite(c.price)&&c.price>0&&
+       Number.isFinite(at)&&at<=scheduledAtMs&&at>=input.startMs&&
+       Number(v.features?.contextAvailableAtMs??v.receivedAtMs)<=scheduledAtMs?
+       [{price:c.price,atMs:at}]:[];
+   }).filter((v,i,a)=>a.findIndex(x=>x.atMs===v.atMs)===i);
+   const returns=independent.slice(1).map((v,i)=>Math.log(v.price/independent[i].price));
+   const mean=returns.length?returns.reduce((a,b)=>a+b,0)/returns.length:0;
   const snapshot={
     schema:"bluewater-early-horizon-v1",strategyVersion:TIMED_STRATEGY,intervalMinutes:input.intervalMinutes,
     roundId:input.roundId,startMs:input.startMs,expiryMs:input.expiryMs,horizonSeconds:horizon,
@@ -38,21 +52,34 @@ export function freezeEarlyHorizon(input:TimedInput,horizon:number,history:Timed
     probabilityDown:status==="FROZEN"?latest!.probabilityDown:null,
     modelProbabilityUp:null,modelVersion:null,calibrationVersion:null,featureSchemaVersion:"early-past-only-context-v1",
     receivedAtMs:latest?.receivedAtMs??null,providerOddsAtMs:null,
-    reference:{price:reference,quality:referenceValid?"confirmed":"missing-or-provisional"},
-    features:status==="FROZEN"?{
-      marketProbabilityUp:latest!.probabilityUp,
+     provisionalSide:valid&&Number(latest?.features?.contextAvailableAtMs??Infinity)<=scheduledAtMs?
+       latest?.features?.provisionalSide??null:null,leanVersion:latest?.features?.leanVersion??null,
+    reference:{price:referenceAvailable?reference:null,quality:referenceValid?"confirmed":"missing-or-provisional"},
+    gateEvaluation:null as Record<string,unknown>|null,
+    features:!missed?{
+      marketProbabilityUp:valid?latest!.probabilityUp:null,
       probabilityChange:rows.length>1?rows.at(-1)!.probabilityUp-rows[0].probabilityUp:null,
       sameSideMs:evaluated.components?.sameSideMs??null,
        recentReversals:evaluated.components?.recentReversals??null,
+       validObservationCount:evaluated.components?.validCount??0,
+       trendKind:evaluated.components?.trendKind??"MISSING",
        sourceAgeMs:evaluated.sourceAgeMs,
       probabilityRange:evaluated.components?.probabilityRange??null,
       referenceDistance:referenceValid&&comparisonValid?(comparison!.price!-reference!)/reference!:null,
       comparisonSource:comparisonValid?comparison!.source??null:null,
       secondsRemaining:(input.expiryMs-scheduledAtMs)/1000,
       missingReference:!referenceValid,missingComparison:!comparisonValid,
+      missingProbabilities:!valid,
+      comparisonPrice:comparisonValid?comparison!.price:null,
+      comparisonReceivedAtMs:comparisonValid?comparisonAt:null,
+      priceMovement:independent.length>1?independent.at(-1)!.price/independent[0].price-1:null,
+      volatility:returns.length>1?Math.sqrt(returns.reduce((s,r)=>s+(r-mean)**2,0)/returns.length):null,
       spread:null,liquidity:null,
-       crossInterval:latest?.features?.crossInterval??null,
+        crossInterval:contextTimely?latest?.features?.crossInterval??null:null,
     }:null,
+    qualification:{components:evaluated.components??null,requirementsMet:valid?evaluated.requirementsMet:0,
+      blocker:missed?"MISSED_GATE":!valid?"NO_VALID_PROBABILITY_INPUT":evaluated.blocker,
+      outcome:missed?"MISSED_GATE":primaryLocked?"POST_LOCK_SHADOW":valid&&evaluated.qualified?"QUALIFIED":"WAIT"},
     coverage:{accepted:rows.length,ageMs:evaluated.sourceAgeMs,windowMs:75000},
     executableQuote:null,quoteStatus:"MISSING",
     provenance:prior.map(v=>({receivedAtMs:v.receivedAtMs,availableAtMs:v.features?.contextAvailableAtMs??null,

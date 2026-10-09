@@ -12,17 +12,18 @@ test("research report is interval-polled and never fetched during existing live 
   assert.match(app, /useApi<ResearchReport>\(researchUrl, 60000, !fixtureMode\)/,
     "Historical context must not add a high-frequency database poll to live readiness.");
   assert.match(app, /research\.loadedUrl === researchUrl && research\.data\?\.intervalMinutes === interval/);
-  assert.match(app, /fixtureMode \? "DEVELOPMENT-ONLY FIXTURES" : "DEVELOPMENT PREVIEW"/);
+  assert.match(app, /DEVELOPMENT-ONLY FIXTURES/);
   assert.match(app, /<details className="fixture-banner fixture-picker"/);
-  assert.match(app, /window\.innerWidth > 760 \|\| !!fixtureMode/);
+  assert.match(app, /!!fixtureMode/);
   assert.match(app, /onToggle=\{event => setFixtureControlsOpen\(event\.currentTarget\.open\)\}/);
   assert.match(app, /"Live API observations · no fixture active"/);
   assert.match(app, /"synthetic test data · live polling disabled"/);
 });
 
 test("current round choice and odds use one exact atomic decision projection", () => {
-  assert.match(app, /getAtomicDecisionView\(atomicEnvelope, interval, decisionRound, serverNow\)/);
-  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 3);
+  assert.match(app, /projectExactRoundDecision\(projectionEnvelope, interval, decisionRound, serverNow\)/);
+  assert.equal((app.match(/view=\{atomicDecisionView\}/g) ?? []).length, 1);
+  assert.match(app, /view=\{atomicDecisionView\}/);
   assert.match(choice, /const decision = view\.decision/);
   assert.match(choice, /view\.fresh \? view\.lean : null/);
   assert.match(choice, /view\.fresh \? decision\?\.market/);
@@ -38,6 +39,10 @@ test("current state cannot be sourced from database reports; historical results 
   assert.match(choice, /research-snapshot-version/);
   assert.match(choice, /no wallet, transaction, order or execution status/i);
   assert.doesNotMatch(choice, /report\.currentChoice|report\.liveProbabilities|report\.liveModelEstimate|report\?\.lifecycle/);
+  const manual = readFileSync(new URL("./ManualOpportunity.tsx", import.meta.url), "utf8");
+  assert.match(manual, /view\.savedDecision/);
+  assert.doesNotMatch(manual, /exactDecision\?\.canonical/);
+  assert.doesNotMatch(app.slice(0, app.indexOf("function HealthPage")), /<ResearchChoiceCard/);
 });
 
 test("learning shows only returned scoring and truthful daily-job state", () => {

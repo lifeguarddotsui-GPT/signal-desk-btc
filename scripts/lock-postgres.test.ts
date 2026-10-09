@@ -25,7 +25,7 @@ test("disposable PostgreSQL replays adaptive evidence, refuses forgery/backfill/
     await db.query(`CREATE SCHEMA ${schema}`);await db.query(`SET search_path TO ${schema}`);
     for(const file of ["waterx-learning.sql","waterx-reference-confirmations.sql","waterx-research.sql",
       "waterx-research-lifecycle.sql","bluewater-research-architecture.sql","bluewater-lock-readiness.sql",
-      "bluewater-lock-readiness.sql"])await db.query(readFileSync(`migrations/${file}`,"utf8"));
+       "bluewater-lock-readiness.sql","bluewater-early-outbox.sql"])await db.query(readFileSync(`migrations/${file}`,"utf8"));
     const now=Date.now(),start=Math.floor(now/1000)*1000-230000,end=start+300000;
     const round={intervalMinutes:5 as const,roundId:"adaptive-fixture",startMs:start,expiryMs:end};
     const p=lockPolicy(5),values=[5,round.roundId,start,end];

@@ -26,6 +26,8 @@ export const agentPolicySchema = z.object({
   sessionLossCents: money.refine(n=>n>0).default(1000),
   sessionDurationMs: z.number().int().min(60000).max(604800000).default(3600000),
   sessionGasBudgetMist: z.number().int().min(0).max(500000000).default(0),
+  minimumWinningReturnCents: money.refine(n=>n>0).default(600),
+  preferredWinningReturnCents: money.refine(n=>n>0).default(700),
   maxUnresolved: z.object({ mode: z.enum(["AMOUNT", "PERCENT"]), value: z.number().positive().max(100_000_000) }).strict(),
   targetCents: money.nullable(),
   dailyProfitTargetCents: money.nullable(),
@@ -38,6 +40,8 @@ export const agentPolicySchema = z.object({
   slippageBps: z.number().int().min(0).max(500),
 }).strict().superRefine((p, c) => {
   if (new Set(p.intervals).size !== p.intervals.length) c.addIssue({ code: "custom", path: ["intervals"], message: "Duplicate interval" });
+  if(p.preferredWinningReturnCents<p.minimumWinningReturnCents)
+    c.addIssue({code:"custom",path:["preferredWinningReturnCents"],message:"Preferred return cannot be below the minimum preference; it is not a maximum."});
   if(p.network==="mainnet"&&p.fixedCents>p.roundCollateralCents)
     c.addIssue({code:"custom",path:["fixedCents"],message:"Order size cannot exceed the explicitly approved aggregate round limit"});
   for (const [path, v] of [["dailyLoss", p.dailyLoss], ["maxUnresolved", p.maxUnresolved]] as const) {
@@ -55,6 +59,7 @@ export const defaultAgentPolicy: AgentPolicy = {
   maxUnresolved: { mode: "AMOUNT", value: 500 }, targetCents: null,
   roundCollateralCents:500,sessionTurnoverCents:1000,sessionLossCents:1000,
   sessionDurationMs:3600000,sessionGasBudgetMist:0,
+  minimumWinningReturnCents:600,preferredWinningReturnCents:700,
   dailyProfitTargetCents: null, dailyProfitAction: "PAUSE", autoClaim: false,
   minRemainingMs: 10000, maxSignalAgeMs: 30000, maxQuoteAgeMs: 3000, orderTtlMs: 5000, slippageBps: 100,
 };
@@ -68,6 +73,7 @@ export function policySummary(p: AgentPolicy): string[] {
     `Compound ${p.compound ? "ON" : "OFF"}`,
     `${usd(p.roundCollateralCents)} aggregate all-in collateral per wallet/exact round`,
     `${usd(p.sessionTurnoverCents)} session turnover; ${usd(p.sessionLossCents)} session loss limit`,
+    `${usd(p.minimumWinningReturnCents)}–${usd(p.preferredWinningReturnCents)} preferred total return on a win before costs; larger returns are allowed, no promise or forced lock`,
     `${Math.round(p.sessionDurationMs/60000)} minute session; ${(p.sessionGasBudgetMist/1e9).toFixed(3)} SUI authorized gas`,
     p.dailyTurnoverCents === null ? "Unlimited daily turnover; balance and all risk stops still apply" : `${usd(p.dailyTurnoverCents)} daily turnover limit`,
     `Reserve ${usd(p.reserveCents)}${p.reserveCents === 0 ? " — all available capital may be committed" : ""}`,

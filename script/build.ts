@@ -45,7 +45,8 @@ async function main() {
   // variables or runtime provider settings. Never disclose runtime secrets.
   const policyHash = createHash("sha256");
   for (const name of ["server/btc/advisor.ts", "server/btc/engine.ts", "server/btc/policy.ts",
-    "shared/timed-decision.ts","shared/timed-completion.ts","shared/lock-readiness.ts","server/agent/risk.ts"]) {
+    "shared/timed-decision.ts","shared/timed-completion.ts","shared/lock-readiness.ts","server/agent/risk.ts",
+    "server/waterx/early-policy.ts","server/waterx/two-stage-policy.ts","server/waterx/two-stage-registry.ts","shared/two-stage.ts"]) {
     policyHash.update(name);
     policyHash.update("\0");
     policyHash.update(await readFile(name));

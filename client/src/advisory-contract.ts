@@ -1,4 +1,5 @@
 import { WATERX_VALUE_POLICY } from "../../shared/waterx-value-policy";
+import { dataHealthReason, type WaterxDataHealth } from "../../shared/waterx-data-health";
 
 export type AdvisoryState = "OBSERVE" | "HIGH_LIKELIHOOD" | "FAVORABLE_RISK_REWARD" |
   "UNAVAILABLE" | "LOCKED" | "EXPIRED" | string;
@@ -72,6 +73,7 @@ export type AdvisoryProof = {
 export type AdvisoryPayload = {
   state: AdvisoryState;
   reason: string;
+  dataHealth?: WaterxDataHealth;
   amountEnteredUsd?: number;
   reasonCodes?: string[];
   identity: { marketId?: string; roundId: string; intervalMinutes: number; startMs: number; expiryMs: number } | null;
@@ -95,6 +97,7 @@ export type AdvisoryGateInput = {
   quoteCurrent: boolean;
   sideLocked: boolean;
   nowMs: number;
+  dataHealth?: WaterxDataHealth;
   fixtureMode?: boolean;
 };
 
@@ -142,6 +145,8 @@ export function assessAdvisoryCard(input: AdvisoryGateInput): AdvisoryCardAssess
     state: "OBSERVE", classification: "OBSERVE", reason, qualified: false, quote: quoteValue,
     modelAvailable: false, quoteAvailable: false, model: null, economics: null, ...details,
   });
+  const health = input.dataHealth ?? advisory?.dataHealth;
+  if (health && health.primaryReason !== "CURRENT") return observe(dataHealthReason(health));
   if (!input.roundCurrent || !identityMatches)
     return observe(!input.roundCurrent ? "No verified active round; advisory withheld." : "Advisory identity does not match this round.");
   if (!advisory) return observe("Awaiting a matched advisory snapshot.", null);

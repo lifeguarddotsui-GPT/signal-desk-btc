@@ -3,10 +3,11 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { agentPolicySchema, defaultAgentPolicy } from "../../shared/agent-policy";
 import { agentPool, agentTransaction, readAgent, ledger, blockers } from "./store";
-import { address, accountIds, assertAccountOwner, ownerTransaction, simulateOwnerTransaction, protocolClient, protocolStatus, rpc } from "./protocol";
+import { address, accountIds, accountFundingInfo, assertAccountOwner, ownerTransaction, simulateOwnerTransaction, protocolClient, protocolStatus, rpc } from "./protocol";
 import { Transaction } from "@mysten/sui/transactions";
 import { matchesOwnerIntent } from "./intent";
 import {websiteControlPlaneStatus} from "../../infrastructure/agent-signer/control-plane";
+import {liveExecutionReadiness} from "./live-readiness";
 
 const hash = (s:string)=>createHash("sha256").update(s).digest("hex");
 const throttles = new Map<string,{count:number;until:number}>();
@@ -44,7 +45,10 @@ export function registerAgentRoutes(app:Express) {
   });
   app.get("/api/agent/capabilities",safe(async(_req,res)=>{
     const controlPlane=websiteControlPlaneStatus(process.env);
+    const config=await protocolStatus();
     res.json({developmentOnly:false,sdkVersion:"6.1.0",network:"mainnet",globalExecutionDisabled:true,mainnetEnabled:false,
+      ownerSetupSigning:config.status==="VERIFIED_IDENTITY_ONLY",
+      readiness:liveExecutionReadiness(controlPlane),
       capabilities:{authentication:true,accountReads:true,accountSelection:true,
         betaAuthorization:false,arming:false,execution:false,shadow:process.env.NODE_ENV==="development"},
       betaReleased:false,walletConnection:"OPEN",defaultRoundCollateralCents:500,roundLimitOwnerEditable:true,defaultCompounding:false,
@@ -53,7 +57,7 @@ export function registerAgentRoutes(app:Express) {
       blockers:[...blockers,controlPlane.administrationCredentialPresent
         ?"Website still holds Cloudflare deployment authority. Funded signer invocation is blocked."
         :"Signer control-plane separation still requires independent operator, connector and production verification."],
-      defaultPolicy:defaultAgentPolicy,permissions:{prediction:1,account:0},config:await protocolStatus()});
+      defaultPolicy:defaultAgentPolicy,permissions:{prediction:1,account:0},config});
   }));
   app.post("/api/agent/challenge",safe(async(req,res)=>{
     const now=Date.now(),key=req.ip??"unknown";
@@ -161,9 +165,16 @@ export function registerAgentRoutes(app:Express) {
   app.post("/api/agent/account",safe(async(req,res)=>{
     const id=await assertAccountOwner(req.agentOwner!,req.body?.accountId);
     await agentTransaction(req.agentOwner!,async(c,row)=>{
+      // Reconnecting/discovering the same account must not revoke its delegation.
+      if(row.account_id===id)return;
       await c.query("UPDATE bluewater_agents SET account_id=$2,status='PAUSED',delegate_address=NULL,delegate_expires_at_ms=NULL,revision=revision+1 WHERE owner=$1",[req.agentOwner,id]);
       await ledger(c,req.agentOwner!,"ACCOUNT_LINKED",Number(row.policy_version),{accountId:id,network:"mainnet"});
     });res.json(await readAgent(req.agentOwner!));
+  }));
+  app.post("/api/agent/account-balance",safe(async(req,res)=>{
+    const selected=(await agentPool.query("SELECT account_id FROM bluewater_agents WHERE owner=$1",[req.agentOwner])).rows[0]?.account_id;
+    if(!selected||selected!==address(req.body?.accountId))throw new Error("Select your owned WaterX account first");
+    res.json(await accountFundingInfo(req.agentOwner!,selected));
   }));
   app.post("/api/agent/delegate",safe(async(req,res)=>{
     res.status(409).json({error:"Isolated encrypted mainnet signer service is not provisioned. No key generated."});
@@ -185,7 +196,11 @@ export function registerAgentRoutes(app:Express) {
       if(row.policyAcceptanceRequired||!row.accountId||address(req.body?.accountId)!==row.accountId)
         throw new Error("Accept the mainnet beta policy and select this owned WaterX mainnet account first");
     }
-    const prepared=await ownerTransaction(req.agentOwner!,req.body??{});
+    // Always simulate the exact prepared operation again. The earlier UI
+    // simulation is informative, not authority and not a reusable price promise.
+    const verified=await simulateOwnerTransaction(req.agentOwner!,req.body??{});
+    const prepared={transaction:verified.transaction,description:verified.description,
+      network:"mainnet" as const,permissions:{account:0,prediction:1}};
     await agentTransaction(req.agentOwner!,async(c,row)=>ledger(c,req.agentOwner!,"OWNER_TRANSACTION_PREPARED",Number(row.policy_version),
       {action:req.body.action,transaction:prepared.transaction,accountId:req.body.accountId??null,
         delegateAddress:req.body.delegateAddress??null,expiresAtMs:req.body.expiresAtMs??null,network:"mainnet"}));
@@ -199,15 +214,17 @@ export function registerAgentRoutes(app:Express) {
       address(result.Transaction.transaction.sender)!==req.agentOwner)throw new Error("Confirmed successful owner-signed mainnet transaction required");
     const actual=Transaction.from(JSON.stringify(result.Transaction.transaction)).getData();
     await agentTransaction(req.agentOwner!,async(c,row)=>{
-      const prior=(await c.query("SELECT details FROM bluewater_agent_ledger WHERE owner=$1 AND event='OWNER_TRANSACTION_PREPARED' AND at>clock_timestamp()-interval '10 minutes' ORDER BY id DESC LIMIT 20",[req.agentOwner])).rows;
+      const duplicate=(await c.query("SELECT 1 FROM bluewater_agent_ledger WHERE owner=$1 AND event='OWNER_TRANSACTION_CONFIRMED' AND details->>'digest'=$2",[req.agentOwner,digest])).rows;
+      if(duplicate.length)return;
+      // Reconciliation must survive a long RPC outage. These are owner-signed
+      // account-management intents, not reusable price quotes or trading permits.
+      const prior=(await c.query("SELECT details FROM bluewater_agent_ledger WHERE owner=$1 AND event='OWNER_TRANSACTION_PREPARED' ORDER BY id DESC LIMIT 20",[req.agentOwner])).rows;
       const intent=prior.find(r=>{
         if(r.details.action!==req.body.action)return false;
         const wanted=Transaction.from(r.details.transaction).getData();
         return matchesOwnerIntent(wanted,actual);
       })?.details;
-      if(!intent)throw new Error("Transaction does not match a recent prepared owner operation");
-      const duplicate=(await c.query("SELECT 1 FROM bluewater_agent_ledger WHERE owner=$1 AND event='OWNER_TRANSACTION_CONFIRMED' AND details->>'digest'=$2",[req.agentOwner,digest])).rows;
-      if(duplicate.length)return;
+      if(!intent)throw new Error("Transaction does not match a retained prepared owner operation; no resubmission is authorized");
       // Confirmation proves sender, successful effects and exact prepared intent.
       // It does NOT prove delegate effective permission bits; live stays disabled.
       await ledger(c,req.agentOwner!,"OWNER_TRANSACTION_CONFIRMED",Number(row.policy_version),

@@ -4,7 +4,8 @@ import { Transaction } from "@mysten/sui/transactions";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { isValidSuiAddress, normalizeSuiAddress } from "@mysten/sui/utils";
 import {mintCreditToAccount,routeNative,requestCreditWithdraw,enqueueWithdrawal,resolveCreditStack} from "@waterx/sdk/account";
-import {PerpClient} from "@waterx/sdk/perp";
+import {PerpClient,getAccountBalance} from "@waterx/sdk/perp";
+import {selectFundingCoins,usdBalanceLabel} from "../../shared/agent-onboarding";
 
 export const NATIVE_USDC="0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC";
 
@@ -79,6 +80,35 @@ export async function assertAccountOwner(owner: string, accountId: unknown) {
   if (!(await accountIds(owner)).some(a => normalizeSuiAddress(a) === id)) throw new Error("WaterX account is not owned by authenticated wallet");
   return id;
 }
+export async function accountFundingInfo(owner: string, accountId: unknown) {
+  const id = await assertAccountOwner(owner, accountId), c = await protocolClient();
+  const stack = resolveCreditStack(c.config, "USD");
+  const nativeUsdcSupported = stack.creditType === MAINNET_IDENTITY.settlementCoin &&
+    stack.assets.some(a => a.type === NATIVE_USDC && a.decimal === 6);
+  const balance = await getAccountBalance(new PerpClient("MAINNET", c.config, {}), id, c.settlementCoinType());
+  const [walletUsd, walletUsdc] = await Promise.allSettled([
+    rpc.core.getBalance({owner,coinType:c.settlementCoinType()}),
+    rpc.core.getBalance({owner,coinType:NATIVE_USDC}),
+  ]);
+  return {accountId:id,network:"mainnet",settlementCoinType:c.settlementCoinType(),decimals:6,
+    availableAtomic:balance.toString(),availableBalanceUsd:usdBalanceLabel(balance.toString()),
+    balanceScope:"Stored WaterX USD only; excludes positions, pending deposits and wallet assets.",
+    nativeUsdcSupported,walletUsdAtomic:walletUsd.status==="fulfilled"?walletUsd.value.balance.coinBalance:null,
+    walletUsdcAtomic:walletUsdc.status==="fulfilled"?walletUsdc.value.balance.coinBalance:null,
+    readAtMs:Date.now(),delegateStatus:"unavailable"};
+}
+async function fundingCoins(owner: string, coinType: string) {
+  const coins: {objectId:string;balance:string}[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 5; page++) {
+    const result = await rpc.core.listCoins({owner,coinType,limit:100,cursor});
+    coins.push(...result.objects.map(c => ({objectId:address(c.objectId),balance:c.balance})));
+    if (!result.hasNextPage) return coins;
+    if (!result.cursor || result.cursor === cursor) throw new Error("Wallet funding discovery incomplete");
+    cursor = result.cursor;
+  }
+  throw new Error("Wallet funding discovery exceeded the safe page limit. No transaction prepared.");
+}
 export async function ownerTransaction(owner: string, body: Record<string, unknown>) {
   const c = await protocolClient(), tx = new Transaction();
   tx.setSender(owner);
@@ -90,6 +120,9 @@ export async function ownerTransaction(owner: string, body: Record<string, unkno
   const coinType = c.settlementCoinType(settlement);
   let description: string;
   if (body.action === "CREATE_ACCOUNT") {
+    // Failed discovery is never evidence of an empty account list.
+    if ((await accountIds(owner)).length !== 0)
+      throw new Error("A WaterX account already exists. Select your existing account instead.");
     createAccount(c,tx,{alias:"Bluewater mainnet account"}); description="Create your WaterX mainnet account; Bluewater does not own it. SUI gas budget capped at 0.1 SUI; this is a limit, not a gas estimate.";
   } else {
     const accountId = await assertAccountOwner(owner,body.accountId);
@@ -99,10 +132,12 @@ export async function ownerTransaction(owner: string, body: Record<string, unkno
       removeDelegate(c,tx,{accountId,delegate:address(body.delegateAddress)});
       description="Owner revokes this delegate on mainnet; any existing positions remain. Gas budget capped at 0.1 SUI.";
     } else if (body.action === "FUND" || body.action === "FUND_USDC") {
-      if (!Array.isArray(body.coinObjectIds) || body.coinObjectIds.length < 1 || body.coinObjectIds.length > 20 ||
-        typeof body.amountAtomic !== "string" || !/^[1-9]\d*$/.test(body.amountAtomic) || BigInt(body.amountAtomic) > BigInt("18446744073709551615")) throw new Error("Provide coin objects and a positive settlement-native atomic amount");
-      const ids = body.coinObjectIds.map(address);
-      if (new Set(ids).size !== ids.length) throw new Error("Duplicate coin objects");
+      if (typeof body.amountAtomic !== "string" || !/^[1-9]\d*$/.test(body.amountAtomic) ||
+          BigInt(body.amountAtomic) > BigInt("18446744073709551615")) throw new Error("Enter a positive funding amount");
+      if (body.coinObjectIds !== undefined && !Array.isArray(body.coinObjectIds))
+        throw new Error("Invalid funding coin selection");
+      const ids = selectFundingCoins(await fundingCoins(owner, body.action === "FUND_USDC" ? NATIVE_USDC : coinType),
+        body.amountAtomic, Array.isArray(body.coinObjectIds) ? body.coinObjectIds.map(address) : undefined);
       const first = tx.object(ids[0]);
       if (ids.length > 1) tx.mergeCoins(first,ids.slice(1).map(id=>tx.object(id)));
       const [coin] = tx.splitCoins(first,[tx.pure.u64(body.amountAtomic)]);
@@ -150,5 +185,6 @@ export async function simulateOwnerTransaction(owner:string,body:Record<string,u
   if(result.$kind!=="Transaction"||!result.Transaction.status.success)
     throw new Error("Owner transaction simulation failed with validation enabled; no funds moved");
   return {success:true,checksEnabled:true,gasBudgetMist:prepared.gasBudgetMist,network:"mainnet",
+    transaction:await Transaction.from(bytes).toJSON(),
     description:prepared.description};
 }

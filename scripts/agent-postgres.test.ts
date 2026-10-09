@@ -13,6 +13,7 @@ test("isolated Agent PostgreSQL: wallet signatures, replay/CSRF/isolation, versi
   const db=new pg.Client({connectionString:url});await db.connect();
   await db.query(readFileSync("migrations/bluewater-agent-development.sql","utf8"));
   await db.query(readFileSync("migrations/bluewater-agent-development.sql","utf8"));
+  await db.query(readFileSync("migrations/agent-durable-auth.sql","utf8"));
   const controlBefore=(await db.query("SELECT singleton,disabled FROM bluewater_agent_execution_control")).rows;
   await db.query(readFileSync("migrations/bluewater-agent-control-check-development.sql","utf8"));
   await db.query(readFileSync("migrations/bluewater-agent-control-check-development.sql","utf8"));
@@ -28,6 +29,12 @@ test("isolated Agent PostgreSQL: wallet signatures, replay/CSRF/isolation, versi
     (e:{code?:string})=>e.code==="23505");
   await db.query(`CREATE TABLE waterx_research_choices(interval_minutes int,round_id text,start_ms bigint,expiry_ms bigint,
     decision_at_ms bigint,side text,probability_up numeric,state text)`);
+  // This auth/owner-isolation fixture has no adaptive candidates. Create the
+  // empty FK parent for the real receipt migration, not the research pipeline.
+  await db.query(`CREATE TABLE bluewater_lock_candidates(interval_minutes smallint,round_id text,
+    checkpoint_seconds smallint,PRIMARY KEY(interval_minutes,round_id,checkpoint_seconds))`);
+  for(const file of ["bluewater-early-outbox.sql","waterx-timed-decisions.sql"])
+    await db.query(readFileSync(`migrations/${file}`,"utf8"));
   const {createApp}=await import("../server/index");
   const {agentPool}=await import("../server/agent/store");
   const {shadowWorkerTick}=await import("../server/agent/worker");
@@ -82,9 +89,9 @@ test("isolated Agent PostgreSQL: wallet signatures, replay/CSRF/isolation, versi
       await assert.rejects(db.query(`UPDATE ${table} SET owner=owner`),/append-only/);
       await assert.rejects(db.query(`DELETE FROM ${table}`),/append-only/);
     }
-    await call("/control",{action:"STOP_GOAL"},ac.cookie);
-    await call("/policy",{policy:{...defaultAgentPolicy,targetCents:1000}},ac.cookie);
-    await call("/control",{action:"ARM_SHADOW",paperCapitalCents:1000,acknowledged:true},ac.cookie);
+    assert.equal((await call("/control",{action:"STOP_GOAL"},ac.cookie)).status,200);
+    assert.equal((await call("/policy",{policy:{...defaultAgentPolicy,targetCents:1000},acknowledged:true},ac.cookie)).status,200);
+    assert.equal((await call("/control",{action:"ARM_SHADOW",paperCapitalCents:1000,acknowledged:true},ac.cookie)).status,200);
     await shadowWorkerTick();
     const reached=await call("/state",undefined,ac.cookie);assert.equal(reached.body.status,"TARGET_REACHED");
     assert.ok(reached.body.ledger.some((r:{event:string})=>r.event==="GOAL_CANCELLED"));

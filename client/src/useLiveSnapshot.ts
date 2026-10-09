@@ -52,9 +52,14 @@ export function useLiveSnapshot<T extends LiveSnapshotEnvelope>(url:string,inter
           const envelopeError=validateLiveEnvelope(incoming,interval,last.current.data);
           if(envelopeError)throw new Error(envelopeError);
           if(!active())return;
+          const decisionError=incoming.decision
+            ?validateDecisionSnapshot(incoming,interval,last.current.atomic):null;
+          if(decisionError&&["STATE_VERSION_REGRESSION","SOURCE_OBSERVATION_REGRESSION",
+            "IMMUTABLE_CHOICE_REGRESSION","IMMUTABLE_EARLY_DECISION_REGRESSION",
+            "IMMUTABLE_TIMED_DECISION_REGRESSION"].includes(decisionError))
+            throw new Error(decisionError);
           const receivedAt=Date.now();
           last.current.data=incoming;setData(incoming);setUpdated(receivedAt);setLoadedUrl(url);
-          const decisionError=validateDecisionSnapshot(incoming,interval,last.current.atomic);
           if(decisionError)throw new Error(decisionError);
           last.current.atomic=incoming;setAtomicData(incoming);setAtomicUpdated(receivedAt);setAtomicLoadedUrl(url);
           setError("");setErrorUrl("");setFailureCount(0);setRetryCount(attempt);

@@ -1,0 +1,45 @@
+name: One-shot deployed source provenance (GET only)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/deployed-source-inspect.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Compare published source, no deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the already-public source-only release (one GET)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --max-time 30 --max-filesize 2000000             --output /tmp/bluewater-prod-source.tar.gz https://bluewaterai.app/source-release.tar.gz
+          echo "Published archive SHA256:"
+          sha256sum /tmp/bluewater-prod-source.tar.gz
+          echo "Published archive byte size:"
+          wc -c /tmp/bluewater-prod-source.tar.gz
+          echo "Relevant source paths:"
+          tar -tzf /tmp/bluewater-prod-source.tar.gz | grep -E '(server/waterx/(timed-decision-store|timed-decision-coordinator|timed-decision-builder|gate-history|background-queue|timed-history)\.ts|server/routes\.ts|client/src/(PairedHistory|App)\.tsx)' | head -n 20 || true
+          for needle in 'server/waterx/timed-decision-store.ts' 'server/waterx/timed-decision-coordinator.ts' 'server/routes.ts'; do
+            file="$(tar -tzf /tmp/bluewater-prod-source.tar.gz | grep -E "(^|/)\${needle}$" | head -n1 || true)"
+            if [[ -z "$file" ]]; then echo "Missing source: $needle"; continue; fi
+            echo "===== RELEASE FILE: $file ====="
+            case "$needle" in
+              *timed-decision-store.ts)
+                tar -xOzf /tmp/bluewater-prod-source.tar.gz "$file" | grep -n -E 'function finalRecord|DATA_FAILURE|const hadFailures|const worked|const due|liveDue|GATE_GRACE_MS|accepted_at_ms|DATABASE_PREPARATION|DATABASE_GATE_QUERY|FROZEN|captureTimedDecision' | head -n 75 || true
+                ;;
+              *timed-decision-coordinator.ts)
+                tar -xOzf /tmp/bluewater-prod-source.tar.gz "$file" | grep -n -E 'recovery|critical|shadowHorizon|observeTimedStrategy|GATE|queue|timers|setTimeout' | head -n 85 || true
+                ;;
+              *routes.ts)
+                tar -xOzf /tmp/bluewater-prod-source.tar.gz "$file" | grep -n -E 'paired-history|/api/waterx/version|/api/waterx/gates|timed-history|/api/waterx/early-operations' | head -n 35 || true
+                ;;
+            esac
+          done

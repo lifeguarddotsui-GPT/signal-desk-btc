@@ -62,12 +62,13 @@ export function createV4ConfirmationShadow(options:{
       probabilityUp:o.probabilityUp,probabilityDown:o.probabilityDown,healthy:o.sourceHealthy,
       provenance:o.provenance,observationId:o.id
     }));
+    const receipt=e.observations.at(-1)!;
     const evidence={policy:V4_CONFIRMATION_POLICY,shadowOnly:true,originalObservationCount:frozen.length,
       observations:frozen,evidenceDigest:digest(frozen),modelVersion:null,calibrationVersion:null,
       probabilitySource:"WATERX_MARKET_NOT_CALIBRATED",availabilityBasis:"APP_RECEIPT",
       capturedBeforeExpiry:true,decisionDeploymentId,
       clockDomain:receipt.features.decisionClockDomain??null};
-    const decisionAtMs=assessment.evaluatedAtMs,receipt=e.observations.at(-1)!;
+    const decisionAtMs=assessment.evaluatedAtMs;
     const d:TimedDecision={id:randomUUID(),network:"sui:mainnet",...e.round,
       strategyVersion:V4_CONFIRMATION_STRATEGY,status:"LOCKED",side:assessment.side,
       probabilityUp:assessment.probabilityUp,probabilityDown:1-assessment.probabilityUp!,

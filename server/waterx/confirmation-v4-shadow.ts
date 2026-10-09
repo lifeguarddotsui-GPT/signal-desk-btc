@@ -65,7 +65,8 @@ export function createV4ConfirmationShadow(options:{
     const evidence={policy:V4_CONFIRMATION_POLICY,shadowOnly:true,originalObservationCount:frozen.length,
       observations:frozen,evidenceDigest:digest(frozen),modelVersion:null,calibrationVersion:null,
       probabilitySource:"WATERX_MARKET_NOT_CALIBRATED",availabilityBasis:"APP_RECEIPT",
-      capturedBeforeExpiry:true,decisionDeploymentId};
+      capturedBeforeExpiry:true,decisionDeploymentId,
+      clockDomain:receipt.features.decisionClockDomain??null};
     const decisionAtMs=assessment.evaluatedAtMs,receipt=e.observations.at(-1)!;
     const d:TimedDecision={id:randomUUID(),network:"sui:mainnet",...e.round,
       strategyVersion:V4_CONFIRMATION_STRATEGY,status:"LOCKED",side:assessment.side,
@@ -155,7 +156,8 @@ export function createV4ConfirmationShadow(options:{
       receivedAtMs:received!,availableAtMs:time,databaseAcceptedAtMs:null,providerSourceAtMs:null,
       probabilityUp:healthy?input.probabilityUp!:NaN,probabilityDown:healthy?input.probabilityDown!:NaN,
       sourceHealthy:healthy,provenance:"PROSPECTIVE",
-      features:healthy?{}:{sourceFailure:true}
+      features:healthy?{decisionClockDomain:input.features?.decisionClockDomain??null}:
+        {sourceFailure:true,decisionClockDomain:input.features?.decisionClockDomain??null}
     };
     e.observations.push(o);
     e.observations=e.observations.filter(row=>row.receivedAtMs>=time-75_000).slice(-V4_MAX_OBSERVATIONS);

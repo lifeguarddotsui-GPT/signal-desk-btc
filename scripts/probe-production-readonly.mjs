@@ -1,12 +1,17 @@
 /** Public, read-only, one-shot production provenance and confirmation capture audit.
  * No keys, database access, writes, provider refresh or scheduled polling.
- * Bounded to seven GETs; only aggregate metrics are printed to CI logs.
+ * Bounded to twelve GETs and one HEAD; only aggregate metrics are printed to CI logs.
  */
 const ROOT = "https://bluewaterai.app";
 const probes = [
   ["version", "/api/waterx/version"],
   ["history5", "/api/waterx/paired-history?interval=5&window=24h"],
   ["history15", "/api/waterx/paired-history?interval=15&window=24h"],
+  ["timed5", "/api/waterx/timed-history?interval=5&window=24h&limit=200"],
+  ["timed15", "/api/waterx/timed-history?interval=15&window=24h&limit=200"],
+  ["earlyOps", "/api/waterx/early-operations"],
+  ["refresh5", "/api/waterx/refresh-health?interval=5"],
+  ["refresh15", "/api/waterx/refresh-health?interval=15"],
   ["gates5", "/api/waterx/gates?interval=5"],
   ["gates15", "/api/waterx/gates?interval=15"],
   ["collector5", "/api/waterx/collector-state?interval=5"],
@@ -47,6 +52,30 @@ const summarise = (name, data) => {
         DISPUTED:count(rows,r=>r?.settlement==="DISPUTED")
       }};
   }
+  if(name.startsWith("timed")) {
+    const metrics=data?.metrics??{};
+    return {strategyVersion:data?.strategyVersion??null,asOfMs:data?.asOfMs??null,
+      rowsTruncated:data?.rowsTruncated??null,
+      totalCohort:metrics.cohortN??null,committed:metrics.n??null,locks:metrics.locks??null,
+      missingRecords:metrics.missingRecords??null,noValidInput:metrics.noValidInput??null,
+      dataFailures:metrics.dataFailures??null,deadlineMisses:metrics.deadlineMisses??null,
+      abstained:metrics.abstained??null,operationalFailures:metrics.operationalFailures??null,
+      correct:metrics.correct??null,incorrect:metrics.incorrect??null,
+      pending:metrics.pending??null,disputed:metrics.disputed??null,
+      onTimeLocks:metrics.onTimeLocks??null,medianElapsedMs:metrics.medianElapsedMs??null};
+  }
+  if(name==="earlyOps") {
+    return {status:data?.status??null,asOfMs:data?.asOfMs??null,
+      diagnostics:data?.diagnostics??null,summary:data?.summary??null,
+      note:data?.note??null};
+  }
+  if(name.startsWith("refresh")) {
+    const r=data?.refreshHealth??{};
+    const q=data?.captureQueues??{};
+    return {refreshErrors:r?.errors??r?.lastErrors??null,
+      collectorStatus:data?.collector?.collectorStatus??null,
+      timedQueue:q?.timed??null};
+  }
   if(name.startsWith("gates")) {
     const gates=Array.isArray(data?.entries)?data.entries:[];
     const reasons={};for(const g of gates){const k=String(g?.result??"UNKNOWN");reasons[k]=(reasons[k]??0)+1;}
@@ -80,4 +109,11 @@ for(const [name, path] of probes) {
     console.log(JSON.stringify({probe:name,error:error instanceof Error?error.name+":"+error.message.slice(0,100):"UNKNOWN"}));
   }
 }
-console.log("Read-only production probe completed: 7 bounded GETs; no DB writes, secrets, or deployments.");
+try {
+  const res=await fetch(ROOT+"/source-release.tar.gz",{method:"HEAD",redirect:"error",
+    headers:{"User-Agent":"BlueWater-GitHub-Readonly-Audit/1.0"},
+    signal:AbortSignal.timeout(10000)});
+  console.log(JSON.stringify({probe:"sourceArchiveHEAD",httpStatus:res.status,
+    contentType:res.headers.get("content-type"),contentLength:res.headers.get("content-length")}));
+}catch(error){console.log(JSON.stringify({probe:"sourceArchiveHEAD",error:error instanceof Error?error.name:"UNKNOWN"}));}
+console.log("Read-only production probe completed: 12 bounded GETs plus 1 HEAD; no DB writes, secrets, or deployments.");

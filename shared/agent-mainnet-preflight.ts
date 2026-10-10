@@ -19,8 +19,16 @@ const cents=(atomic:string|null):number|null=>{
  */
 export function assessMainnetPilot(input:PilotPreflightInput){
   const p=input.policy,availableCents=cents(input.accountBalanceAtomic);
+  // Conservative *gross* pilot ceiling: a single fully losing order must not
+  // exceed the owner's daily loss budget, even if the ordinary strategy stop
+  // would only react AFTER settlement. All-in fees still require a live quote.
+  const lossCap=p.dailyLoss===null?Number.MAX_SAFE_INTEGER:p.dailyLoss.mode==="AMOUNT"?
+    Math.floor(p.dailyLoss.value):availableCents==null?0:
+    Math.floor(availableCents*p.dailyLoss.value/100);
+  const unresolvedCap=p.maxUnresolved.mode==="AMOUNT"?p.maxUnresolved.value:
+    availableCents==null?0:Math.floor(availableCents*p.maxUnresolved.value/100);
   const cap=Math.min(p.roundCollateralCents,p.maxOrderCents??Number.MAX_SAFE_INTEGER,
-    p.maxUnresolved.mode==="AMOUNT"?p.maxUnresolved.value:Number.MAX_SAFE_INTEGER);
+    unresolvedCap,lossCap);
   const basis=p.sizingMode==="FIXED"?p.fixedCents:p.sizingMode==="ALLOCATION_PERCENT"?
     Math.floor(p.allocationCents*p.sizingPercent/100):
     availableCents==null?null:Math.floor(availableCents*p.sizingPercent/100);
@@ -39,7 +47,7 @@ export function assessMainnetPilot(input:PilotPreflightInput){
   add("positive-executable-stake",draftStake!==null&&draftStake>0,
     "Policy, reserve, fixed/percentage sizing and turnover limits must leave a positive proposed order.");
   add("pilot-cap",draftStake!==null&&draftStake<=500&&p.roundCollateralCents<=500,
-    "Initial pilot must be capped at $5 all-in per round (including fees).");
+    "Initial pilot must be capped at $5 all-in per round and within the owner's daily loss budget; fees require live quote verification.");
   add("strategy",p.network==="mainnet"&&p.signalSource==="EXPERIMENTAL_QUALIFICATION_GATES"&&
     p.intervals.includes(5)&&!p.compound,
     "Current final-signal adapter accepts only separately consented V3 5-minute experimental decisions, not unqualified Bluewater champion probabilities.");

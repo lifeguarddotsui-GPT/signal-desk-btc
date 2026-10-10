@@ -1,0 +1,29 @@
+name: Mainnet Pilot Readiness Safeguards
+on:
+  pull_request:
+    paths:
+      - "shared/agent-mainnet-preflight.ts"
+      - "server/agent/routes.ts"
+      - "client/src/AgentPage.tsx"
+      - "scripts/agent-mainnet-preflight.test.ts"
+      - ".github/workflows/mainnet-pilot-preflight-ci.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: TypeScript check
+        run: npm run check
+      - name: Funded-pilot gate regression
+        run: timeout --signal=TERM --kill-after=5s 45s node --import tsx --test scripts/agent-mainnet-preflight.test.ts
+      - name: Build only (no deployment)
+        run: npm run build

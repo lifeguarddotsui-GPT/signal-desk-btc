@@ -57,3 +57,12 @@ test("Explicit safety authorizations are independent of network and wallet",()=>
   const expired=assessMainnetPilot({...base,ownerSessionExpiresAtMs:100001});
   assert.equal(check(expired,"owner-session"),"BLOCKED");
 });
+
+test("First real-money pilot cannot exceed a smaller daily-loss or percentage exposure ceiling",()=>{
+  const base=input();
+  const policy={...base.policy,sizingMode:"FIXED" as const,fixedCents:500,reserveCents:0,
+    dailyLoss:{mode:"AMOUNT" as const,value:100},
+    maxUnresolved:{mode:"PERCENT" as const,value:50}};
+  assert.equal(assessMainnetPilot({...base,policy}).plannedStakeCents,100);
+  assert.equal(assessMainnetPilot({...base,policy:{...policy,dailyLoss:null}}).plannedStakeCents,250);
+});

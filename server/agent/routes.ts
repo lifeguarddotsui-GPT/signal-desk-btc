@@ -8,6 +8,7 @@ import { Transaction } from "@mysten/sui/transactions";
 import { matchesOwnerIntent } from "./intent";
 import {websiteControlPlaneStatus} from "../../infrastructure/agent-signer/control-plane";
 import {liveExecutionReadiness} from "./live-readiness";
+import {assessMainnetPilot} from "../../shared/agent-mainnet-preflight";
 
 const hash = (s:string)=>createHash("sha256").update(s).digest("hex");
 const throttles = new Map<string,{count:number;until:number}>();
@@ -118,6 +119,25 @@ export function registerAgentRoutes(app:Express) {
     res.clearCookie("bluewater_agent",{path:"/api/agent"});res.json({ok:true});
   }));
   app.use("/api/agent",authenticate);
+  // Explicit authenticated inspection; never called by a running timer or public dashboard.
+  // A failed provider read is reported as UNVERIFIED, never as a funded/tradable account.
+  app.post("/api/agent/mainnet-preflight",safe(async(req,res)=>{
+    const state=await readAgent(req.agentOwner!,req.agentSessionExpiresAtMs);
+    const funding=state.accountId?await accountFundingInfo(req.agentOwner!,state.accountId).catch(()=>null):null;
+    const plane=websiteControlPlaneStatus(process.env);
+    const report=assessMainnetPilot({
+      policy:state.policy,nowMs:Date.now(),ownerSessionExpiresAtMs:state.walletSessionExpiresAtMs??null,
+      accountId:state.accountId,accountBalanceAtomic:funding?.availableAtomic??null,
+      accountBalanceReadAtMs:funding?.readAtMs??null,
+      // Configuration values and a prepared delegate are never proof of isolated authority.
+      controlPlaneIsolated:plane.separationVerified===true,
+      onChainDelegateVerified:false,signerProvisioned:false,executableQuoteVerified:false,
+      continuouslyLeasedWorkerVerified:false,releaseApproved:false
+    });
+    res.json({...report,accountBalanceVerification:funding?"VERIFIED_OWNER_ACCOUNT_READ":"UNAVAILABLE",
+      currentPolicyVersion:state.policyVersion,network:"mainnet",
+      intentionalSafetyGate:"No live order, authorization, key generation or trading permission is created."});
+  }));
   app.get("/api/agent/state",safe(async(req,res)=>res.json(await readAgent(req.agentOwner!,req.agentSessionExpiresAtMs))));
   app.post("/api/agent/policy",safe(async(req,res)=>{
     const p=agentPolicySchema.parse(req.body?.policy);

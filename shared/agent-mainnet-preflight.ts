@@ -10,7 +10,7 @@ export type PilotPreflightInput={
 };
 const cents=(atomic:string|null):number|null=>{
   if(typeof atomic!=="string"||!/^\d{1,32}$/.test(atomic))return null;
-  const n=BigInt(atomic)/10000n; // WaterX USD credit is six decimals, 1 cent is 10,000 atomic units
+  const n=BigInt(atomic)/BigInt(10000); // WaterX USD credit is six decimals, 1 cent is 10,000 atomic units
   return n<=BigInt(Number.MAX_SAFE_INTEGER)?Number(n):null;
 };
 /** Inspection only: no order sizing can authorize an on-chain spend.

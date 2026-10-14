@@ -12,6 +12,12 @@ import { dollarsToAtomicAmount, signReviewedOwnerTransaction } from "./owner-wal
 type Paper = { startingCents: number; availableCents: number; committedCents: number; turnoverCents: number; realizedPnlCents: number; highWaterCents: number; consecutiveLosses: number; targetCents: number | null; startedAt: number | null };
 type LedgerItem = { id: string; event: string; at: number | string; details: unknown };
 type AgentState = { owner: string; policy: AgentPolicy; policyVersion: number; status: "PAUSED" | "SHADOW" | "LOSS_STOP" | "TARGET_REACHED"; accountId: string | null; delegateAddress: string | null; delegateExpiresAtMs: number | null; paper: Paper | null; ledger: LedgerItem[]; summary: string[]; blockers: string[]; balances: unknown; walletSessionExpiresAtMs?: number | null };
+type MainnetPreflight = {
+  mode:"READ_ONLY_PREVIEW";ready:boolean;canSign:false;canSubmit:false;
+  plannedStakeCents:number|null;observedAvailableCents:number|null;
+  accountBalanceVerification:"VERIFIED_OWNER_ACCOUNT_READ"|"UNAVAILABLE";
+  currentPolicyVersion:number;checks:{id:string;status:"PASS"|"BLOCKED"|"UNVERIFIED";detail:string}[];
+};
 type Capabilities = { developmentOnly: boolean; sdkVersion: string; network: "mainnet"; globalExecutionDisabled: boolean; mainnetEnabled: boolean; blockers: string[]; defaultPolicy: AgentPolicy; ownerSetupSigning?: boolean; readiness?: { released: boolean; items: { id: string; label: string; status: "IMPLEMENTED" | "UNVERIFIED" | "BLOCKED" | string; evidence?: string; nextAction?: string }[]; blocker?: string | null; nextAction?: string | null }; capabilities?: { shadow?: boolean; arming?: boolean; execution?: boolean; betaAuthorization?: boolean }; permissions: { prediction: number; account: number }; config: { status: "VERIFIED_IDENTITY_ONLY" | "UNAVAILABLE" | string; reason: string; decimals?: number; marketSemanticsVerified?: false; settlements?: unknown; packages?: unknown } };
 type OwnerTransaction = { transaction: string; description: string; network: "mainnet"; permissions: { account: number; prediction: number } };
 type FundingInfo = { accountId: string; network: string; availableAtomic: string; availableBalanceUsd: string; nativeUsdcSupported: boolean; walletUsdAtomic?: string | null; walletUsdcAtomic?: string | null; readAtMs: number };
@@ -107,6 +113,7 @@ function AgentPage() {
   const [discoveryStatus, setDiscoveryStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [discoveryError, setDiscoveryError] = useState("");
   const [fundingInfo, setFundingInfo] = useState<FundingInfo | null>(null);
+  const [pilotPreflight, setPilotPreflight] = useState<MainnetPreflight | null>(null);
   const [shadowPreview, setShadowPreview] = useState(false);
   const discoverySeq = useRef(0);
   const balanceSeq = useRef(0);
@@ -676,12 +683,41 @@ function AgentPage() {
     }).catch(error => { if (seq === capabilitySeq.current) setPageError(asErrorMessage(error, "Agent capabilities are unavailable.")); }).finally(() => { if (seq === capabilitySeq.current) setBusy(""); });
   };
 
+  const checkMainnetPilot = async () => {
+    if(!isAuthorized||!state?.accountId||!!busy)return;
+    const identity=identityRef.current,account=state.accountId,version=state.policyVersion;
+    setBusy("pilot-preflight");setPilotPreflight(null);
+    try{
+      const result=await request<MainnetPreflight>("/mainnet-preflight","POST",{},identity);
+      if(!identityStillCurrent(identity,identityRef.current)||stateRef.current?.accountId!==account||
+         stateRef.current?.policyVersion!==version)return;
+      setPilotPreflight(result);
+      setPageError("");
+    }catch(error){
+      if(identityStillCurrent(identity,identityRef.current))
+        setPageError(asErrorMessage(error,"Owner mainnet readiness could not be verified."));
+    }finally{if(identityStillCurrent(identity,identityRef.current))setBusy("");}
+  };
   return <div className="page agent-page">
     <header className="agent-mast">
       <div><div className="eyebrow">BLUEWATERAI / AGENT</div><h1>Your wallet.<em> Your agent.</em></h1><p>Connect, fund and choose your strategy. You stay in control.</p></div>
       <div className="agent-mast-badge"><span className="agent-pulse" />SUI MAINNET</div>
     </header>
     <div className="ao-public-unavailable" role="status"><strong>Live agent temporarily unavailable</strong><span>Secure mainnet trading is not ready yet. No trading permission is activated. You can try shadow mode without connecting or funding.</span></div>
+    {isAuthorized&&state?.accountId&&<section className="agent-card" aria-label="Live mainnet pilot readiness">
+      <div className="agent-card-heading"><div><span className="agent-kicker">LIVE MAINNET PILOT</span><h2>Check the last blockers</h2></div></div>
+      <p>This check verifies your selected WaterX account credit and the remaining execution prerequisites. It never signs or submits a trade.</p>
+      <button type="button" className="ao-button ao-button-secondary" disabled={!!busy} onClick={()=>void checkMainnetPilot()}>
+        {busy==="pilot-preflight"?"Checking mainnet account…":"Check mainnet readiness"}
+      </button>
+      {pilotPreflight&&<div role="status" className="ao-tech">
+        <p><strong>Ready to trade: {pilotPreflight.ready?"YES":"NO"}</strong> · Stored WaterX USD credit: {pilotPreflight.observedAvailableCents==null?"unverified":`${(pilotPreflight.observedAvailableCents/100).toFixed(2)}`} · Illustrative policy order: {pilotPreflight.plannedStakeCents==null?"unverified":`${(pilotPreflight.plannedStakeCents/100).toFixed(2)}`}</p>
+        <ul>{pilotPreflight.checks.filter(check=>check.status!=="PASS").map(check=>
+          <li key={check.id}><strong>{check.id.replaceAll("-"," ").toUpperCase()}</strong> — {check.detail} ({check.status.toLowerCase()})</li>
+        )}</ul>
+        <p>No delegation or execution permission is granted by this check.</p>
+      </div>}
+    </section>}
     {isAuthorized && state?.status === "SHADOW" && <button className="ao-button ao-button-primary ao-run-pause" disabled={!!busy} onClick={() => void control("PAUSE")}>PAUSE AGENT</button>}
 
     <details className="agent-card ao-system-diagnostics"><summary>System diagnostics</summary><section className="agent-safety-strip">

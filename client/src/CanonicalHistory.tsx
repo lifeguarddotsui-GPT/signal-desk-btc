@@ -152,8 +152,7 @@ export function LegacyCanonicalHistory() {
       </div>
     </section>
 
-    <TimedStrategyHistory interval={interval === "15" ? 15 : 5} />
-    {interval === "all" && <TimedStrategyHistory interval={15} />}
+    <p className="history-source-note">The current 30-second benchmark history appears first on the main Round History page. These legacy champion/baseline cohorts use different policies and denominators; do not combine their accuracy percentages.</p>
     <details className="history-old-benchmarks">
       <summary>Full gate audit and historical strategy filters</summary>
       <TimedDecisionHistory />
@@ -258,19 +257,29 @@ export function LegacyCanonicalHistory() {
 export default function CanonicalHistory(){
   const [archiveOpen,setArchiveOpen]=useState(false);
   const [priorArchiveOpen,setPriorArchiveOpen]=useState(false);
+  const [stagesOpen,setStagesOpen]=useState(false);
   return <main className="canonical-history">
     <header className="history-heading"><div>
-      <div className="history-eyebrow">BLUEWATERAI / IMMUTABLE RESEARCH RECORD</div>
+      <div className="history-eyebrow">BLUEWATERAI / EXACT-ROUND RESEARCH RECORD</div>
       <h1>Round history</h1>
-      <p>Compare frozen choices with verified outcomes. Entry estimates are not fills or trading profit.</p>
+      <p>Primary 30-second benchmark first. A provisional live lean is not a frozen prediction; only committed choices with verified WaterX results count as correct or incorrect. Unobserved rounds during visitor-only idle periods must not be counted as losses.</p>
     </div></header>
-    <TwoStageHistory/>
+    <section aria-label="Primary benchmark round history">
+      <h2>Bluewater Decision · primary 30-second benchmark</h2>
+      <p>Saved benchmark history is separate from the optional Early and Confirmation shadow studies. Each interval has its own verified outcome, denominators and timing.</p>
+      <TimedStrategyHistory interval={5}/>
+      <TimedStrategyHistory interval={15}/>
+    </section>
+    <details className="history-old-benchmarks" onToggle={event=>setStagesOpen(event.currentTarget.open)}>
+      <summary>Experimental Early Lock and Confirmation · separate, shadow-only research</summary>
+      {stagesOpen&&<><p>Independent predictions, not sequential approvals of the 30-second benchmark. An unqualified confirmation model is inactive, not an incorrect or failed trade.</p><TwoStageHistory/></>}
+    </details>
     <details className="history-old-benchmarks" onToggle={event=>setPriorArchiveOpen(event.currentTarget.open)}>
-      <summary>Prior-strategy archive · qualification benchmark and earlier strategies</summary>
+      <summary>Prior qualification-gate strategy versions · different cohorts</summary>
       {priorArchiveOpen&&<TimedDecisionHistory/>}
     </details>
     <details className="history-old-benchmarks" onToggle={event=>setArchiveOpen(event.currentTarget.open)}>
-      <summary>Legacy checkpoint archive · separate cohorts</summary>
+      <summary>Legacy market baseline / Bluewater champion checkpoint archive · different cohorts</summary>
       {archiveOpen&&<LegacyCanonicalHistory/>}
     </details>
   </main>;

@@ -942,3 +942,17 @@
   .history-entry-meta { gap: 6px 10px; }
   .learning-status-grid > div { min-height: 75px; padding: 11px 9px; }
 }
+
+/* Informational time-and-economics scale — never color a screen as a buy order. */
+.desk-entry-window { padding: .9rem; border-top: 1px solid var(--desk-line); background: rgba(118,140,160,.07); display: grid; gap: .5rem; min-width: 0; }
+.desk-entry-heading { display: flex; justify-content: space-between; align-items: center; gap: .6rem; flex-wrap: wrap; font-size: .7rem; letter-spacing: .07em; color: var(--desk-muted); }
+.desk-entry-heading strong { font-size: .83rem; color: #e8bd79; letter-spacing: 0; }
+.desk-entry-track { border-radius: 999px; background: rgba(159,194,200,.22); overflow: hidden; width: 100%; height: 9px; }
+.desk-entry-track i { display: block; background: #a8bac6; height: 100%; border-radius: inherit; transition: width 200ms ease; }
+.desk-entry-stats { display: flex; gap: .45rem .9rem; flex-wrap: wrap; justify-content: space-between; color: #c8d6d0; font-size: .72rem; font-variant-numeric: tabular-nums; }
+.desk-entry-window p { margin: .25rem 0; font-size: .77rem; line-height: 1.45; }
+.desk-entry-window small { color: #a7bcb5; font-size: .69rem; line-height: 1.45; }
+.desk-entry-window[data-status="LATE_TO_ENTER"] .desk-entry-heading strong,
+.desk-entry-window[data-status="SIGNAL_CONFLICT"] .desk-entry-heading strong { color: #e8a7a7; }
+.two-stage-mode { display: block; margin: .35rem 0; color: #afc5c1; font-size: .7rem; }
+@media (prefers-reduced-motion: reduce) { .desk-entry-track i { transition: none; } }

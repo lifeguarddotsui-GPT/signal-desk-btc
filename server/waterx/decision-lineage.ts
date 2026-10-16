@@ -77,7 +77,7 @@ export function projectLineageRow(raw:Record<string,unknown>,now:number):Lineage
       raw[`${name}_id`]!=null&&raw[`${name}_outbox_id`]!=null&&
       finite(raw[`${name}_ack`])!==null&&finite(raw[`${name}_ack`])!<=expiryMs&&marketId!==null&&
       exact(d)&&d.stage===stageName&&d.network==="sui:mainnet"&&d.marketId===marketId&&
-      [TWO_STAGE_STRATEGY,PREVIOUS_TWO_STAGE_STRATEGY].includes(String(d.strategyVersion))&&
+      d.strategyVersion===TWO_STAGE_STRATEGY&&
       d.strategyVersion===raw.stage_strategy;
     if(!matching)return missing(Number(raw.stage_match_count)>1?"AMBIGUOUS_STAGE_MARKET":
       raw[`${name}_id`]!=null?

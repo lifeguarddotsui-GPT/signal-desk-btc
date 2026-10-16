@@ -33,3 +33,11 @@ Status: draft-only GitHub source. NOT deployed or merged.
 8. Rollback: set WATERX_VISITOR_ONLY_MODE=false and publish previous approved revision. This intentionally restores around-the-clock DB work and likely higher costs.
 
 No merging, deploying, database removal, schema modifications, wallet signing, or production changes are authorized by this document.
+
+## Replit connection and CI status — October 16
+
+- User's connected Replit App is **Blue Water Agents**, and its existing deployment reports success for `https://bluewaterai.app`. This confirms app access, NOT that the GitHub visitor-only branch is present in the Replit workspace or live production.
+- Replit's direct publish action republishes the **current Replit workspace**. It does not automatically import this GitHub PR. Do not invoke publish until source synchronization, release SHA verification and express owner approval.
+- The targeted GitHub visitor-regressions job completed successfully: TypeScript, production build, visitor lease tests, and HTTP idle-route tests.
+- The complete repository test suite **timed out at 180 seconds** (exit code 124) after showing 697 passing subtests in the log; root cause/remaining suite coverage not established. Do not mark full CI green or approve a release until the hanging handles are diagnosed and the complete suite finishes.
+- Do not use Replit's paid Agent for source inspection or a new update merely to synchronize GitHub changes without first checking potential AI-credit cost. Direct GitHub changes do not automatically reduce an existing active production database bill.

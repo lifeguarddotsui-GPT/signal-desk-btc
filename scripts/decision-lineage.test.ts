@@ -28,6 +28,8 @@ test("unified view scores saved primary and early independently and never makes 
   assert.equal(row.outcome,"DOWN");
   assert.equal(row.primary.score,"CORRECT");assert.equal(row.early.score,"INCORRECT");
   assert.equal(row.confirmation.score,"NO_LOCK");assert.equal(row.congruence,"DISAGREE");
+  assert.equal(row.alignment.state,"CONFLICT");
+  assert.equal(row.alignment.direction,null);
   assert.match(row.confirmation.reason??"",/CONFIRMATION_POLICY_NOT_QUALIFIED/);
 });
 test("exact identity, outbox and provider proof gate all accuracy claims",()=>{
@@ -62,13 +64,24 @@ test("one bounded read-only lineage query does not create rounds for invisible t
   assert.equal(calls,1);
   assert.match(sql,/FROM waterx_timed_rounds/);assert.match(sql,/LIMIT \$5/);
   assert.doesNotMatch(sql,/INSERT INTO|UPDATE\s|DELETE FROM/i);
-  assert.equal(args[4],40);assert.equal(report.cohortN,1);
+  assert.equal(args[4],40);assert.equal(args[6],now);assert.equal(report.cohortN,1);
+  assert.match(sql,/start_ms<\$7/);
+  const earlier=await decisionLineage({interval:"5",window:"24h",limit:40,beforeMs:start+120_000},now,db as any);
+  assert.equal(args[6],start+120_000);
+  assert.equal(earlier.cohortN,1);
+  assert.equal(lineageQuery.safeParse({beforeMs:-1}).success,false);
   assert.equal(report.stats.primary.correct,1);assert.equal(report.stats.early.incorrect,1);
   assert.equal(report.stats.confirmation.scored,0);assert.equal(report.paired.verifiedN,1);
   assert.ok(Math.abs(report.stats.primary.brier!-.0961)<1e-9);
   assert.ok(Math.abs(report.stats.early.brier!-.4761)<1e-9);
   assert.equal(report.stats.primary.probabilityScoredN,1);
   assert.equal(report.stats.primary.medianSecondsRemainingAtAck,242);
+  const earlyFirst=report.timingBands.find(b=>b.stage==="early"&&b.intervalMinutes===5&&b.band==="FIRST_THIRD");
+  assert.equal(earlyFirst?.verifiedN,1);
+  assert.equal(earlyFirst?.descriptiveAccuracy,null,"one round cannot establish historical accuracy");
+  const primaryFirst=report.timingBands.find(b=>b.stage==="primary"&&b.intervalMinutes===5&&b.band==="FIRST_THIRD");
+  assert.equal(primaryFirst?.correct,1);
+
   assert.equal(lineageQuery.safeParse({limit:1001}).success,false);
 });
 test("default history UI uses a single lazy bounded endpoint and does not poll",()=>{

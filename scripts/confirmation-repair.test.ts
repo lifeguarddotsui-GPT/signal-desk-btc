@@ -68,6 +68,14 @@ test("opt-in rule confirmation freezes genuine subsequent market evidence withou
         probabilityUp:side==="UP"?.8:.2,probabilityDown:side==="UP"?.2:.8,
         features:{...o.features,comparison:{price:100,asOf:"same"}}}))};
       assert.equal(assessStage(duplicate,"CONFIRMATION",null,null).eligible,false);
+      // Coinbase chart movement alone must not masquerade as an independently
+      // updated WaterX probability: the market-maker odds never changed.
+      const coinbaseOnly={...input,observations:input.observations.map(o=>({
+        ...o,probabilityUp:side==="UP"?.8:.2,probabilityDown:side==="UP"?.2:.8
+      }))};
+      const guard=assessStage(coinbaseOnly,"CONFIRMATION",null,null);
+      assert.equal(guard.eligible,false);
+      assert.equal(guard.reason,"WAITING_FOR_INDEPENDENT_EVIDENCE");
       const stale={...input,nowMs:start+48000};
       assert.equal(assessStage(stale,"CONFIRMATION",null,null).eligible,false);
       const noTime={...input,nowMs:input.expiryMs-15000};

@@ -1,4 +1,5 @@
 import React,{useEffect,useState} from "react";
+import {RealFillAuditPanel} from "./RealFillAuditPanel";
 
 type Choice={
   state:string;side:"UP"|"DOWN"|null;score:string;decisionId:string|null;
@@ -9,6 +10,7 @@ type Row={
   roundId:string;intervalMinutes:5|15;startMs:number;expiryMs:number;marketId:string|null;
   outcome:"UP"|"DOWN"|null;settlementStatus:string;primary:Choice;early:Choice;
   confirmation:Choice;checkpoint:Choice|null;congruence:string;learningNote:string;
+  alignment?:{state:string;direction:"UP"|"DOWN"|null;display:string;frozenCount:number};
 };
 type Stats={locked:number;correct:number;incorrect:number;scored:number;accuracy:number|null;coverage:number|null;
   brier:number|null;probabilityScoredN:number;medianSecondsRemainingAtAck:number|null};
@@ -16,6 +18,9 @@ type Payload={asOfMs:number;window:string;interval:string;cohortN:number;truncat
   stats:{primary:Stats;early:Stats;confirmation:Stats};
   paired:{verifiedN:number;agree:number;disagree:number;earlyWrongPrimaryCorrect:number;earlyCorrectPrimaryWrong:number;
     earlyConfirmationVerifiedN:number;confirmationCorrectedEarly:number;confirmationReversedCorrectEarly:number};
+  timingBands?:{stage:"primary"|"early"|"confirmation";intervalMinutes:5|15;
+    band:"FIRST_THIRD"|"MIDDLE_THIRD"|"LAST_THIRD";locked:number;
+    verifiedN:number;correct:number;incorrect:number;descriptiveAccuracy:number|null;minimumSampleN:number}[];
   rows:Row[]};
 const stamp=(n:number|null|undefined)=>n==null?"Not recorded":new Date(n).toLocaleString(undefined,{dateStyle:"short",timeStyle:"short"});
 const percentage=(n:number|null)=>n==null?"Not measurable":`${(n*100).toFixed(1)}%`;
@@ -43,6 +48,7 @@ function StatsLine({label,data}:{label:string;data:Stats}){
 export default function DecisionLineageHistory(){
   const [interval,setInterval]=useState("all");
   const [window,setWindow]=useState("24h");
+  const [beforeLocal,setBeforeLocal]=useState("");
   const [reload,setReload]=useState(0);
   const [data,setData]=useState<Payload|null>(null);
   const [error,setError]=useState("");
@@ -50,13 +56,15 @@ export default function DecisionLineageHistory(){
   useEffect(()=>{
     const abort=new AbortController();setLoading(true);setError("");setData(null);
     const query=new URLSearchParams({interval,window,limit:"40"});
+    const before=beforeLocal?new Date(beforeLocal).getTime():NaN;
+    if(Number.isFinite(before)&&before>0)query.set("beforeMs",String(before));
     fetch(`/api/waterx/decision-lineage?${query.toString()}`,{signal:abort.signal})
       .then(async r=>{if(!r.ok)throw new Error(`History unavailable (${r.status}). No data inferred.`);return r.json();})
       .then((p:Payload)=>{if(!abort.signal.aborted)setData(p);})
       .catch(e=>{if(!abort.signal.aborted)setError(String((e as Error).message));})
       .finally(()=>{if(!abort.signal.aborted)setLoading(false);});
     return ()=>abort.abort();
-  },[interval,window,reload]);
+  },[interval,window,beforeLocal,reload]);
   return <section className="two-stage-history" aria-label="Unified verified decision history" aria-busy={loading}>
     <header className="two-stage-history-heading"><div>
       <h2>One round · independent predictions</h2>
@@ -70,6 +78,10 @@ export default function DecisionLineageHistory(){
       <label>Observed window<select value={window} onChange={e=>setWindow(e.target.value)}>
         <option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option>
       </select></label>
+      <label>Show history before (device time)
+        <input type="datetime-local" value={beforeLocal} onChange={e=>setBeforeLocal(e.target.value)}/>
+      </label>
+      {beforeLocal&&<button type="button" onClick={()=>setBeforeLocal("")}>Back to latest</button>}
       <button type="button" onClick={()=>setReload(x=>x+1)}>Refresh once</button>
     </div>
     {loading&&<p>Loading bounded, verified exact-round records…</p>}
@@ -77,10 +89,28 @@ export default function DecisionLineageHistory(){
     {data&&<div>
       <p className="two-stage-cohort">{data.cohortN} discovered rounds on this page · {data.window} ·
         as of {stamp(data.asOfMs)} · no predictions invented for visitor-idle clock slots.
+        {beforeLocal?" Filtered to earlier completed rounds.":""}
         {data.truncated?" Showing latest 40; older records not included in these statistics.":""}</p>
       <StatsLine label="Primary 30-second benchmark" data={data.stats.primary}/>
       <StatsLine label="Early research" data={data.stats.early}/>
       <StatsLine label="Confirmation experiment" data={data.stats.confirmation}/>
+      <details className="history-timing-bands">
+        <summary>Historical lock timing by round third · exploratory, not trade entry</summary>
+        <p>These groups use saved prediction acknowledgement time, not actual WaterX purchase time.
+          The same market can change price between a saved decision and an order fill.
+          Accuracy is withheld for fewer than 20 verified observations in a matching cohort.</p>
+        <div className="history-timing-scroll">
+          <table><thead><tr><th>Signal</th><th>Interval</th><th>Frozen window</th><th>Verified n</th>
+            <th>Correct / incorrect</th><th>Historical accuracy</th></tr></thead>
+            <tbody>{(data.timingBands??[]).map(r=><tr key={`${r.stage}-${r.intervalMinutes}-${r.band}`}>
+              <td>{r.stage}</td><td>{r.intervalMinutes}m</td>
+              <td>{r.band==="FIRST_THIRD"?"Early":r.band==="MIDDLE_THIRD"?"Middle":"Late"}</td>
+              <td>{r.verifiedN}</td><td>{r.correct} / {r.incorrect}</td>
+              <td>{r.descriptiveAccuracy==null?"Insufficient sample":percentage(r.descriptiveAccuracy)}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </details>
       <section className="two-stage-paired" aria-label="Primary and early decision congruence">
         <h3>Matched early / primary comparison</h3>
         <p>Verified paired rounds n={data.paired.verifiedN} · same direction {data.paired.agree} ·
@@ -105,7 +135,9 @@ export default function DecisionLineageHistory(){
               <div className="two-stage-fact"><span>Official WaterX result</span>
                 <b>{r.settlementStatus==="VERIFIED"?`VERIFIED · ${r.outcome}`:r.settlementStatus}</b></div>
               <div className="two-stage-fact"><span>Primary vs Early direction</span><b>{r.congruence.replaceAll("_"," ")}</b></div>
+              <div className="two-stage-fact"><span>Early / Confirmation / Primary alignment</span><b>{r.alignment?.display??"Not classified"}</b></div>
               <p><strong>Learning interpretation:</strong> {r.learningNote}</p>
+              <RealFillAuditPanel round={r}/>
               <details><summary>Evidence IDs, policy and acknowledgement timing</summary>
                 <pre>{JSON.stringify({marketId:r.marketId,roundId:r.roundId,startMs:r.startMs,expiryMs:r.expiryMs,
                   primary:r.primary,early:r.early,confirmation:r.confirmation,checkpoint:r.checkpoint},null,2)}</pre>

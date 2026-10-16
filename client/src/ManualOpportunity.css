@@ -942,3 +942,28 @@
   .history-entry-meta { gap: 6px 10px; }
   .learning-status-grid > div { min-height: 75px; padding: 11px 9px; }
 }
+
+/* Informational time-and-economics scale — never color a screen as a buy order. */
+.desk-entry-window { padding: .9rem; border-top: 1px solid var(--desk-line); background: rgba(118,140,160,.07); display: grid; gap: .5rem; min-width: 0; }
+.desk-entry-heading { display: flex; justify-content: space-between; align-items: center; gap: .6rem; flex-wrap: wrap; font-size: .7rem; letter-spacing: .07em; color: var(--desk-muted); }
+.desk-entry-heading strong { font-size: .83rem; color: #e8bd79; letter-spacing: 0; }
+.desk-entry-track { border-radius: 999px; background: rgba(159,194,200,.22); overflow: hidden; width: 100%; height: 9px; }
+.desk-entry-track i { display: block; background: #a8bac6; height: 100%; border-radius: inherit; transition: width 200ms ease; }
+.desk-entry-stats { display: flex; gap: .45rem .9rem; flex-wrap: wrap; justify-content: space-between; color: #c8d6d0; font-size: .72rem; font-variant-numeric: tabular-nums; }
+.desk-entry-window p { margin: .25rem 0; font-size: .77rem; line-height: 1.45; }
+.desk-entry-window small { color: #a7bcb5; font-size: .69rem; line-height: 1.45; }
+.desk-entry-window[data-status="LATE_TO_ENTER"] .desk-entry-heading strong,
+.desk-entry-window[data-status="SIGNAL_CONFLICT"] .desk-entry-heading strong { color: #e8a7a7; }
+.two-stage-mode { display: block; margin: .35rem 0; color: #afc5c1; font-size: .7rem; }
+@media (prefers-reduced-motion: reduce) { .desk-entry-track i { transition: none; } }
+
+
+.real-trade-audit { padding: .75rem; border: 1px solid rgba(155,190,195,.24); border-radius: 8px; margin-top: .75rem; }
+.real-trade-audit summary { cursor: pointer; font-weight: 600; color: #d1e1d8; }
+.real-trade-audit p { font-size: .75rem; line-height: 1.5; overflow-wrap: anywhere; }
+.real-trade-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(165px,1fr)); gap: .55rem; padding: .6rem 0; }
+.real-trade-fields label { display: flex; flex-direction: column; min-width: 0; gap: .35rem; color: #c0d3cb; font-size: .7rem; }
+.real-trade-fields input,.real-trade-fields select { color: #e6ece9; background: #112329; border: 1px solid #426069; border-radius: 5px; min-width: 0; padding: .55rem; font-size: 16px; }
+.real-trade-audit button { border: 1px solid #557985; border-radius: 7px; padding: .6rem .8rem; background: #1c3740; color: #d8ebdf; font: inherit; cursor: pointer; }
+.real-trade-result { margin-top: .6rem; border-top: 1px solid #426069; padding-top: .5rem; }
+.real-trade-result strong { color: #ddc68c; }

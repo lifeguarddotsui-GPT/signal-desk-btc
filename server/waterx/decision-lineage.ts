@@ -3,6 +3,7 @@ import type {LockDb} from "./lock-store";
 import {researchPool} from "./research-store";
 import {TIMED_STRATEGY,type TimedDecision} from "../../shared/timed-decision";
 import {TWO_STAGE_STRATEGY} from "../../shared/two-stage";
+import {summarizeTriad,type TriadSummary} from "../../shared/stage-congruence";
 
 /**
  * Read-only, bounded exact-round reconciliation. No migrations or new collectors.
@@ -12,6 +13,7 @@ export const lineageQuery=z.object({
   interval:z.enum(["all","5","15"]).default("all"),
   window:z.enum(["24h","7d"]).default("24h"),
   limit:z.coerce.number().int().min(1).max(100).default(40),
+  beforeMs:z.coerce.number().int().positive().optional(),
 }).strict();
 export type LineageScore="CORRECT"|"INCORRECT"|"AWAITING_SETTLEMENT"|"DISPUTED"|"WITHHELD"|"NO_LOCK";
 export type LineageChoice={
@@ -24,7 +26,7 @@ export type LineageRow={
   outcome:"UP"|"DOWN"|null;settlementStatus:"VERIFIED"|"PENDING"|"DISPUTED"|"WITHHELD"|"MISSING";
   primary:LineageChoice;early:LineageChoice;confirmation:LineageChoice;
   checkpoint:LineageChoice|null;congruence:"AGREE"|"DISAGREE"|"NOT_COMPARABLE";
-  learningNote:string;
+  learningNote:string;alignment:TriadSummary;
 };
 const side=(x:unknown):"UP"|"DOWN"|null=>x==="UP"||x==="DOWN"?x:null;
 const finite=(x:unknown):number|null=>x!==null&&x!==undefined&&Number.isFinite(Number(x))?Number(x):null;
@@ -116,12 +118,13 @@ export function projectLineageRow(raw:Record<string,unknown>,now:number):Lineage
       typeof checkpointRaw.reason==="string"?checkpointRaw.reason:null,
   } as LineageChoice:null;
   const congruence=primary.side&&early.side?primary.side===early.side?"AGREE":"DISAGREE":"NOT_COMPARABLE";
+  const alignment=summarizeTriad({primary:primary.side,early:early.side,confirmation:confirmation.side});
   const learningNote=settlementStatus!=="VERIFIED"?
     "Official outcome not verified; no choice is scored.":primary.score==="NO_LOCK"&&early.score==="NO_LOCK"?
     "No saved primary or early prediction; no correctness inference.": 
     `Benchmark: ${primary.score}. Early: ${early.score}. Confirmation: ${confirmation.score}. Only saved choices are scored; no model is automatically trained or promoted.`;
   return {roundId,intervalMinutes,startMs,expiryMs,marketId,outcome,settlementStatus,
-    primary,early,confirmation,checkpoint,congruence,learningNote};
+    primary,early,confirmation,checkpoint,congruence,alignment,learningNote};
 }
 
 export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=researchPool){
@@ -132,7 +135,7 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
     SELECT network,round_id,interval_minutes,start_ms,expiry_ms
     FROM waterx_timed_rounds
     WHERE network='sui:mainnet' AND strategy_version=$1
-      AND start_ms>=$2 AND start_ms<$3 AND ($4::int IS NULL OR interval_minutes=$4)
+      AND start_ms>=$2 AND start_ms<$3 AND start_ms<$7 AND ($4::int IS NULL OR interval_minutes=$4)
     ORDER BY start_ms DESC,interval_minutes,round_id LIMIT $5
   )
   SELECT r.*,sr.market_id,sr.strategy_version AS stage_strategy,sr.stage_match_count,
@@ -182,7 +185,7 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
     AND l.start_ms=r.start_ms AND l.expiry_ms=r.expiry_ms
   ORDER BY r.start_ms DESC,r.interval_minutes,r.round_id`,
   [TIMED_STRATEGY,cutoff,now,q.interval==="all"?null:Number(q.interval),q.limit,
-    TWO_STAGE_STRATEGY]);
+    TWO_STAGE_STRATEGY,Math.min(q.beforeMs??now,now)]);
   const rows:LineageRow[]=result.rows.map(raw=>projectLineageRow(raw,now));
   const median=(values:number[])=>values.length?
     [...values].sort((a,b)=>a-b)[Math.floor((values.length-1)/2)]:null;
@@ -208,11 +211,34 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
       brier,probabilityScoredN:scoredProbability.length,
       medianSecondsRemainingAtAck:median(remaining)};
   };
+  // Descriptive, non-causal timing cohorts: when a *saved* prediction
+  // was acknowledged, NOT when any order was executed. Never fabricate
+  // win rates from fewer than 20 verified records per identical cohort.
+  const timingBands=(["primary","early","confirmation"] as const).flatMap(stage=>
+    ([5,15] as const).flatMap(intervalMinutes=>
+      (["FIRST_THIRD","MIDDLE_THIRD","LAST_THIRD"] as const).map(band=>{
+        const matching=rows.filter(r=>{
+          const ack=r[stage].acknowledgedAtMs;
+          if(r.intervalMinutes!==intervalMinutes||ack==null||!r[stage].side||
+            ack<r.startMs||ack>=r.expiryMs)return false;
+          const fraction=(ack-r.startMs)/(r.expiryMs-r.startMs);
+          return band==="FIRST_THIRD"?fraction<1/3:
+            band==="MIDDLE_THIRD"?fraction>=1/3&&fraction<2/3:fraction>=2/3;
+        });
+        const scored=matching.filter(r=>["CORRECT","INCORRECT"].includes(r[stage].score));
+        const correct=scored.filter(r=>r[stage].score==="CORRECT").length;
+        return {stage,intervalMinutes,band,locked:matching.length,
+          verifiedN:scored.length,correct,incorrect:scored.length-correct,
+          descriptiveAccuracy:scored.length>=20?correct/scored.length:null,
+          minimumSampleN:20,
+        };
+      })));
   const paired=rows.filter(r=>r.primary.side&&r.early.side&&r.settlementStatus==="VERIFIED");
   const confirmedPairs=rows.filter(r=>r.early.side&&r.confirmation.side&&r.settlementStatus==="VERIFIED");
   return {asOfMs:now,window:q.window,interval:q.interval,cohortN:rows.length,
     truncated:rows.length===q.limit,source:"prospectively discovered timed rounds, not all theoretical clock slots",
     stats:{primary:stats("primary"),early:stats("early"),confirmation:stats("confirmation")},
+    timingBands,
     paired:{verifiedN:paired.length,agree:paired.filter(r=>r.congruence==="AGREE").length,
       disagree:paired.filter(r=>r.congruence==="DISAGREE").length,
       earlyWrongPrimaryCorrect:paired.filter(r=>r.early.score==="INCORRECT"&&r.primary.score==="CORRECT").length,

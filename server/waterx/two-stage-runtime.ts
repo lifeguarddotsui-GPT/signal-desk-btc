@@ -6,7 +6,7 @@ import {observationId} from "./observation-provenance";
 import {validWaterxProbabilityPair} from "../../shared/round-decision";
 import {decisionWriterAllowed,decisionDeploymentId} from "./decision-authority";
 import {stageIdentity,readStageLocks,commitStage,candidateStillValid} from "./two-stage-store";
-import {assessStage,accumulatedFeatures,type LearnedStagePolicy} from "./two-stage-policy";
+import {assessStage,accumulatedFeatures,ruleConfirmationEnabled,type LearnedStagePolicy} from "./two-stage-policy";
 import {researchPreference} from "./early-policy";
 import {stagePolicyRegistry} from "./two-stage-registry";
 import type {PricePoint} from "../../shared/price-area";
@@ -258,7 +258,11 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
     return {...round,marketId:e.round.marketId,strategyVersion:TWO_STAGE_STRATEGY,shadowOnly:true,automaticExecutionAllowed:false,
       early:state("EARLY",e.early),confirmation:state("CONFIRMATION",e.confirmation),
        relationship:stageRelationship(e.early.lock,e.confirmation.lock),priceFeatures,settlementRule:priceFeatures.settlementRule,
-       researchPreference:e.round.researchPreference,policyRegistry:stagePolicyRegistry.health(),researchActivated:false};
+       researchPreference:e.round.researchPreference,policyRegistry:stagePolicyRegistry.health(),
+       confirmationRuleEnabled:ruleConfirmationEnabled(),
+       confirmationMode:policyFor(input,"CONFIRMATION")?"QUALIFIED_MODEL":
+         ruleConfirmationEnabled()?"EVIDENCE_RULE_ENABLED":"UNAVAILABLE",
+       researchActivated:false};
   }
   function unavailable(interval:5|15,atMs:number,reason:string){
     const e=entries.get(interval);if(!e||atMs>=e.round.expiryMs)return;
@@ -341,7 +345,8 @@ export function createTwoStageRuntime(options:{db?:Db;now?:()=>number;policies?:
     priceRejected,priceArchiveFailures,optionalFailures,independentPricePointN:rawPrices.size,
     priceCapture:{upstreamTicks:priceStreamTicks,captureMinimumSourceSpacingMs:3000,maximumInterpolationGapMs:5000,
       recentSourceCadenceMs:sourceCadence.slice(),recentSourceToReceiptLatencyMs:receiptLatency.slice()},
-    confirmationPolicy:stagePolicyRegistry.health(),researchPreference:options.preference??researchPreference,
+    confirmationPolicy:stagePolicyRegistry.health(),confirmationRuleEnabled:ruleConfirmationEnabled(),
+    researchPreference:options.preference??researchPreference,
     idlePoolFailure,lastError:Array.from(entries.values()).map(e=>e.error).filter(Boolean).at(-1)??null})};
 }
 export const twoStageRuntime=createTwoStageRuntime();

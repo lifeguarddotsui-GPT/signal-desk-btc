@@ -23,6 +23,7 @@ type Props = {
   refresh?: { pending: boolean; error: string };
   marketReference?: { price: number | null; quality: string; source: string };
   marketAsks?: {up:number|null;down:number|null};
+  marketProbabilities?:{up:number|null;down:number|null};
   comparison?: { price: number | null; source: string; receivedAtMs: number | null };
   fixtureName?: string | null;
   children?: React.ReactNode;
@@ -154,7 +155,7 @@ function TwoStageDeskRows({ projection, round, interval, now }: {
 
 export function ManualOpportunity({
   view, now, interval = view.decision?.intervalMinutes ?? 5, round, onIntervalChange, onRetry, refresh,
-  marketReference, marketAsks, comparison, fixtureName, children, economics,
+  marketReference, marketAsks, marketProbabilities, comparison, fixtureName, children, economics,
 }: Props) {
   const [compactPrices,setCompactPrices]=React.useState(()=>typeof window!=="undefined"&&window.matchMedia("(max-width: 900px)").matches);
   const [pricesExpanded,setPricesExpanded]=React.useState(false);
@@ -344,6 +345,7 @@ export function ManualOpportunity({
     </div>
     <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
     {entryWindow && exactRound && <TradeReadinessPanel entry={entryWindow} timing={operationalTimingWindow({startMs:exactRound.startMs,expiryMs:exactRound.expiryMs,nowMs:now})} referenceConfirmed={confirmed} alignment={alignment}
+      marketProbabilities={marketProbabilities??{up:null,down:null}}
       upAsk={purchase?.up.status==="reported"?purchase.up.askCents:marketAsks?.up??null}
       downAsk={purchase?.down.status==="reported"?purchase.down.askCents:marketAsks?.down??null}/>}
     {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>

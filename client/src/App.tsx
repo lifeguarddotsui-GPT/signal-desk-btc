@@ -19,6 +19,7 @@ import { ManualOpportunity } from "./ManualOpportunity";
 import "./ManualOpportunity.css";
 import { projectExactRoundDecision, projectServerClock, type LiveSnapshotEnvelope } from "./live-decision-contract";
 import { useLiveSnapshot } from "./useLiveSnapshot";
+import { useVisitorPresence } from "./useVisitorPresence";
 import AgentPage from "./AgentPage";
 import EarlyLearningSummary from "./EarlyLearningSummary";
 import {chartTimeAxis} from "./chart-axis";
@@ -1137,6 +1138,13 @@ function HealthPage() {
 }
 
 export default function App() {
+  const presence = useVisitorPresence();
+  if (!presence.ready) return <main className="page" role="status" aria-live="polite">
+    <div className="eyebrow">BLUE WATER · ON-DEMAND COLLECTION</div>
+    <h1>Connecting to live market data</h1>
+    <p>Data gathering is active only while a visitor has this page visible. Research rounds
+    missed while no visitors are online are not reconstructed.</p>
+  </main>;
   return <Shell><Switch>
     <Route path="/" component={LivePage} />
     <Route path="/history" component={CanonicalHistory} />

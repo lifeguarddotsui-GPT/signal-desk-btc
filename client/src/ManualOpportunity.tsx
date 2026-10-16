@@ -252,7 +252,12 @@ export function ManualOpportunity({
     twoStageProjection.automaticExecutionAllowed === false;
   const stageSides = stageMatches ? (["early","confirmation"] as const)
     .map(name=>twoStageProjection![name]).filter(st=>st.persistence==="COMMITTED" &&
-      st.lock?.commitVerified === true && st.lock?.roundId === exactRound!.id &&
+      st.lock?.commitVerified === true && st.lock?.network === "sui:mainnet" &&
+      st.lock?.strategyVersion === TWO_STAGE_STRATEGY &&
+      st.lock?.marketId === twoStageProjection!.marketId &&
+      st.lock?.shadowOnly === true && st.lock?.automaticExecutionAllowed === false &&
+      st.lock?.intervalMinutes === interval &&
+      st.lock?.roundId === exactRound!.id &&
       st.lock?.startMs === exactRound!.startMs && st.lock?.expiryMs === exactRound!.expiryMs)
     .map(st=>st.lock!.side) : [];
   const primarySide:Direction|null=locked&&(savedSide==="UP"||savedSide==="DOWN")?savedSide:null;

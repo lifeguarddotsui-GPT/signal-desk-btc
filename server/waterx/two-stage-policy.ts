@@ -12,10 +12,13 @@ export type LearnedStagePolicy={version:string;stage:LockStage;interval:5|15;mod
   qualified:true;economicQuotesVerified:boolean};
 /** Research safety reserve, not a claim of verified executable order terms. */
 export const CONFIRMATION_ORDER_RESERVE_MS=30000;
-/** Independent market-evidence confirmation, NOT a calibrated Bluewater forecast.
- * Explicit opt-in prevents silently changing the semantics of existing v2 cohorts. */
+/** Uncalibrated, shadow-only WaterX evidence experiment; NOT a trained forecast.
+ * Turned ON by default so the Confirmation panel cannot sit disabled merely
+ * because Replit omitted a deployment secret. Explicit "false" is a kill switch.
+ * Does not enable, sign, or submit any trades.
+ */
 export const RULE_CONFIRMATION_POLICY="confirmation-evidence-guard-v1";
-export const ruleConfirmationEnabled=()=>process.env.WATERX_RULE_CONFIRMATION_ENABLED==="true";
+export const ruleConfirmationEnabled=()=>process.env.WATERX_RULE_CONFIRMATION_ENABLED!=="false";
 export function accumulatedFeatures(input:StageInput){
   const latest=input.observations.at(-1),f=latest?.features??{};
   const points:PricePoint[]=input.observations.flatMap(o=>{

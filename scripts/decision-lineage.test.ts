@@ -8,7 +8,7 @@ import {TWO_STAGE_STRATEGY} from "../shared/two-stage";
 const start=1792112400000,now=start+3600000;
 const base=()=>({
   network:"sui:mainnet",interval_minutes:5,round_id:"btc-lineage-test",start_ms:start,expiry_ms:start+300000,
-  market_id:"btc-market-fixture",stage_strategy:TWO_STAGE_STRATEGY,
+  market_id:"btc-market-fixture",stage_strategy:TWO_STAGE_STRATEGY,stage_match_count:1,
   primary_id:"primary-id",primary_outbox_id:"primary-id",primary_ack:start+58000,
   primary_decision:{strategyVersion:TIMED_STRATEGY,roundId:"btc-lineage-test",intervalMinutes:5,startMs:start,expiryMs:start+300000,
     status:"LOCKED",side:"DOWN",probabilityUp:.31,decisionAtMs:start+55000,lockReason:"QUALIFIED"},
@@ -34,6 +34,9 @@ test("exact identity, outbox and provider proof gate all accuracy claims",()=>{
   const a=base();
   assert.equal(projectLineageRow({...a,primary_decision:{...a.primary_decision,roundId:"different"}},now).primary.score,"NO_LOCK");
   assert.equal(projectLineageRow({...a,early_outbox_id:null},now).early.score,"NO_LOCK");
+  assert.equal(projectLineageRow({...a,early_ack:null},now).early.score,"NO_LOCK");
+  assert.equal(projectLineageRow({...a,primary_ack:null},now).primary.score,"NO_LOCK");
+  assert.equal(projectLineageRow({...a,stage_match_count:2},now).early.reason,"AMBIGUOUS_STAGE_MARKET");
   assert.equal(projectLineageRow({...a,settlement_disputed:true},now).primary.score,"DISPUTED");
   assert.equal(projectLineageRow({...a,outcome:"UP"},now).settlementStatus,"PENDING");
   assert.equal(projectLineageRow({...a,label_status:"withheld",outcome:null},now).primary.score,"WITHHELD");

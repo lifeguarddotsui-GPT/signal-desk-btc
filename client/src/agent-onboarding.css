@@ -401,3 +401,12 @@
 @media (prefers-reduced-motion: reduce) {
   .agent-onboarding *, .agent-onboarding *::before, .agent-onboarding *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+
+.ao-recovery{border:1px solid #557675;border-radius:10px;padding:15px;margin-top:18px;background:#142d31;display:flex;flex-direction:column;gap:10px}
+.ao-recovery h4{font-size:18px;line-height:1.3;margin:0;color:#e3f1e7}
+.ao-recovery p{margin:0;font-size:13px;line-height:1.6}
+.ao-recovery-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.ao-recovery-grid input{width:100%;min-width:0;box-sizing:border-box;font-size:16px;padding:10px;color:#fff;background:#10252a;border:1px solid #607e7d;border-radius:6px}
+.ao-recovery-consent{display:flex;align-items:flex-start;gap:9px;font-size:13px;line-height:1.5}
+.ao-recovery-consent input{flex-shrink:0;margin-top:4px}
+@media(max-width:450px){.trade-readiness-metrics{gap:5px}.trade-readiness-metrics>div{padding:9px 6px}.trade-readiness-inputs{grid-template-columns:1fr 1fr}.trade-readiness-inputs label:last-child{grid-column:1/-1}.ao-recovery-grid{grid-template-columns:1fr}}

@@ -36,10 +36,12 @@ test("round, source, signal, timing and conflict gate fail closed",()=>{
 });
 test("entry UI has descriptive slider, no live buy button or confidence spoofing",()=>{
  const ui=readFileSync(new URL("../client/src/ManualOpportunity.tsx",import.meta.url),"utf8");
- assert.match(ui,/aria-label="Entry timing and economic research"/);
- assert.match(ui,/role="progressbar"/);
- assert.match(ui,/WaterX BTC settles against Chainlink TWAP/);
- assert.doesNotMatch(ui,/\>BUY NOW\</i);
+ assert.match(ui,/TradeReadinessPanel/);
+ const panel=readFileSync(new URL("../client/src/TradeReadinessPanel.tsx",import.meta.url),"utf8");
+ assert.match(panel,/aria-label="Trade decision support"/);
+ assert.match(panel,/role="progressbar"/);
+ assert.match(panel,/WaterX market reference rather than Coinbase spot/);
+ assert.doesNotMatch(panel,/\>BUY NOW\</i);
  assert.match(ui,/Confirmation mode:/);
  assert.match(ui,/confirmationMode === "UNAVAILABLE"/);
 });

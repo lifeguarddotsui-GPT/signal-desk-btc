@@ -3,10 +3,11 @@ import type {EntryWindowResult,Direction} from "../../shared/entry-window";
 import type {TimingWindow} from "../../shared/operational-timing";
 
 /** Timing is an OPERATIONAL heuristic, not empirical expected value or a buy recommendation. */
-export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,upAsk,downAsk}:{
+export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,marketProbabilities,upAsk,downAsk}:{
   entry:EntryWindowResult;timing:TimingWindow;referenceConfirmed:boolean;
   alignment:{display:string;state:string;direction:Direction|null};
   upAsk:number|null;downAsk:number|null;
+  marketProbabilities:{up:number|null;down:number|null};
 }) {
   const [selectedSide,setSelectedSide]=React.useState<Direction>("UP");
   const [typedAsk,setTypedAsk]=React.useState("");
@@ -64,6 +65,10 @@ export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,u
       <div><span>Trade edge</span><b>Not validated</b></div>
     </div>
     <p className="trade-readiness-lineage"><b>Early / Confirmation / Primary:</b> {alignment.display}</p>
+    <p className="trade-waterx-sentiment">WaterX market-implied odds:
+      <strong> YES {fmtPct(marketProbabilities.up)} · NO {fmtPct(marketProbabilities.down)}</strong>
+      <small> Market prices, not Blue Water calibrated forecast probabilities.</small>
+    </p>
     <div className="trade-pricing" aria-label="WaterX buy-in value comparison">
       <strong>Compare actual WaterX purchase price</strong>
       <p>Use the YES or NO price WaterX shows when you place a $5 position.</p>

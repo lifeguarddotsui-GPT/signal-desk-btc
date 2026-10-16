@@ -10,10 +10,12 @@ type Row={
   outcome:"UP"|"DOWN"|null;settlementStatus:string;primary:Choice;early:Choice;
   confirmation:Choice;checkpoint:Choice|null;congruence:string;learningNote:string;
 };
-type Stats={locked:number;correct:number;incorrect:number;scored:number;accuracy:number|null;coverage:number|null};
+type Stats={locked:number;correct:number;incorrect:number;scored:number;accuracy:number|null;coverage:number|null;
+  brier:number|null;probabilityScoredN:number;medianSecondsRemainingAtAck:number|null};
 type Payload={asOfMs:number;window:string;interval:string;cohortN:number;truncated:boolean;source:string;
   stats:{primary:Stats;early:Stats;confirmation:Stats};
-  paired:{verifiedN:number;agree:number;disagree:number;earlyWrongPrimaryCorrect:number;earlyCorrectPrimaryWrong:number};
+  paired:{verifiedN:number;agree:number;disagree:number;earlyWrongPrimaryCorrect:number;earlyCorrectPrimaryWrong:number;
+    earlyConfirmationVerifiedN:number;confirmationCorrectedEarly:number;confirmationReversedCorrectEarly:number};
   rows:Row[]};
 const stamp=(n:number|null|undefined)=>n==null?"Not recorded":new Date(n).toLocaleString(undefined,{dateStyle:"short",timeStyle:"short"});
 const percentage=(n:number|null)=>n==null?"Not measurable":`${(n*100).toFixed(1)}%`;
@@ -34,6 +36,8 @@ function StatsLine({label,data}:{label:string;data:Stats}){
     <div><span>{label} correct / incorrect</span><b>{data.correct} / {data.incorrect}</b></div>
     <div><span>Accuracy · verified saved n={data.scored}</span><b>{percentage(data.accuracy)}</b></div>
     <div><span>Prediction coverage · saved n={data.locked}</span><b>{percentage(data.coverage)}</b></div>
+    <div><span>Frozen market-odds Brier · n={data.probabilityScoredN}</span><b>{data.brier==null?"Not measurable":data.brier.toFixed(4)}</b></div>
+    <div><span>Median time remaining at durable acknowledgement</span><b>{data.medianSecondsRemainingAtAck==null?"Not available":`${Math.round(data.medianSecondsRemainingAtAck)}s`}</b></div>
   </div>;
 }
 export default function DecisionLineageHistory(){
@@ -81,7 +85,10 @@ export default function DecisionLineageHistory(){
         <h3>Matched early / primary comparison</h3>
         <p>Verified paired rounds n={data.paired.verifiedN} · same direction {data.paired.agree} ·
           different direction {data.paired.disagree} · primary corrected Early {data.paired.earlyWrongPrimaryCorrect} ·
-          primary reversed a correct Early {data.paired.earlyCorrectPrimaryWrong}.</p>
+          primary reversed a correct Early {data.paired.earlyCorrectPrimaryWrong}.
+          Verified Early/Confirmation pairs n={data.paired.earlyConfirmationVerifiedN} · Confirmation corrected Early
+          {data.paired.confirmationCorrectedEarly} · Confirmation reversed a correct Early
+          {data.paired.confirmationReversedCorrectEarly}.</p>
       </section>
       {data.rows.length?<div className="two-stage-round-list">
         {data.rows.map(r=><article className="two-stage-history-row" key={`${r.roundId}:${r.intervalMinutes}:${r.startMs}`}>
@@ -108,7 +115,7 @@ export default function DecisionLineageHistory(){
         </article>)}
       </div>:<p>No prospectively discovered exact-round records in the selected window. Idle periods are not classified as failures.</p>}
       <p className="two-stage-footnote">Accuracies apply only to verified saved decisions in this bounded page, not all trading opportunities.
-        Market-implied probabilities are not calibrated Bluewater forecasts or executable quotes. Never infer P/L.</p>
+        Market-implied Brier scores are diagnostics, not evidence of an independent calibrated Bluewater model. They are not executable quotes; never infer P/L.</p>
     </div>}
   </section>;
 }

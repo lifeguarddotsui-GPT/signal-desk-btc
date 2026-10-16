@@ -259,6 +259,7 @@ export default function CanonicalHistory(){
   const [archiveOpen,setArchiveOpen]=useState(false);
   const [priorArchiveOpen,setPriorArchiveOpen]=useState(false);
   const [stagesOpen,setStagesOpen]=useState(false);
+  const [gatesOpen,setGatesOpen]=useState(false);
   return <main className="canonical-history">
     <header className="history-heading"><div>
       <div className="history-eyebrow">BLUEWATERAI / EXACT-ROUND RESEARCH RECORD</div>
@@ -274,9 +275,9 @@ export default function CanonicalHistory(){
       <summary>Experimental Early Lock and Confirmation · separate, shadow-only research</summary>
       {stagesOpen&&<><p>Independent predictions, not sequential approvals of the 30-second benchmark. An unqualified confirmation model is inactive, not an incorrect or failed trade.</p><TwoStageHistory/></>}
     </details>
-    <details className="history-old-benchmarks">
+    <details className="history-old-benchmarks" onToggle={event=>setGatesOpen(event.currentTarget.open)}>
       <summary>Prior strategy versions and full gate research audit</summary>
-      <TimedDecisionHistory/>
+      {gatesOpen&&<TimedDecisionHistory/>}
     </details>
     <details className="history-old-benchmarks" onToggle={event=>setArchiveOpen(event.currentTarget.open)}>
       <summary>Legacy market baseline / Bluewater champion checkpoint archive · different cohorts</summary>

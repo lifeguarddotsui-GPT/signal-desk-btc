@@ -3,8 +3,8 @@ import type {EntryWindowResult,Direction} from "../../shared/entry-window";
 import type {TimingWindow} from "../../shared/operational-timing";
 
 /** Timing is an OPERATIONAL heuristic, not empirical expected value or a buy recommendation. */
-export function TradeReadinessPanel({entry,timing,alignment,upAsk,downAsk}:{
-  entry:EntryWindowResult;timing:TimingWindow;
+export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,upAsk,downAsk}:{
+  entry:EntryWindowResult;timing:TimingWindow;referenceConfirmed:boolean;
   alignment:{display:string;state:string;direction:Direction|null};
   upAsk:number|null;downAsk:number|null;
 }) {
@@ -56,7 +56,7 @@ export function TradeReadinessPanel({entry,timing,alignment,upAsk,downAsk}:{
       <span>{entry.signal?`Saved ${entry.signal}`:"No frozen direction"}</span>
     </div>
     <div className="trade-decision-gates">
-      <div><span>Official reference</span><b>{entry.state==="REFERENCE_UNCONFIRMED"?"Unconfirmed":"See details"}</b></div>
+      <div><span>Official reference</span><b>{referenceConfirmed?"Confirmed":"Unconfirmed"}</b></div>
       <div><span>Prediction</span><b>{alignment.state==="CONFLICT"?"Conflict":signalReady?"Saved":"Not qualified"}</b></div>
       <div><span>Trade edge</span><b>Not validated</b></div>
     </div>

@@ -3,6 +3,7 @@ import "./beta-interface.css";
 import TimedDecisionHistory from "./TimedDecisionHistory";
 import TimedStrategyHistory from "./TimedStrategyHistory";
 import TwoStageHistory from "./TwoStageHistory";
+import DecisionLineageHistory from "./DecisionLineageHistory";
 
 type IntervalFilter = "all" | "5" | "15";
 type WindowFilter = "lifetime" | "100" | "50" | "20" | "24h" | "7d";
@@ -264,19 +265,18 @@ export default function CanonicalHistory(){
       <h1>Round history</h1>
       <p>Primary 30-second benchmark first. A provisional live lean is not a frozen prediction; only committed choices with verified WaterX results count as correct or incorrect. Unobserved rounds during visitor-only idle periods must not be counted as losses.</p>
     </div></header>
-    <section aria-label="Primary benchmark round history">
-      <h2>Bluewater Decision · primary 30-second benchmark</h2>
-      <p>Saved benchmark history is separate from the optional Early and Confirmation shadow studies. Each interval has its own verified outcome, denominators and timing.</p>
-      <TimedStrategyHistory interval={5}/>
-      <TimedStrategyHistory interval={15}/>
-    </section>
+    <DecisionLineageHistory/>
+    <details className="history-old-benchmarks" onToggle={event=>setPriorArchiveOpen(event.currentTarget.open)}>
+      <summary>Detailed primary 30-second benchmark · 5m and 15m separate analytics</summary>
+      {priorArchiveOpen&&<><TimedStrategyHistory interval={5}/><TimedStrategyHistory interval={15}/></>}
+    </details>
     <details className="history-old-benchmarks" onToggle={event=>setStagesOpen(event.currentTarget.open)}>
       <summary>Experimental Early Lock and Confirmation · separate, shadow-only research</summary>
       {stagesOpen&&<><p>Independent predictions, not sequential approvals of the 30-second benchmark. An unqualified confirmation model is inactive, not an incorrect or failed trade.</p><TwoStageHistory/></>}
     </details>
-    <details className="history-old-benchmarks" onToggle={event=>setPriorArchiveOpen(event.currentTarget.open)}>
-      <summary>Prior qualification-gate strategy versions · different cohorts</summary>
-      {priorArchiveOpen&&<TimedDecisionHistory/>}
+    <details className="history-old-benchmarks">
+      <summary>Prior strategy versions and full gate research audit</summary>
+      <TimedDecisionHistory/>
     </details>
     <details className="history-old-benchmarks" onToggle={event=>setArchiveOpen(event.currentTarget.open)}>
       <summary>Legacy market baseline / Bluewater champion checkpoint archive · different cohorts</summary>

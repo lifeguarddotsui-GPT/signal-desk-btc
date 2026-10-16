@@ -69,6 +69,12 @@ test("one bounded read-only lineage query does not create rounds for invisible t
   assert.ok(Math.abs(report.stats.early.brier!-.4761)<1e-9);
   assert.equal(report.stats.primary.probabilityScoredN,1);
   assert.equal(report.stats.primary.medianSecondsRemainingAtAck,242);
+  const earlyFirst=report.timingBands.find(b=>b.stage==="early"&&b.intervalMinutes===5&&b.band==="FIRST_THIRD");
+  assert.equal(earlyFirst?.verifiedN,1);
+  assert.equal(earlyFirst?.descriptiveAccuracy,null,"one round cannot establish historical accuracy");
+  const primaryFirst=report.timingBands.find(b=>b.stage==="primary"&&b.intervalMinutes===5&&b.band==="FIRST_THIRD");
+  assert.equal(primaryFirst?.correct,1);
+
   assert.equal(lineageQuery.safeParse({limit:1001}).success,false);
 });
 test("default history UI uses a single lazy bounded endpoint and does not poll",()=>{

@@ -28,6 +28,8 @@ test("unified view scores saved primary and early independently and never makes 
   assert.equal(row.outcome,"DOWN");
   assert.equal(row.primary.score,"CORRECT");assert.equal(row.early.score,"INCORRECT");
   assert.equal(row.confirmation.score,"NO_LOCK");assert.equal(row.congruence,"DISAGREE");
+  assert.equal(row.alignment.state,"CONFLICT");
+  assert.equal(row.alignment.direction,null);
   assert.match(row.confirmation.reason??"",/CONFIRMATION_POLICY_NOT_QUALIFIED/);
 });
 test("exact identity, outbox and provider proof gate all accuracy claims",()=>{

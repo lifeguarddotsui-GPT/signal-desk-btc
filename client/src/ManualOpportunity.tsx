@@ -22,6 +22,7 @@ type Props = {
   onRetry?: () => void;
   refresh?: { pending: boolean; error: string };
   marketReference?: { price: number | null; quality: string; source: string };
+  marketAsks?: {up:number|null;down:number|null};
   comparison?: { price: number | null; source: string; receivedAtMs: number | null };
   fixtureName?: string | null;
   children?: React.ReactNode;
@@ -153,7 +154,7 @@ function TwoStageDeskRows({ projection, round, interval, now }: {
 
 export function ManualOpportunity({
   view, now, interval = view.decision?.intervalMinutes ?? 5, round, onIntervalChange, onRetry, refresh,
-  marketReference, comparison, fixtureName, children, economics,
+  marketReference, marketAsks, comparison, fixtureName, children, economics,
 }: Props) {
   const [compactPrices,setCompactPrices]=React.useState(()=>typeof window!=="undefined"&&window.matchMedia("(max-width: 900px)").matches);
   const [pricesExpanded,setPricesExpanded]=React.useState(false);
@@ -225,8 +226,8 @@ export function ManualOpportunity({
   const opportunity=exactDecision?.opportunity;
   const purchase=exactFresh&&odds&&opportunity?.receivedAtMs===odds.receivedAtMs?opportunity.purchase:null;
   const cents=(value:number|null|undefined)=>value!=null&&Number.isFinite(value)&&value>0&&value<=100?`${value.toFixed(2).replace(/\.00$/,"")}¢`:null;
-  const upAsk=purchase?.up.status==="reported"?cents(purchase.up.askCents):null;
-  const downAsk=purchase?.down.status==="reported"?cents(purchase.down.askCents):null;
+  const upAsk=purchase?.up.status==="reported"?cents(purchase.up.askCents):cents(marketAsks?.up);
+  const downAsk=purchase?.down.status==="reported"?cents(purchase.down.askCents):cents(marketAsks?.down);
   const economicsMatch=!!economics&&economics.amountEnteredUsd===5&&!!exactRound&&
     economics.identity?.roundId===exactRound.id&&economics.identity.startMs===exactRound.startMs&&
     economics.identity.expiryMs===exactRound.expiryMs&&economics.identity.intervalMinutes===interval&&exactFresh;
@@ -343,8 +344,8 @@ export function ManualOpportunity({
     </div>
     <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
     {entryWindow && exactRound && <TradeReadinessPanel entry={entryWindow} timing={operationalTimingWindow({startMs:exactRound.startMs,expiryMs:exactRound.expiryMs,nowMs:now})} alignment={alignment}
-      upAsk={purchase?.up.status==="reported"?purchase.up.askCents:null}
-      downAsk={purchase?.down.status==="reported"?purchase.down.askCents:null}/>}
+      upAsk={purchase?.up.status==="reported"?purchase.up.askCents:marketAsks?.up??null}
+      downAsk={purchase?.down.status==="reported"?purchase.down.askCents:marketAsks?.down??null}/>}
     {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>
       <p>Before fees, minimums and price impact. Not an executable quote or expected profit.</p>
       {indicative.map(row=><p key={row.side}>{row.side.toUpperCase()} · indicative gross winning receipt {usd(row.receipt)}</p>)}

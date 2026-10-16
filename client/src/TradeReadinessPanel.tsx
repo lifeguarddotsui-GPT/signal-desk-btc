@@ -22,6 +22,9 @@ export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,u
   const gross=valid?5/(effectiveAsk!/100):null;
   const winNet=gross==null?null:gross-5-costs;
   const breakeven=gross==null?null:(5+costs)/gross;
+  const payoutBand=gross==null?"ENTER AN ASK TO COMPARE":
+    gross<6?"LOW RETURN · UNDER $6 GROSS":
+    gross<=8?"$6–$8 GROSS TARGET RANGE":"HIGHER GROSS · HIGHER WIN-RATE UNCERTAINTY";
   const money=(x:number|null)=>x==null?"—":`$${x.toFixed(2)}`;
   const fmtPct=(x:number|null)=>x==null?"—":`${(x*100).toFixed(1)}%`;
   const severity=timing.score>=7?"review":timing.score>=4?"watch":"avoid";
@@ -76,6 +79,7 @@ export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,u
           min="0" max="5" step=".01" value={typedCosts} onChange={e=>setTypedCosts(e.target.value)}/></label>
       </div>
       <small>{quoteSource}. YES: {upAsk==null?"not reported":`${upAsk.toFixed(1)}¢`} · NO: {downAsk==null?"not reported":`${downAsk.toFixed(1)}¢`}</small>
+      <p className="trade-payout-band" aria-label="Target payout range">{payoutBand}</p>
       <div className="trade-readiness-results">
         <span>Gross if right <b>{money(gross)}</b></span>
         <span>Net if right <b>{money(winNet)}</b></span>

@@ -1,0 +1,72 @@
+name: Visitor-only Blue Water checks
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - "client/**"
+      - "shared/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".npmrc"
+      - ".github/workflows/visitor-collection-ci.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  visitor-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm run build
+      - run: timeout 45s node --import tsx --test scripts/visitor-activity.test.ts
+      - run: timeout 45s node --import tsx --test scripts/visitor-http.test.ts
+  complete-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Test every file exactly once across four bounded shards
+        shell: bash
+        run: |
+          mapfile -d '' files < <(find scripts client/src -type f -name '*.test.ts' -print0 | sort -z)
+          selected=()
+          for i in "${!files[@]}"; do
+            if (( i % 4 == ${{ matrix.shard }} )); then
+              selected+=("${files[i]}")
+            fi
+          done
+          printf 'Shard %s: %s of %s test files\n' '${{ matrix.shard }}' "${#selected[@]}" "${#files[@]}"
+          if (( ${{ matrix.shard }} == 0 )); then
+            echo 'Run shard zero independently to isolate hanging integration tests'
+            failed=0
+            for file in "${selected[@]}"; do
+              echo "Testing $file"
+              if ! timeout 40s node --import tsx --test --test-force-exit "$file" > /tmp/one-test.log 2>&1; then
+                echo "FAILED_OR_TIMED_OUT: $file"
+                tail -35 /tmp/one-test.log
+                failed=1
+              else
+                grep -E '# (tests|pass|fail|skipped) ' /tmp/one-test.log | tail -4 || true
+              fi
+            done
+            exit "$failed"
+          else
+            timeout 300s node --import tsx --test --test-force-exit --test-concurrency=2 "${selected[@]}"
+          fi

@@ -1,4 +1,6 @@
 import express from "express";
+import { createVisitorActivityGate } from "./visitor-activity";
+import { registerVisitorPresence } from "./visitor-routes";
 import { createServer } from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,10 +14,13 @@ import { startResearchMaintenance } from "./waterx/research-maintenance";
 import { serveStatic } from "./static";
 import { protocolStatus } from "./agent/protocol";
 
-export function createApp() {
+type VisitorGate = ReturnType<typeof createVisitorActivityGate>;
+
+export function createApp(visitorGate?: VisitorGate) {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "16kb" }));
+  if (visitorGate) registerVisitorPresence(app, visitorGate);
   registerRoutes(app);
   app.use("/api/{*path}", (_req, res) => res.status(404).json({ error: "Not found" }));
   return app;
@@ -65,7 +70,55 @@ async function main() {
     const identity=await protocolStatus();
     console.log(`WaterX mainnet account identity: ${identity.status}; trading release remains DISABLED.`);
   }
-  const app = createApp();
+  const visitorOnly = process.env.WATERX_VISITOR_ONLY_MODE === "true";
+  let cancelInitialization: (() => void) | null = null;
+  let activeStops: Array<() => void> = [];
+  let gate: VisitorGate | undefined;
+  if (visitorOnly) {
+    gate = createVisitorActivityGate({
+      wake: () => {
+        // An independent VM or worker may still keep PostgreSQL alive. Refuse
+        // a false cost-saving claim rather than silently running two owners.
+        if (process.env.WATERX_EXTERNAL_COLLECTOR === "true")
+          throw new Error("Stop the external Replit collector before visitor-only activation");
+        cancelInitialization = startStoreInitializationRecovery(initializeStore, () => {
+          if (!gate?.active()) return;
+          const stops: Array<() => void> = [];
+          try {
+            stops.push(startTwoStageSupport());
+            stops.push(startPriceCapture());
+            stops.push(startWaterxCapture({
+              onStalled: (interval, ageMs) => {
+                console.error(`[waterx-${interval}m] visitor-only capture stalled for ${ageMs}ms`);
+              },
+            }));
+            stops.push(startResearchMaintenance());
+            stops.push(startResearchSchedule({ mode: "opportunistic-existing-process" }));
+            activeStops = stops;
+            gate.markReady();
+            console.log("Visible visitor activated WaterX collectors.");
+          } catch (error) {
+            for (const stop of stops.reverse()) { try { stop(); } catch { /* continue */ } }
+            console.error("Visitor collectors failed to start:", error);
+          }
+        }, {
+          onFailure: (error, delay) =>
+            console.warn(`Visitor database initialization retry in ${delay}ms: ${error instanceof Error ? error.message : "unknown"}`),
+        });
+      },
+      sleep: () => {
+        cancelInitialization?.();
+        cancelInitialization = null;
+        for (const stop of activeStops.reverse()) {
+          try { stop(); } catch (error) { console.error("Visitor collector stop failed:", error); }
+        }
+        activeStops = [];
+        console.log("No active visitor; collector timers and live feeds stopped.");
+      },
+    });
+    gate.begin();
+  }
+  const app = createApp(gate);
   const server = createServer(app);
   if (process.env.NODE_ENV === "production") serveStatic(app);
   else {
@@ -76,6 +129,12 @@ async function main() {
   server.listen(port, "0.0.0.0", () => {
     console.log(`Signal Desk listening on ${port} (manual/read-only)`);
     // Serve first: database availability must not gate the homepage or liveness.
+    // In visitor-only mode startup is deliberately passive: no database
+    // initialization, collectors, history scans or chart persistence.
+    if (visitorOnly) {
+      console.log("Visitor-only mode: awaiting visible-browser heartbeat.");
+      return;
+    }
     // Store checks retry serially with capped backoff, without touching schema.
     startStoreInitializationRecovery(initializeStore, () => {
       console.log("Signal Desk store initialization recovered.");

@@ -12,8 +12,16 @@ import {
   buildWaterxLivePayload, isNewerWaterxObservation,
 } from "../server/waterx/service";
 test.after(async()=>{
-  stopTimedStrategy();await eventLockRuntime.idle();
-  await Promise.all([timedPool.end(),researchPool.end(),lockPool.end()]);
+  stopTimedStrategy();
+  // Parser/live snapshot tests run without a PostgreSQL service in CI. A
+  // synthetic live poll can enqueue research persistence that cannot finish
+  // without that service; waiting on the queue would hang indefinitely even
+  // though every asserted test passed. DB integration tests separately cover
+  // backed queues and must still await their own transactions.
+  if (process.env.DATABASE_URL) {
+    await eventLockRuntime.idle();
+    await Promise.all([timedPool.end(),researchPool.end(),lockPool.end()]);
+  }
 });
 
 const start = 1_800_000_000;

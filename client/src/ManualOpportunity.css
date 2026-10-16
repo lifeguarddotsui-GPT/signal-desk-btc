@@ -956,3 +956,14 @@
 .desk-entry-window[data-status="SIGNAL_CONFLICT"] .desk-entry-heading strong { color: #e8a7a7; }
 .two-stage-mode { display: block; margin: .35rem 0; color: #afc5c1; font-size: .7rem; }
 @media (prefers-reduced-motion: reduce) { .desk-entry-track i { transition: none; } }
+
+
+.real-trade-audit { padding: .75rem; border: 1px solid rgba(155,190,195,.24); border-radius: 8px; margin-top: .75rem; }
+.real-trade-audit summary { cursor: pointer; font-weight: 600; color: #d1e1d8; }
+.real-trade-audit p { font-size: .75rem; line-height: 1.5; overflow-wrap: anywhere; }
+.real-trade-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(165px,1fr)); gap: .55rem; padding: .6rem 0; }
+.real-trade-fields label { display: flex; flex-direction: column; min-width: 0; gap: .35rem; color: #c0d3cb; font-size: .7rem; }
+.real-trade-fields input,.real-trade-fields select { color: #e6ece9; background: #112329; border: 1px solid #426069; border-radius: 5px; min-width: 0; padding: .55rem; font-size: 16px; }
+.real-trade-audit button { border: 1px solid #557985; border-radius: 7px; padding: .6rem .8rem; background: #1c3740; color: #d8ebdf; font: inherit; cursor: pointer; }
+.real-trade-result { margin-top: .6rem; border-top: 1px solid #426069; padding-top: .5rem; }
+.real-trade-result strong { color: #ddc68c; }

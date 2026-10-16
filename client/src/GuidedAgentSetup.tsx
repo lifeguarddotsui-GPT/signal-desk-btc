@@ -210,6 +210,11 @@ export default function GuidedAgentSetup(props: Props) {
       </button>)}
     </nav>
 
+    {props.authorized&&accountReady&&hasBalance&&<div className="ao-recover-shortcut">
+      <span>Your WaterX account has {balanceLabel} in credited funds.</span>
+      <button type="button" className="ao-button ao-button-secondary"
+        onClick={()=>setStep(1)}>Recover funds · owner approval required</button>
+    </div>}
     <main className="ao-card">
       {step === 0 && <section className="ao-stage" aria-labelledby="connect-title">
         <div className="ao-stage-heading"><span className="ao-stage-index">01 / CONNECT</span><h3 id="connect-title">Start with your wallet.</h3><p>Slush verifies your owner identity. It does not ask you to approve a transaction.</p></div>

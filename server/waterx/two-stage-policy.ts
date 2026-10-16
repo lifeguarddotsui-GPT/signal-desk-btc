@@ -18,7 +18,7 @@ export const CONFIRMATION_ORDER_RESERVE_MS=30000;
  * Does not enable, sign, or submit any trades.
  */
 export const RULE_CONFIRMATION_POLICY="confirmation-evidence-guard-v1";
-export const ruleConfirmationEnabled=()=>process.env.WATERX_RULE_CONFIRMATION_ENABLED!=="false";
+export const ruleConfirmationEnabled=()=>!["false","0","off"].includes((process.env.WATERX_RULE_CONFIRMATION_ENABLED??"").trim().toLowerCase());
 export function accumulatedFeatures(input:StageInput){
   const latest=input.observations.at(-1),f=latest?.features??{};
   const points:PricePoint[]=input.observations.flatMap(o=>{

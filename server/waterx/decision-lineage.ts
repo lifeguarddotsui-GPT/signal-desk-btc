@@ -2,7 +2,7 @@ import {z} from "zod";
 import type {LockDb} from "./lock-store";
 import {researchPool} from "./research-store";
 import {TIMED_STRATEGY,type TimedDecision} from "../../shared/timed-decision";
-import {TWO_STAGE_STRATEGY,PREVIOUS_TWO_STAGE_STRATEGY,type StageLock} from "../../shared/two-stage";
+import {TWO_STAGE_STRATEGY} from "../../shared/two-stage";
 
 /**
  * Read-only, bounded exact-round reconciliation. No migrations or new collectors.

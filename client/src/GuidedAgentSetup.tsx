@@ -161,7 +161,7 @@ export default function GuidedAgentSetup(props: Props) {
     if(!props.authorized||!accountReady||!props.ownerSetupSigning||!minOutputValid||
        !recoveryAck||props.ownerSubmissionPending||props.busy)return;
     // No quick action: the owner MUST see the simulation and review before wallet signing.
-    const minOutputAtomic = (BigInt(recoveryMinimum.split(".")[0])*1_000_000n+
+    const minOutputAtomic = (BigInt(recoveryMinimum.split(".")[0])*BigInt(1_000_000)+
       BigInt((recoveryMinimum.split(".")[1]??"").padEnd(6,"0"))).toString();
     props.onOwnerAction("REDEEM_USDC",{amountHuman:recoveryAmount,minOutputAtomic});
   };

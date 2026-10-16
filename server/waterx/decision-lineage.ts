@@ -12,6 +12,7 @@ export const lineageQuery=z.object({
   interval:z.enum(["all","5","15"]).default("all"),
   window:z.enum(["24h","7d"]).default("24h"),
   limit:z.coerce.number().int().min(1).max(100).default(40),
+  beforeMs:z.coerce.number().int().positive().optional(),
 }).strict();
 export type LineageScore="CORRECT"|"INCORRECT"|"AWAITING_SETTLEMENT"|"DISPUTED"|"WITHHELD"|"NO_LOCK";
 export type LineageChoice={
@@ -132,7 +133,7 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
     SELECT network,round_id,interval_minutes,start_ms,expiry_ms
     FROM waterx_timed_rounds
     WHERE network='sui:mainnet' AND strategy_version=$1
-      AND start_ms>=$2 AND start_ms<$3 AND ($4::int IS NULL OR interval_minutes=$4)
+      AND start_ms>=$2 AND start_ms<$3 AND start_ms<$7 AND ($4::int IS NULL OR interval_minutes=$4)
     ORDER BY start_ms DESC,interval_minutes,round_id LIMIT $5
   )
   SELECT r.*,sr.market_id,sr.strategy_version AS stage_strategy,sr.stage_match_count,
@@ -182,7 +183,7 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
     AND l.start_ms=r.start_ms AND l.expiry_ms=r.expiry_ms
   ORDER BY r.start_ms DESC,r.interval_minutes,r.round_id`,
   [TIMED_STRATEGY,cutoff,now,q.interval==="all"?null:Number(q.interval),q.limit,
-    TWO_STAGE_STRATEGY]);
+    TWO_STAGE_STRATEGY,Math.min(q.beforeMs??now,now)]);
   const rows:LineageRow[]=result.rows.map(raw=>projectLineageRow(raw,now));
   const median=(values:number[])=>values.length?
     [...values].sort((a,b)=>a-b)[Math.floor((values.length-1)/2)]:null;

@@ -12,6 +12,10 @@ export type LearnedStagePolicy={version:string;stage:LockStage;interval:5|15;mod
   qualified:true;economicQuotesVerified:boolean};
 /** Research safety reserve, not a claim of verified executable order terms. */
 export const CONFIRMATION_ORDER_RESERVE_MS=30000;
+/** Independent market-evidence confirmation, NOT a calibrated Bluewater forecast.
+ * Explicit opt-in prevents silently changing the semantics of existing v2 cohorts. */
+export const RULE_CONFIRMATION_POLICY="confirmation-evidence-guard-v1";
+export const ruleConfirmationEnabled=()=>process.env.WATERX_RULE_CONFIRMATION_ENABLED==="true";
 export function accumulatedFeatures(input:StageInput){
   const latest=input.observations.at(-1),f=latest?.features??{};
   const points:PricePoint[]=input.observations.flatMap(o=>{
@@ -57,10 +61,12 @@ export function assessStage(input:StageInput,stage:LockStage,early:StageLock|nul
     input.nowMs-latest.receivedAtMs>5000)return {eligible:false,reason:"WAITING_FOR_FRESH_DATA"};
   if(stage==="CONFIRMATION"&&early&&latest.id===early.observationIds.at(-1))
     return {eligible:false,reason:"WAITING_FOR_ADDITIONAL_EVIDENCE"};
-  if(stage==="CONFIRMATION"&&!validatedStagePolicy(policy,input,stage))
+  const learnedConfirmation=stage==="CONFIRMATION"&&validatedStagePolicy(policy,input,stage);
+  const ruleConfirmation=stage==="CONFIRMATION"&&!learnedConfirmation&&ruleConfirmationEnabled();
+  if(stage==="CONFIRMATION"&&!learnedConfirmation&&!ruleConfirmation)
      return {eligible:false,reason:"CONFIRMATION_POLICY_NOT_QUALIFIED",
        diagnostics:{message:"Confirmation model not available",measurements:{stage,interval:input.intervalMinutes},
-         thresholds:{requires:"Eligible interval-specific, stage-selected calibrated policy"}}};
+         thresholds:{requires:"Eligible interval-specific, stage-selected calibrated policy or explicitly enabled rule confirmation"}}};
   if(stage==="CONFIRMATION"){
     const area=accumulatedFeatures(input);
     const prior=early?.features as {marketProbabilityUp?:number;currentDistanceUsd?:number}|null;
@@ -72,10 +78,24 @@ export function assessStage(input:StageInput,stage:LockStage,early:StageLock|nul
       (priorDistance!=null&&area.currentDistanceUsd!=null&&priorDistance!==area.currentDistanceUsd);
     if(input.observations.length<2||!changed||early&&latest.availableAtMs<=early.evidenceCutoffMs)
       return {eligible:false,reason:"WAITING_FOR_ADDITIONAL_EVIDENCE"};
+    // Rule mode needs independently changed, pre-decision market evidence.
+    // Merely repeating the same provider quote across polls is not confirmation.
+    if(ruleConfirmation){
+      const distinct=new Set(input.observations.filter(o=>o.sourceHealthy).map(o=>
+        JSON.stringify([o.probabilityUp,o.probabilityDown,o.features?.comparison??null])));
+      if(distinct.size<2)return {eligible:false,reason:"WAITING_FOR_INDEPENDENT_EVIDENCE",
+        diagnostics:{message:"Waiting for genuinely changed WaterX market evidence",
+          measurements:{distinctEvidence:distinct.size},
+          thresholds:{requiredDistinctEvidence:2,policyVersion:RULE_CONFIRMATION_POLICY}}};
+      if(early&&latest.availableAtMs<=early.evidenceCutoffMs)
+        return {eligible:false,reason:"WAITING_FOR_ADDITIONAL_EVIDENCE"};
+    }
   }
   if(!q.qualified||!q.liveSide)return {eligible:false,reason:q.blocker,diagnostics};
   let side=q.liveSide,probabilityUp=latest.probabilityUp,source="WATERX_MARKET",modelVersion:null|string=null;
-  let calibrationStatus:"UNQUALIFIED"|"QUALIFIED"="UNQUALIFIED",policyVersion=String((diagnostics.thresholds as Record<string,unknown>).version??"unchanged-confirmation-guard");
+  let calibrationStatus:"UNQUALIFIED"|"QUALIFIED"="UNQUALIFIED",policyVersion=
+    ruleConfirmation?RULE_CONFIRMATION_POLICY:
+    String((diagnostics.thresholds as Record<string,unknown>).version??"unchanged-confirmation-guard");
   if(validatedStagePolicy(policy,input,stage)){
      const x=stageModelFeatures(input);if(!x)return {eligible:false,reason:"INSUFFICIENT_PRICE_COVERAGE",
        diagnostics:{message:"Price coverage insufficient",measurements:{coverage:accumulatedFeatures(input).coverageFraction},
@@ -100,7 +120,8 @@ export function assessStage(input:StageInput,stage:LockStage,early:StageLock|nul
       `Entry return below your $${preference.minimumReturnUsd} requirement.`,
       measurements:{...diagnostics.measurements,returnUsd:economics.totalReturnedIfCorrectUsd},
       thresholds:{...diagnostics.thresholds,minimumReturnUsd:preference.minimumReturnUsd,mode:preference.mode}}};
-  return {eligible:true,reason:calibrationStatus==="QUALIFIED"?"QUALIFIED_STAGE_POLICY":"EXPERIMENTAL_MARKET_BASELINE_NOT_MODEL_EDGE",
+  return {eligible:true,reason:calibrationStatus==="QUALIFIED"?"QUALIFIED_STAGE_POLICY":
+      ruleConfirmation?"RULE_CONFIRMED_MARKET_EVIDENCE_UNCALIBRATED":"EXPERIMENTAL_MARKET_BASELINE_NOT_MODEL_EDGE",
     side,probabilityUp,probabilitySource:source,calibrationStatus,modelVersion,policyVersion,economics,
      priceFeatures:accumulatedFeatures(input),diagnostics,researchPreference:preference,valueStatus};
 }

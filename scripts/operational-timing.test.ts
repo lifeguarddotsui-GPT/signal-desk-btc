@@ -27,5 +27,12 @@ test("diagnostics never substitute oracle, claim profitable timing or submit ord
   assert.match(panel,/Win rate to break even/);
   assert.match(panel,/Official settlement uses the WaterX market reference rather than Coinbase spot/);
   assert.doesNotMatch(panel,/>BUY NOW</i);
+  const app=readFileSync(new URL("../client/src/App.tsx",import.meta.url),"utf8");
+  const desk=readFileSync(new URL("../client/src/ManualOpportunity.tsx",import.meta.url),"utf8");
+  assert.match(app,/oddsDisplay\.up\.grossAvailable\?oddsDisplay\.up\.priceCents/);
+  assert.match(app,/marketProbabilities=\{\{up:oddsDisplay\.up\.probability/);
+  assert.match(desk,/marketAsks\?\.up/);
+  assert.match(panel,/WaterX market-implied odds/);
+  assert.match(panel,/\$6–\$8 GROSS TARGET RANGE/);
   assert.doesNotMatch(panel,/signAndExecuteTransaction|placeOrder\(/);
 });

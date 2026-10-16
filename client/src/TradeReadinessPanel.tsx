@@ -1,6 +1,6 @@
 import * as React from "react";
 import type {EntryWindowResult,Direction} from "../../shared/entry-window";
-import "./TradeReadinessPanel.css";
+
 
 /** Read-only trade research. Never issues a buy signal, signs, or sends a quote. */
 export function TradeReadinessPanel({entry,alignment,upAsk,downAsk}:{

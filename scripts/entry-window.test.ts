@@ -15,6 +15,7 @@ test("entry scale treats market purchase price as break-even, never model confid
   assert.ok(Math.abs(x.grossIfWinUsd!-5/.7)<1e-9);
   assert.equal(x.roundProgressPercent,40);
   assert.equal(x.remainingSeconds,180);
+  assert.ok(Math.abs(x.illustrativeBreakEvenWith10CentCost!-.714)<1e-9);
 });
 test("high ask fails minimum gross preference without disguising expected value",()=>{
   const x=evaluateEntryWindow({...round,askCents:95});
@@ -30,7 +31,8 @@ test("round, source, signal, timing and conflict gate fail closed",()=>{
     latestProviderAsOfMs:round.expiryMs-40_000}).state,"LATE_TO_ENTER");
   assert.equal(evaluateEntryWindow({...round,askCents:null}).state,"ASK_UNAVAILABLE");
   assert.equal(evaluateEntryWindow({...round,sourceFresh:false}).executable,false);
-  assert.equal(evaluateEntryWindow({...round,referenceConfirmed:false}).reason.includes("price-to-beat is not confirmed"),true);
+  assert.equal(evaluateEntryWindow({...round,referenceConfirmed:false}).state,"REFERENCE_UNCONFIRMED");
+  assert.equal(evaluateEntryWindow({...round,referenceConfirmed:false}).reason.includes("Chainlink TWAP"),true);
 });
 test("entry UI has descriptive slider, no live buy button or confidence spoofing",()=>{
  const ui=readFileSync(new URL("../client/src/ManualOpportunity.tsx",import.meta.url),"utf8");

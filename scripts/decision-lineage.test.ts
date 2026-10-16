@@ -62,7 +62,12 @@ test("one bounded read-only lineage query does not create rounds for invisible t
   assert.equal(calls,1);
   assert.match(sql,/FROM waterx_timed_rounds/);assert.match(sql,/LIMIT \$5/);
   assert.doesNotMatch(sql,/INSERT INTO|UPDATE\s|DELETE FROM/i);
-  assert.equal(args[4],40);assert.equal(report.cohortN,1);
+  assert.equal(args[4],40);assert.equal(args[6],now);assert.equal(report.cohortN,1);
+  assert.match(sql,/start_ms<\$7/);
+  const earlier=await decisionLineage({interval:"5",window:"24h",limit:40,beforeMs:start+120_000},now,db as any);
+  assert.equal(args[6],start+120_000);
+  assert.equal(earlier.cohortN,1);
+  assert.equal(lineageQuery.safeParse({beforeMs:-1}).success,false);
   assert.equal(report.stats.primary.correct,1);assert.equal(report.stats.early.incorrect,1);
   assert.equal(report.stats.confirmation.scored,0);assert.equal(report.paired.verifiedN,1);
   assert.ok(Math.abs(report.stats.primary.brier!-.0961)<1e-9);

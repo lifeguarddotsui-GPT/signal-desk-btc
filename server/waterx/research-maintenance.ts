@@ -5,6 +5,7 @@ import {
 } from "./research-store";
 import { getResearchReport } from "./research-report";
 import { waterxLive } from "./service";
+import { RESEARCH_MAINTENANCE_PERIOD_MS } from "./maintenance-cadence";
 import { maintainLockEvidence } from "./lock-maintenance";
 import type { ResearchInterval } from "../../shared/waterx-research";
 import {
@@ -106,12 +107,16 @@ export function startResearchMaintenance() {
     working=true;
     try {
       for(const interval of [5,15] as const) {
+        if(stopped) break;
         try {
           const now=Date.now(),live=waterxLive(interval);
           if(live.status!=="LIVE"||!live.round) await recordResearchIdentityFailure(interval,now);
           await reconcileMissedResearchChoices(interval,now);
+          if(stopped)break;
           await scoreResearchChoices(interval);
+          if(stopped)break;
           await reconcileDisputedLifecycleResults(interval,now);
+          if(stopped)break;
           if(process.env.NODE_ENV==="development")try{await maintainLockEvidence(interval);}
           catch(error){if(!researchSchemaMissing(error))console.warn("Adaptive research maintenance failed:",
             error instanceof Error?error.message.slice(0,160):"unknown");}
@@ -131,7 +136,11 @@ export function startResearchMaintenance() {
       if(Date.now()-lastAlertCheck>=60000) lastAlertCheck=Date.now();
     } finally { working=false; }
   }
-  const timer=setInterval(()=>void run(),15000);timer.unref();
+  // These are retrospective recovery/scoring/report queries, not live WaterX
+  // sampling or the immutable early/30-second lock scheduler. One catch-up run
+  // occurs immediately on visitor wake; 60s avoids repeat expensive scans
+  // while the same visitor remains active and preserves sub-minute history lag.
+  const timer=setInterval(()=>void run(),RESEARCH_MAINTENANCE_PERIOD_MS);timer.unref();
   void run();
   return ()=>{stopped=true;clearInterval(timer);};
 }

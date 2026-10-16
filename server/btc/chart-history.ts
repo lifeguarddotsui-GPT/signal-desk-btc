@@ -56,13 +56,16 @@ export function createComparisonTickWriter(
   let activeDrain: Promise<void> | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let failures = 0;
+  let paused = false;
 
   const keyOf = (tick: PersistableComparisonTick) =>
     tick.eventId ? `event:${tick.eventId}` :
       `${tick.sourceAt}|${tick.price}|${tick.source}`;
 
   function scheduleRetry() {
-    if (retryTimer) return;
+    // Failed archive writes must not periodically wake PostgreSQL after the
+    // last visible visitor leaves. Preserve bounded queued ticks in memory.
+    if (paused || retryTimer) return;
     const delay = Math.min(60_000, 1_000 * 2 ** Math.min(failures - 1, 6));
     retryTimer = setTimeout(() => {
       retryTimer = undefined;
@@ -72,10 +75,11 @@ export function createComparisonTickWriter(
   }
 
   function drain(): Promise<void> {
+    if (paused) return Promise.resolve();
     if (activeDrain) return activeDrain;
     activeDrain = (async () => {
       try {
-        while (queue.length) {
+        while (queue.length && !paused) {
           const tick = queue[0];
           try {
             await write(tick);
@@ -115,10 +119,22 @@ export function createComparisonTickWriter(
     return true;
   }
 
+  function pause(): void {
+    paused = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = undefined;
+    // An already executing insert is allowed to finish. The loop stops
+    // before starting the next write; do not cancel an in-flight transaction.
+  }
+  function resume(): void {
+    if (!paused) return;
+    paused = false;
+    void drain();
+  }
   function health(): ComparisonTickPersistenceHealth {
     return { status, queueDepth: queue.length, droppedTicks, lastSuccessAt, lastFailure };
   }
-  return { enqueue, health, drain };
+  return { enqueue, health, drain, pause, resume };
 }
 
 const defaultTickWriter = createComparisonTickWriter(async tick => {
@@ -135,6 +151,12 @@ const defaultTickWriter = createComparisonTickWriter(async tick => {
 export function persistComparisonTick(tick: PersistableComparisonTick): boolean {
   return defaultTickWriter.enqueue(tick);
 }
+
+/** Visitor-only cost control: stop failed-write retries while no pages are
+ * visible; resume bounded retained ticks after a new visitor starts capture.
+ * Queued data is in-memory and may still be lost if the host is recycled. */
+export function pauseComparisonTickPersistence(): void { defaultTickWriter.pause(); }
+export function resumeComparisonTickPersistence(): void { defaultTickWriter.resume(); }
 
 export function comparisonTickPersistenceHealth(): ComparisonTickPersistenceHealth {
   return defaultTickWriter.health();

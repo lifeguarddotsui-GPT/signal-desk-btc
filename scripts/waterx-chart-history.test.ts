@@ -211,6 +211,44 @@ test("database write failure is explicit and remains queued for retry", async ()
   assert.match(unavailable.coverage.reason ?? "", /does not exist/);
 });
 
+test("visitor idle suspends chart persistence without discarding queued ticks", async () => {
+  const saved:string[]=[];
+  const writer=createComparisonTickWriter(async tick=>{saved.push(tick.eventId??"missing");});
+  const tick={price:60_150,sourceAt:"2026-10-16T18:00:00.000Z",
+    receivedAt:"2026-10-16T18:00:00.030Z",source:"Coinbase",
+    eventId:"idle-tick-1",sourceToServerLatencyMs:30};
+  writer.pause();
+  assert.equal(writer.enqueue(tick),true);
+  await writer.drain();
+  assert.deepEqual(saved,[],"no PostgreSQL calls while zero visitors");
+  assert.equal(writer.health().queueDepth,1);
+  writer.resume();
+  await writer.drain();
+  assert.deepEqual(saved,["idle-tick-1"]);
+  assert.equal(writer.health().queueDepth,0);
+});
+
+test("failed-write backoff cannot keep the PostgreSQL archive awake after last visitor", async () => {
+  let attempts=0,failed=true;
+  const writer=createComparisonTickWriter(async ()=>{
+    attempts++;
+    if(failed) throw new Error("temporary archive outage");
+  });
+  writer.enqueue({price:60_000,sourceAt:"2026-10-16T18:00:00.000Z",
+    receivedAt:"2026-10-16T18:00:00.050Z",source:"Coinbase",sourceToServerLatencyMs:50});
+  await writer.drain();
+  assert.equal(attempts,1);
+  assert.equal(writer.health().queueDepth,1);
+  writer.pause();
+  failed=false;
+  await writer.drain();
+  assert.equal(attempts,1,"pending database retry must not run when paused");
+  writer.resume();
+  await writer.drain();
+  assert.equal(attempts,2);
+  assert.equal(writer.health().queueDepth,0);
+});
+
 test("archive-plus-stream coverage reports actual span and internal gaps without claiming completeness", () => {
   const start = 1_800_000_000_000;
   const end = start + 15 * 60_000;

@@ -1,6 +1,6 @@
 import { comparisonBtc } from "./source";
 import { createCoinbaseStream } from "./coinbase-stream";
-import { persistComparisonTick } from "./chart-history";
+import { persistComparisonTick, pauseComparisonTickPersistence, resumeComparisonTickPersistence } from "./chart-history";
 import { recordComparisonPublication } from "../waterx/latency";
 import { acceptFeatureTick } from "../waterx/bluewater-fast";
 
@@ -311,10 +311,14 @@ export function acceptComparisonTick(tick: ComparisonTick): boolean {
 
 /** Start the shared Coinbase Exchange comparison WebSocket feed. */
 export function startPriceCapture(): () => void {
+  // Restart bounded queued historical writes only after a browser has
+  // activated the collector. No idle retries should keep Neon compute awake.
+  resumeComparisonTickPersistence();
   coinbaseStream.start();
   return () => {
     coinbaseStream.stop();
     priceCapture.stop();
+    pauseComparisonTickPersistence();
   };
 }
 

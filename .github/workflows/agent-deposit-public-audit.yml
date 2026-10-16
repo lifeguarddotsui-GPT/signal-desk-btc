@@ -1,0 +1,22 @@
+name: Read-only Sui wallet deposit trace
+on:
+  pull_request:
+    paths:
+      - scripts/audit-public-sui-agent-deposit.ts
+      - .github/workflows/agent-deposit-public-audit.yml
+  workflow_dispatch:
+jobs:
+  public-chain-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Fetch public transaction and wallet balances via Sui gRPC
+        run: timeout 120s node --import tsx scripts/audit-public-sui-agent-deposit.ts
+      - name: Simulate existing credited funds redemption unsigned (NO BROADCAST)
+        run: timeout 120s node --import tsx scripts/audit-waterx-usdc-redeem-simulation.ts

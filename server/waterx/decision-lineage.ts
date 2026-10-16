@@ -59,6 +59,7 @@ export function projectLineageRow(raw:Record<string,unknown>,now:number):Lineage
   });
   const primaryRaw=obj(raw.primary_decision);
   const primaryOK=raw.primary_id!=null&&raw.primary_outbox_id!=null&&
+    finite(raw.primary_ack)!==null&&finite(raw.primary_ack)!<=expiryMs&&
     exact(primaryRaw)&&primaryRaw.strategyVersion===TIMED_STRATEGY;
   const primary:LineageChoice=primaryOK?{
     state:String(primaryRaw.status??"UNKNOWN"),side:primaryRaw.status==="LOCKED"?side(primaryRaw.side):null,
@@ -67,14 +68,21 @@ export function projectLineageRow(raw:Record<string,unknown>,now:number):Lineage
     acknowledgedAtMs:finite(raw.primary_ack),probabilityUp:finite(primaryRaw.probabilityUp),
     policyVersion:TIMED_STRATEGY,modelVersion:null,source:"WaterX market / 30-second benchmark",
     reason:String(primaryRaw.lockReason??primaryRaw.status??""),
-  }:missing(raw.primary_id!=null?"PRIMARY_IDENTITY_OR_COMMIT_MISMATCH":"NOT_RECORDED_NO_RETROSPECTIVE_INFERENCE");
+  }:missing(raw.primary_id!=null?
+    raw.primary_outbox_id==null||finite(raw.primary_ack)===null?"PRIMARY_COMMIT_ACK_MISSING":"PRIMARY_IDENTITY_OR_COMMIT_MISMATCH":
+    "NOT_RECORDED_NO_RETROSPECTIVE_INFERENCE");
   const stage=(name:"early"|"confirmation"):LineageChoice=>{
     const d=obj(raw[`${name}_decision`]),stageName=name==="early"?"EARLY":"CONFIRMATION";
-    const matching=raw[`${name}_id`]!=null&&raw[`${name}_outbox_id`]!=null&&marketId!==null&&
+    const matching=Number(raw.stage_match_count)===1&&
+      raw[`${name}_id`]!=null&&raw[`${name}_outbox_id`]!=null&&
+      finite(raw[`${name}_ack`])!==null&&finite(raw[`${name}_ack`])!<=expiryMs&&marketId!==null&&
       exact(d)&&d.stage===stageName&&d.network==="sui:mainnet"&&d.marketId===marketId&&
       [TWO_STAGE_STRATEGY,PREVIOUS_TWO_STAGE_STRATEGY].includes(String(d.strategyVersion))&&
       d.strategyVersion===raw.stage_strategy;
-    if(!matching)return missing(raw[`${name}_id`]!=null?"STAGE_IDENTITY_OR_COMMIT_MISMATCH":
+    if(!matching)return missing(Number(raw.stage_match_count)>1?"AMBIGUOUS_STAGE_MARKET":
+      raw[`${name}_id`]!=null?
+        raw[`${name}_outbox_id`]==null||finite(raw[`${name}_ack`])===null?
+          "STAGE_COMMIT_ACK_MISSING":"STAGE_IDENTITY_OR_COMMIT_MISMATCH":
       String(raw[`${name}_reason`]??"NOT_RECORDED"));
     const s=side(d.side);
     return {
@@ -121,7 +129,7 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
       AND start_ms>=$2 AND start_ms<$3 AND ($4::int IS NULL OR interval_minutes=$4)
     ORDER BY start_ms DESC,interval_minutes,round_id LIMIT $5
   )
-  SELECT r.*,sr.market_id,sr.strategy_version AS stage_strategy,
+  SELECT r.*,sr.market_id,sr.strategy_version AS stage_strategy,sr.stage_match_count,
     td.id AS primary_id,td.decision AS primary_decision,po.decision_id AS primary_outbox_id,
     po.committed_ack_at_ms AS primary_ack,
     e.id AS early_id,e.decision AS early_decision,eo.decision_id AS early_outbox_id,
@@ -141,10 +149,11 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
     AND td.interval_minutes=r.interval_minutes AND td.round_id=r.round_id
   LEFT JOIN waterx_timed_outbox po ON po.decision_id=td.id
   LEFT JOIN LATERAL(
-    SELECT x.market_id,x.strategy_version FROM waterx_two_stage_rounds x
+    SELECT x.market_id,x.strategy_version,count(*) OVER()::int AS stage_match_count
+    FROM waterx_two_stage_rounds x
     WHERE x.network=r.network AND x.round_id=r.round_id AND x.interval_minutes=r.interval_minutes
       AND x.start_ms=r.start_ms AND x.expiry_ms=r.expiry_ms
-      AND x.strategy_version=ANY($6::text[]) AND x.capture_mode='PROSPECTIVE'
+      AND x.strategy_version=$6 AND x.capture_mode='PROSPECTIVE'
     ORDER BY x.discovered_at_ms DESC,x.market_id LIMIT 1
   ) sr ON true
   LEFT JOIN waterx_two_stage_locks e ON e.network=r.network AND e.market_id=sr.market_id
@@ -167,7 +176,7 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
     AND l.start_ms=r.start_ms AND l.expiry_ms=r.expiry_ms
   ORDER BY r.start_ms DESC,r.interval_minutes,r.round_id`,
   [TIMED_STRATEGY,cutoff,now,q.interval==="all"?null:Number(q.interval),q.limit,
-    [TWO_STAGE_STRATEGY,PREVIOUS_TWO_STAGE_STRATEGY]]);
+    TWO_STAGE_STRATEGY]);
   const rows:LineageRow[]=result.rows.map(raw=>projectLineageRow(raw,now));
   const median=(values:number[])=>values.length?
     [...values].sort((a,b)=>a-b)[Math.floor((values.length-1)/2)]:null;

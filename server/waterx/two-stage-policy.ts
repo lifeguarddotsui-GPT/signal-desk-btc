@@ -81,12 +81,16 @@ export function assessStage(input:StageInput,stage:LockStage,early:StageLock|nul
     // Rule mode needs independently changed, pre-decision market evidence.
     // Merely repeating the same provider quote across polls is not confirmation.
     if(ruleConfirmation){
-      const distinct=new Set(input.observations.filter(o=>o.sourceHealthy).map(o=>
-        JSON.stringify([o.probabilityUp,o.probabilityDown,o.features?.comparison??null])));
+      // A moving Coinbase comparison chart is NOT a second independent
+      // WaterX quote. Confirmation needs at least two distinct valid
+      // provider odds pairs observed within this exact round.
+      const distinct=new Set(input.observations.filter(o=>o.sourceHealthy&&
+        validWaterxProbabilityPair(o.probabilityUp,o.probabilityDown)).map(o=>
+        JSON.stringify([o.probabilityUp,o.probabilityDown])));
       if(distinct.size<2)return {eligible:false,reason:"WAITING_FOR_INDEPENDENT_EVIDENCE",
-        diagnostics:{message:"Waiting for genuinely changed WaterX market evidence",
-          measurements:{distinctEvidence:distinct.size},
-          thresholds:{requiredDistinctEvidence:2,policyVersion:RULE_CONFIRMATION_POLICY}}};
+        diagnostics:{message:"WaterX odds have not changed; Coinbase-only chart movement cannot confirm the market direction.",
+          measurements:{distinctWaterxQuotes:distinct.size},
+          thresholds:{requiredDistinctWaterxQuotes:2,policyVersion:RULE_CONFIRMATION_POLICY}}};
       if(early&&latest.availableAtMs<=early.evidenceCutoffMs)
         return {eligible:false,reason:"WAITING_FOR_ADDITIONAL_EVIDENCE"};
     }

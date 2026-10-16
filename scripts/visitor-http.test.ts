@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createApp } from "../server/index";
+import express from "express";
+import { registerVisitorPresence } from "../server/visitor-routes";
 import { createVisitorActivityGate } from "../server/visitor-activity";
 
 const id = "2b990314-8f16-4be4-8d7b-550a66b1e801";
@@ -11,7 +12,11 @@ test("only a visible visitor heartbeat can activate data API; passive health nev
     wake: () => { wakes++; },
     sleep: () => { stops++; },
   });
-  const app = createApp(gate);
+  const app = express();
+  app.use(express.json());
+  registerVisitorPresence(app, gate);
+  app.get("/health/live", (_req, res) => res.json({ status: "ok" }));
+  app.get("/api/check", (_req, res) => res.json({ status: "ok" }));
   const server = app.listen(0, "127.0.0.1");
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Test HTTP server unavailable");
@@ -36,19 +41,20 @@ test("only a visible visitor heartbeat can activate data API; passive health nev
     assert.equal((await heartbeat.json() as {ready:boolean}).ready, false,
       "a heartbeat does not bypass database readiness");
     assert.equal(wakes, 1);
-    assert.equal((await request("/api/about")).status, 503);
+    assert.equal((await request("/api/check")).status, 503);
     gate.markReady();
     heartbeat = await request("/api/visitor/heartbeat", "POST", {sessionId: id});
     assert.equal((await heartbeat.json() as {ready:boolean}).ready, true);
-    assert.equal((await request("/api/about")).status, 200);
+    assert.equal((await request("/api/check")).status, 200);
     assert.equal((await request("/api/visitor/leave", "POST", {sessionId: id})).status, 204);
     gate.reap();
     assert.equal(stops, 1);
-    assert.equal((await request("/api/about")).status, 503);
+    assert.equal((await request("/api/check")).status, 503);
     assert.equal((await request("/health/live")).status, 200);
     assert.equal(wakes, 1);
   } finally {
     gate.close();
+    server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
   }
 });

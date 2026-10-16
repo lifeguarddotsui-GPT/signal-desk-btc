@@ -64,5 +64,5 @@ test("invalid supplied prices/costs are blocked, no invented quotes or order exe
   assert.match(ui,/not independently verified/i);
   assert.doesNotMatch(ui,/placeOrder|signAndExecuteTransaction|localStorage|setInterval/);
   const historyUi=readFileSync(new URL("../client/src/DecisionLineageHistory.tsx",import.meta.url),"utf8");
-  assert.match(historyUi,/<RealFillAuditPanel round=\{r\}/>);
+  assert.match(historyUi,/<RealFillAuditPanel round=\{r\}\/>/);
 });

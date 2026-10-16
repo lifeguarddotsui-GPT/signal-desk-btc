@@ -208,11 +208,34 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
       brier,probabilityScoredN:scoredProbability.length,
       medianSecondsRemainingAtAck:median(remaining)};
   };
+  // Descriptive, non-causal timing cohorts: when a *saved* prediction
+  // was acknowledged, NOT when any order was executed. Never fabricate
+  // win rates from fewer than 20 verified records per identical cohort.
+  const timingBands=(["primary","early","confirmation"] as const).flatMap(stage=>
+    ([5,15] as const).flatMap(intervalMinutes=>
+      (["FIRST_THIRD","MIDDLE_THIRD","LAST_THIRD"] as const).map(band=>{
+        const matching=rows.filter(r=>{
+          const ack=r[stage].acknowledgedAtMs;
+          if(r.intervalMinutes!==intervalMinutes||ack==null||!r[stage].side||
+            ack<r.startMs||ack>=r.expiryMs)return false;
+          const fraction=(ack-r.startMs)/(r.expiryMs-r.startMs);
+          return band==="FIRST_THIRD"?fraction<1/3:
+            band==="MIDDLE_THIRD"?fraction>=1/3&&fraction<2/3:fraction>=2/3;
+        });
+        const scored=matching.filter(r=>["CORRECT","INCORRECT"].includes(r[stage].score));
+        const correct=scored.filter(r=>r[stage].score==="CORRECT").length;
+        return {stage,intervalMinutes,band,locked:matching.length,
+          verifiedN:scored.length,correct,incorrect:scored.length-correct,
+          descriptiveAccuracy:scored.length>=20?correct/scored.length:null,
+          minimumSampleN:20,
+        };
+      })));
   const paired=rows.filter(r=>r.primary.side&&r.early.side&&r.settlementStatus==="VERIFIED");
   const confirmedPairs=rows.filter(r=>r.early.side&&r.confirmation.side&&r.settlementStatus==="VERIFIED");
   return {asOfMs:now,window:q.window,interval:q.interval,cohortN:rows.length,
     truncated:rows.length===q.limit,source:"prospectively discovered timed rounds, not all theoretical clock slots",
     stats:{primary:stats("primary"),early:stats("early"),confirmation:stats("confirmation")},
+    timingBands,
     paired:{verifiedN:paired.length,agree:paired.filter(r=>r.congruence==="AGREE").length,
       disagree:paired.filter(r=>r.congruence==="DISAGREE").length,
       earlyWrongPrimaryCorrect:paired.filter(r=>r.early.score==="INCORRECT"&&r.primary.score==="CORRECT").length,

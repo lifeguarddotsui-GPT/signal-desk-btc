@@ -36,6 +36,10 @@ test("exact identity, outbox and provider proof gate all accuracy claims",()=>{
   assert.equal(projectLineageRow({...a,early_outbox_id:null},now).early.score,"NO_LOCK");
   assert.equal(projectLineageRow({...a,early_ack:null},now).early.score,"NO_LOCK");
   assert.equal(projectLineageRow({...a,primary_ack:null},now).primary.score,"NO_LOCK");
+  assert.equal(projectLineageRow({...a,primary_ack:start+5_000},now).primary.score,"NO_LOCK");
+  assert.equal(projectLineageRow({...a,primary_ack:start+300_000},now).primary.score,"NO_LOCK");
+  assert.equal(projectLineageRow({...a,early_ack:start+2_000},now).early.score,"NO_LOCK");
+  assert.equal(projectLineageRow({...a,early_ack:start+300_000},now).early.score,"NO_LOCK");
   assert.equal(projectLineageRow({...a,stage_match_count:2},now).early.reason,"AMBIGUOUS_STAGE_MARKET");
   assert.equal(projectLineageRow({...a,settlement_disputed:true},now).primary.score,"DISPUTED");
   assert.equal(projectLineageRow({...a,outcome:"UP"},now).settlementStatus,"PENDING");

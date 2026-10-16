@@ -58,6 +58,10 @@ test("one bounded read-only lineage query does not create rounds for invisible t
   assert.equal(args[4],40);assert.equal(report.cohortN,1);
   assert.equal(report.stats.primary.correct,1);assert.equal(report.stats.early.incorrect,1);
   assert.equal(report.stats.confirmation.scored,0);assert.equal(report.paired.verifiedN,1);
+  assert.ok(Math.abs(report.stats.primary.brier!-.0961)<1e-9);
+  assert.ok(Math.abs(report.stats.early.brier!-.4761)<1e-9);
+  assert.equal(report.stats.primary.probabilityScoredN,1);
+  assert.equal(report.stats.primary.medianSecondsRemainingAtAck,242);
   assert.equal(lineageQuery.safeParse({limit:1001}).success,false);
 });
 test("default history UI uses a single lazy bounded endpoint and does not poll",()=>{

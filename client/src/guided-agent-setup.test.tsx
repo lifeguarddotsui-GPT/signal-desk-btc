@@ -118,3 +118,18 @@ test("uncertain owner transaction supports confirmation retry without another si
   assert.match(html, /digest-retained/);
   assert.match(html, /Retry confirmation/);
 });
+
+test("owned-account funds recovery is visible and only simulates a user-approved USDC redemption",()=>{
+  const html=render({initialStep:1,authorized:true,ownerSetupSigning:true,
+    discoveryStatus:"success",accountId:"0xowned",accounts:[{accountId:"0xowned"}],
+    availableBalanceUsd:"5.00",settlementDecimals:6});
+  assert.match(html,/Recover funds to your wallet/);
+  assert.match(html,/Minimum acceptable native USDC returned/);
+  assert.match(html,/Simulate recovery · no funds move yet/);
+  assert.match(html,/WaterX keeper/);
+  assert.match(html,/disabled=""[^>]*>Simulate recovery/);
+  const source=readFileSync(new URL("./GuidedAgentSetup.tsx",import.meta.url),"utf8");
+  assert.match(source,/onOwnerAction\("REDEEM_USDC",\{amountHuman:recoveryAmount,minOutputAtomic\}\)/);
+  assert.match(source,/!minOutputValid\|\|!recoveryAck/);
+  assert.doesNotMatch(source,/auto.?redeem|auto.?withdraw/i);
+});

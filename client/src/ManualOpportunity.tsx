@@ -45,7 +45,7 @@ const stageReason = (reason: string | undefined, persistence: string | undefined
   if (persistence === "FAILED") return "Storage unavailable";
   if (persistence === "UNKNOWN") return "Commit state unknown · reconciling";
   if (persistence === "SAVING") return "Saving decision";
-  if (reason === "CONFIRMATION_POLICY_NOT_QUALIFIED") return "Confirmation model not available";
+  if (reason === "CONFIRMATION_POLICY_NOT_QUALIFIED") return "Inactive — calibrated confirmation model not qualified";
   if (diagnostics?.message?.trim()) return diagnostics.message;
   if (reason === "NO_QUALIFYING_EARLY_VALUE" || reason === "ENTRY_TERMS_UNAVAILABLE") return "No qualifying early opportunity";
   if (reason === "WAITING_FOR_FRESH_DATA" || reason === "SOURCE_STALE") return "Fresh odds unavailable";
@@ -113,9 +113,15 @@ function TwoStageDeskRows({ projection, round, interval, now }: {
     </div>;
   };
   return <section className="two-stage-desk" aria-label="Two-stage shadow research">
-    <div className="two-stage-desk-heading"><span>EXPERIMENTAL · SHADOW RESEARCH</span><b>Not activated · no order authority</b></div>
-    {displayStage("EARLY LOCK", "EARLY", early)}
-    {displayStage("CONFIRMATION LOCK", "CONFIRMATION", confirmation)}
+    <div className="two-stage-desk-heading"><span>OPTIONAL EARLY / CONFIRMATION EXPERIMENTS</span><b>Separate from the active Bluewater 30-second benchmark · no order authority</b></div>
+    {displayStage("EARLY RESEARCH LOCK", "EARLY", early)}
+    {candidate?.confirmation?.reason === "CONFIRMATION_POLICY_NOT_QUALIFIED" && !confirmation
+      ? <details className="two-stage-inactive-confirmation">
+          <summary>Confirmation experiment inactive · no qualified calibrated model</summary>
+          {displayStage("EXPERIMENTAL CONFIRMATION", "CONFIRMATION", confirmation)}
+          <p>A separate calibrated confirmation model has not passed qualification. This is not a missed Bluewater Decision and is excluded from prediction accuracy.</p>
+        </details>
+      : displayStage("EXPERIMENTAL CONFIRMATION", "CONFIRMATION", confirmation)}
     <p className="two-stage-relationship">{relationship ?? (candidate
       ? "No stage lock committed"
       : "Relationship unavailable until exact-round evidence is reported")}</p>
@@ -261,7 +267,6 @@ export function ManualOpportunity({
       {purchase&&(upAsk||downAsk)&&<div className="desk-purchase-prices"><span>Purchase price (not probability)</span><b>UP {upAsk??"Not reported"} · DOWN {downAsk??"Not reported"}</b></div>}
     </div>
 
-    <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
     {locked && <div className="desk-frozen-evidence">
       <span>Frozen lock · {savedSide} · active benchmark</span>
       <strong>UP {percent(frozenUp)} <i>·</i> DOWN {percent(frozenDown)}</strong>
@@ -269,8 +274,9 @@ export function ManualOpportunity({
     </div>}
 
     <div className={`desk-decision-card${locked ? " locked" : ""}`}>
-      <h3 className="desk-section-title">Bluewater decision <span className="desk-active-policy">ACTIVE · 30-SECOND BENCHMARK</span></h3>
+      <h3 className="desk-section-title">Bluewater decision <span className="desk-active-policy">PRIMARY RESEARCH · 30-SECOND GATES</span></h3>
       <div className="desk-decision-main">
+        <p className="desk-decision-context">Live lean is provisional. Only an acknowledged, frozen exact-round choice is scored; it is not the experimental Early or Confirmation lock.</p>
         <div className="desk-state-line">
           {!loading && <span className={`desk-state-tag${locked ? " locked" : currentSide ? " leaning" : ""}`} role="status">{state}</span>}
           {exactDecision && <span className="desk-round-version">Round {interval}m · snapshot v{exactDecision.stateVersion}</span>}
@@ -292,6 +298,7 @@ export function ManualOpportunity({
       {waitingForOdds&&locked&&<p className="desk-odds-notice" role="status">Waiting for WaterX odds.</p>}
       {fixtureName && <span className="desk-fixture-indicator">Development visual fixture · {fixtureName.replaceAll("-", " ")}</span>}
     </div>
+    <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
     {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>
       <p>Before fees, minimums and price impact. Not an executable quote or expected profit.</p>
       {indicative.map(row=><p key={row.side}>{row.side.toUpperCase()} · indicative gross winning receipt {usd(row.receipt)}</p>)}

@@ -60,7 +60,7 @@ function render(twoStage?: TwoStageProjection | null) {
 
 test("early-only and confirmation-only locks render independently with accurate relationship", () => {
   const earlyOnly = render(projection(state(lock("EARLY", "UP"), "COMMITTED"), state(null, "OBSERVING", "Waiting for additional evidence")));
-  assert.match(earlyOnly, /EARLY LOCK/);
+  assert.match(earlyOnly, /EARLY RESEARCH LOCK/);
   assert.match(earlyOnly, /Locked at 00:22 · 04:38 remaining/);
   assert.match(earlyOnly, /No confirmation/);
   assert.match(earlyOnly, /Frozen WaterX market observation/);
@@ -69,7 +69,7 @@ test("early-only and confirmation-only locks render independently with accurate 
 
   const confirmationOnly = render(projection(state(null, "OBSERVING", "No qualifying early opportunity"),
     state(lock("CONFIRMATION", "DOWN"), "COMMITTED")));
-  assert.match(confirmationOnly, /CONFIRMATION LOCK/);
+  assert.match(confirmationOnly, /EXPERIMENTAL CONFIRMATION/);
   assert.match(confirmationOnly, /Locked at 00:22 · 04:38 remaining/);
   assert.match(confirmationOnly, /No early decision/);
 });
@@ -112,7 +112,7 @@ test("wrong round, interval, non-shadow policy, or uncommitted state cannot surf
   assert.match(saving, /Saving decision/);
 });
 
-test("early lock is rendered as a prominent separate primary with honest value status and frozen timing", () => {
+test("early lock remains a separate shadow stage with honest value status and frozen timing", () => {
   const early = lock("EARLY", "DOWN", {
     elapsedMs: 62_000, remainingMs: 238_000, committedAtMs:startMs+62_060,valueStatus: "BELOW_PREFERRED",
     researchPreference: { mode: "PREFERRED", collateralUsd: 5, minimumReturnUsd: 6.5, preferredReturnUsd: 7 },
@@ -127,9 +127,9 @@ test("early lock is rendered as a prominent separate primary with honest value s
   assert.match(html, /Indicative \$5\.00 collateral · \$6\.40 total return if correct/);
   assert.match(html, /Below preferred return/);
   assert.match(html, /market-derived evidence · uncalibrated/i);
-  assert.match(html, /Confirmation model not available/);
-  assert.match(html, /EXPERIMENTAL · SHADOW RESEARCH/);
-  assert.match(html, /ACTIVE · 30-SECOND BENCHMARK/);
+  assert.match(html, /Confirmation experiment inactive/);
+  assert.match(html, /OPTIONAL EARLY \/ CONFIRMATION EXPERIMENTS/);
+  assert.match(html, /PRIMARY RESEARCH · 30-SECOND GATES/);
   assert.match(html, /Frozen research preference · preferred/);
 });
 

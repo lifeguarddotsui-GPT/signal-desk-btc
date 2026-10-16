@@ -53,4 +53,20 @@ jobs:
             fi
           done
           printf 'Shard %s: %s of %s test files\n' '${{ matrix.shard }}' "${#selected[@]}" "${#files[@]}"
-          timeout 300s node --import tsx --test --test-force-exit --test-concurrency=2 "${selected[@]}"
+          if (( ${{ matrix.shard }} == 0 )); then
+            echo 'Run shard zero independently to isolate hanging integration tests'
+            failed=0
+            for file in "${selected[@]}"; do
+              echo "Testing $file"
+              if ! timeout 40s node --import tsx --test --test-force-exit "$file" > /tmp/one-test.log 2>&1; then
+                echo "FAILED_OR_TIMED_OUT: $file"
+                tail -35 /tmp/one-test.log
+                failed=1
+              else
+                grep -E '# (tests|pass|fail|skipped) ' /tmp/one-test.log | tail -4 || true
+              fi
+            done
+            exit "$failed"
+          else
+            timeout 300s node --import tsx --test --test-force-exit --test-concurrency=2 "${selected[@]}"
+          fi

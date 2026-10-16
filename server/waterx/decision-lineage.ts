@@ -3,6 +3,7 @@ import type {LockDb} from "./lock-store";
 import {researchPool} from "./research-store";
 import {TIMED_STRATEGY,type TimedDecision} from "../../shared/timed-decision";
 import {TWO_STAGE_STRATEGY} from "../../shared/two-stage";
+import {summarizeTriad,type TriadSummary} from "../../shared/stage-congruence";
 
 /**
  * Read-only, bounded exact-round reconciliation. No migrations or new collectors.
@@ -25,7 +26,7 @@ export type LineageRow={
   outcome:"UP"|"DOWN"|null;settlementStatus:"VERIFIED"|"PENDING"|"DISPUTED"|"WITHHELD"|"MISSING";
   primary:LineageChoice;early:LineageChoice;confirmation:LineageChoice;
   checkpoint:LineageChoice|null;congruence:"AGREE"|"DISAGREE"|"NOT_COMPARABLE";
-  learningNote:string;
+  learningNote:string;alignment:TriadSummary;
 };
 const side=(x:unknown):"UP"|"DOWN"|null=>x==="UP"||x==="DOWN"?x:null;
 const finite=(x:unknown):number|null=>x!==null&&x!==undefined&&Number.isFinite(Number(x))?Number(x):null;
@@ -117,12 +118,13 @@ export function projectLineageRow(raw:Record<string,unknown>,now:number):Lineage
       typeof checkpointRaw.reason==="string"?checkpointRaw.reason:null,
   } as LineageChoice:null;
   const congruence=primary.side&&early.side?primary.side===early.side?"AGREE":"DISAGREE":"NOT_COMPARABLE";
+  const alignment=summarizeTriad({primary:primary.side,early:early.side,confirmation:confirmation.side});
   const learningNote=settlementStatus!=="VERIFIED"?
     "Official outcome not verified; no choice is scored.":primary.score==="NO_LOCK"&&early.score==="NO_LOCK"?
     "No saved primary or early prediction; no correctness inference.": 
     `Benchmark: ${primary.score}. Early: ${early.score}. Confirmation: ${confirmation.score}. Only saved choices are scored; no model is automatically trained or promoted.`;
   return {roundId,intervalMinutes,startMs,expiryMs,marketId,outcome,settlementStatus,
-    primary,early,confirmation,checkpoint,congruence,learningNote};
+    primary,early,confirmation,checkpoint,congruence,alignment,learningNote};
 }
 
 export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=researchPool){

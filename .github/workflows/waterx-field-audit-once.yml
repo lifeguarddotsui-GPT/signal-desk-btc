@@ -17,8 +17,9 @@ jobs:
               const response=await fetch(url,{signal:AbortSignal.timeout(8000)});
               if(!response.ok){console.log("INTERVAL",interval,"HTTP",response.status);continue;}
               const data=await response.json();
-              const round=data.round??{};
-              const market=data.market??{};
+              const detail=data.data?.detail??{};
+              const round=detail.round??{};
+              const market=detail.market??{};
               const sides=Array.isArray(round.sides)?round.sides:[];
               console.log(JSON.stringify({
                 interval,http:response.status,

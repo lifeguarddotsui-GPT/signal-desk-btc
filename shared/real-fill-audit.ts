@@ -24,7 +24,7 @@ export type RealFillAudit={
   reason:string;primary:SignalAtEntry|null;early:SignalAtEntry|null;confirmation:SignalAtEntry|null;
   breakEvenBeforeFees:number|null;estimatedGrossIfCorrect:number|null;
   officialOutcome:Side|null;tradeCorrect:boolean|null;
-  actualNetPnlUsd:number|null;actualPnlStatus:"VERIFIED_INPUT"|"UNAVAILABLE";
+  actualNetPnlUsd:number|null;actualPnlStatus:"USER_REPORTED"|"UNAVAILABLE";
 };
 const noSignal=(s:FrozenSignal):SignalAtEntry=>({
   state:"MISSING_ACKNOWLEDGED_SIGNAL",selectedSide:null,
@@ -70,6 +70,6 @@ export function reconcileRealFill(round:VerifiedHistoryRound,p:FilledPosition):R
     breakEvenBeforeFees:p.priceCents/100,
     estimatedGrossIfCorrect:p.stakeUsd/(p.priceCents/100),
     officialOutcome,tradeCorrect,actualNetPnlUsd,
-    actualPnlStatus:actualNetPnlUsd==null?"UNAVAILABLE":"VERIFIED_INPUT",
+    actualPnlStatus:actualNetPnlUsd==null?"UNAVAILABLE":"USER_REPORTED",
   };
 }

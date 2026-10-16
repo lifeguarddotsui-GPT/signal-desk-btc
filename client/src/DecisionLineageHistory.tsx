@@ -10,6 +10,7 @@ type Row={
   roundId:string;intervalMinutes:5|15;startMs:number;expiryMs:number;marketId:string|null;
   outcome:"UP"|"DOWN"|null;settlementStatus:string;primary:Choice;early:Choice;
   confirmation:Choice;checkpoint:Choice|null;congruence:string;learningNote:string;
+  alignment?:{state:string;direction:"UP"|"DOWN"|null;display:string;frozenCount:number};
 };
 type Stats={locked:number;correct:number;incorrect:number;scored:number;accuracy:number|null;coverage:number|null;
   brier:number|null;probabilityScoredN:number;medianSecondsRemainingAtAck:number|null};
@@ -134,6 +135,7 @@ export default function DecisionLineageHistory(){
               <div className="two-stage-fact"><span>Official WaterX result</span>
                 <b>{r.settlementStatus==="VERIFIED"?`VERIFIED · ${r.outcome}`:r.settlementStatus}</b></div>
               <div className="two-stage-fact"><span>Primary vs Early direction</span><b>{r.congruence.replaceAll("_"," ")}</b></div>
+              <div className="two-stage-fact"><span>Early / Confirmation / Primary alignment</span><b>{r.alignment?.display??"Not classified"}</b></div>
               <p><strong>Learning interpretation:</strong> {r.learningNote}</p>
               <RealFillAuditPanel round={r}/>
               <details><summary>Evidence IDs, policy and acknowledgement timing</summary>

@@ -51,6 +51,33 @@ test("strict Confirmation qualifies independently in both directions, never reus
   assert.equal(assessStage(frame(),"CONFIRMATION",null,null).eligible,false);
   assert.equal(assessStage(frame(),"CONFIRMATION",null,{...policy,selectedCalibrationN:59}).eligible,false);
 });
+test("opt-in rule confirmation freezes genuine subsequent market evidence without claiming a learned model",()=>{
+  const original=process.env.WATERX_RULE_CONFIRMATION_ENABLED;
+  try{
+    process.env.WATERX_RULE_CONFIRMATION_ENABLED="true";
+    for(const side of ["UP","DOWN"] as const){
+      const result=assessStage(frame(undefined,side),"CONFIRMATION",null,null);
+      assert.equal(result.eligible,true);
+      assert.equal(result.side,side);
+      assert.equal(result.calibrationStatus,"UNQUALIFIED");
+      assert.equal(result.modelVersion,null);
+      assert.equal(result.policyVersion,"confirmation-evidence-guard-v1");
+      assert.equal(result.probabilitySource,"WATERX_MARKET");
+      const input=frame(undefined,side);
+      const duplicate={...input,observations:input.observations.map(o=>({...o,
+        probabilityUp:side==="UP"?.8:.2,probabilityDown:side==="UP"?.2:.8,
+        features:{...o.features,comparison:{price:100,asOf:"same"}}}))};
+      assert.equal(assessStage(duplicate,"CONFIRMATION",null,null).eligible,false);
+      const stale={...input,nowMs:start+48000};
+      assert.equal(assessStage(stale,"CONFIRMATION",null,null).eligible,false);
+      const noTime={...input,nowMs:input.expiryMs-15000};
+      assert.equal(assessStage(noTime,"CONFIRMATION",null,null).eligible,false);
+    }
+  }finally{
+    if(original===undefined)delete process.env.WATERX_RULE_CONFIRMATION_ENABLED;
+    else process.env.WATERX_RULE_CONFIRMATION_ENABLED=original;
+  }
+});
 test("non-complementary input is not normalized even when sourceHealthy claims true",()=>{
   const input=frame();input.observations.at(-1)!.probabilityDown=.285;
   assert.equal(assessStage(input,"CONFIRMATION",null,policy).eligible,false);

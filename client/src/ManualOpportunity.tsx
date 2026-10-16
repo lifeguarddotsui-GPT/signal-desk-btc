@@ -6,6 +6,7 @@ import type { AdvisoryPayload } from "./advisory-contract";
 import { EventChallengerPanel } from "./EventChallengerPanel";
 import type { TwoStageProjection, StageLock, LockStage } from "../../shared/two-stage";
 import { TWO_STAGE_STRATEGY } from "../../shared/two-stage";
+import { evaluateEntryWindow,type Direction } from "../../shared/entry-window";
 
 type Interval = 5 | 15;
 type RoundIdentity = { id: string; startMs: number; expiryMs: number };
@@ -45,7 +46,7 @@ const stageReason = (reason: string | undefined, persistence: string | undefined
   if (persistence === "FAILED") return "Storage unavailable";
   if (persistence === "UNKNOWN") return "Commit state unknown · reconciling";
   if (persistence === "SAVING") return "Saving decision";
-  if (reason === "CONFIRMATION_POLICY_NOT_QUALIFIED") return "Inactive — calibrated confirmation model not qualified";
+  if (reason === "CONFIRMATION_POLICY_NOT_QUALIFIED") return "Neither a qualified model nor the rule-based confirmation is active on this server";
   if (diagnostics?.message?.trim()) return diagnostics.message;
   if (reason === "NO_QUALIFYING_EARLY_VALUE" || reason === "ENTRY_TERMS_UNAVAILABLE") return "No qualifying early opportunity";
   if (reason === "WAITING_FOR_FRESH_DATA" || reason === "SOURCE_STALE") return "Fresh odds unavailable";
@@ -115,11 +116,15 @@ function TwoStageDeskRows({ projection, round, interval, now }: {
   return <section className="two-stage-desk" aria-label="Two-stage shadow research">
     <div className="two-stage-desk-heading"><span>OPTIONAL EARLY / CONFIRMATION EXPERIMENTS</span><b>Separate from the active Bluewater 30-second benchmark · no order authority</b></div>
     {displayStage("EARLY RESEARCH LOCK", "EARLY", early)}
-    {candidate?.confirmation?.reason === "CONFIRMATION_POLICY_NOT_QUALIFIED" && !confirmation
+    <small className="two-stage-mode">Confirmation mode: {candidate?.confirmationMode === "EVIDENCE_RULE_ENABLED"
+      ? "Evidence rule enabled · uncalibrated" : candidate?.confirmationMode === "QUALIFIED_MODEL"
+        ? "Qualified learned model" : candidate?.confirmationMode === "UNAVAILABLE"
+          ? "Disabled on this server" : "Unknown · confirm deployment settings"}</small>
+    {candidate?.confirmation?.reason === "CONFIRMATION_POLICY_NOT_QUALIFIED" && !confirmation && candidate.confirmationMode === "UNAVAILABLE"
       ? <details className="two-stage-inactive-confirmation">
-          <summary>Confirmation experiment inactive · no qualified calibrated model</summary>
+          <summary>Confirmation disabled on this server · verify the deployment setting</summary>
           {displayStage("EXPERIMENTAL CONFIRMATION", "CONFIRMATION", confirmation)}
-          <p>A separate calibrated confirmation model has not passed qualification. This is not a missed Bluewater Decision and is excluded from prediction accuracy.</p>
+          <p>Rule fallback is not active in the responding server process. Check WATERX_RULE_CONFIRMATION_ENABLED=true in the production deployment and then republish. No historical prediction is counted as incorrect.</p>
         </details>
       : displayStage("EXPERIMENTAL CONFIRMATION", "CONFIRMATION", confirmation)}
     <p className="two-stage-relationship">{relationship ?? (candidate
@@ -132,6 +137,7 @@ function TwoStageDeskRows({ projection, round, interval, now }: {
       <div><span>Price features</span><b>{JSON.stringify(candidate.priceFeatures)}</b></div>
       {candidate.researchPreference && <div><span>Frozen research mode</span><b>{candidate.researchPreference.mode} · collateral {usd(candidate.researchPreference.collateralUsd)} · minimum return {usd(candidate.researchPreference.minimumReturnUsd)} · preferred return {usd(candidate.researchPreference.preferredReturnUsd)}. Research display only; does not change trading settings or execution eligibility.</b></div>}
       {candidate.policyRegistry != null && <div><span>Policy registry</span><b>{JSON.stringify(candidate.policyRegistry)}</b></div>}
+      <div><span>Effective confirmation switch</span><b>{candidate.confirmationMode??"UNKNOWN"} · ruleEnabled {String(candidate.confirmationRuleEnabled??"unknown")}</b></div>
       <div><span>Browser snapshot timing</span><b>Local UI first observed {time(localObservedAt)}. Browser/server clock synchronization is unverified; this is not a verified network-latency measurement.</b></div>
       {([["EARLY", candidate.early, early], ["CONFIRMATION", candidate.confirmation, confirmation]] as const).map(([name, state, lock]) =>
         <div className="two-stage-diagnostic-lock" key={name}><span>{name} diagnostics</span><b>{lock
@@ -238,6 +244,25 @@ export function ManualOpportunity({
       (components.recentReversals ?? 0) === 0 &&
       (components.probabilityRange == null || components.probabilityRange <= components.maximumRange || components.trendKind === "STRENGTHENING"),
   ];
+  const stageMatches = !!twoStageProjection && !!exactRound &&
+    twoStageProjection.roundId === exactRound.id && twoStageProjection.startMs === exactRound.startMs &&
+    twoStageProjection.expiryMs === exactRound.expiryMs && twoStageProjection.intervalMinutes === interval;
+  const stageSides = stageMatches ? (["early","confirmation"] as const)
+    .map(name=>twoStageProjection![name]).filter(st=>st.persistence==="COMMITTED" &&
+      st.lock?.commitVerified === true && st.lock?.roundId === exactRound!.id &&
+      st.lock?.startMs === exactRound!.startMs && st.lock?.expiryMs === exactRound!.expiryMs)
+    .map(st=>st.lock!.side) : [];
+  const primarySide:Direction|null=locked&&(savedSide==="UP"||savedSide==="DOWN")?savedSide:null;
+  const entrySide:Direction|null=primarySide??stageSides[stageSides.length-1]??null;
+  const signalsConflict=[primarySide,...stageSides].filter(Boolean).some(s=>s!==entrySide);
+  const currentAsk = entrySide==="UP"?purchase?.up:entrySide==="DOWN"?purchase?.down:null;
+  const entryWindow=exactRound?evaluateEntryWindow({
+    nowMs:now,startMs:exactRound.startMs,expiryMs:exactRound.expiryMs,
+    sourceFresh:exactFresh,referenceConfirmed:confirmed,signal:entrySide,
+    signalConflict:signalsConflict,
+    askCents:currentAsk?.status==="reported"?currentAsk.askCents:null,
+    latestProviderAsOfMs:odds?.receivedAtMs??null,
+  }):null;
   const savedSource = saved?.status === "LOCKED"
     ? "Frozen WaterX market probability · not a calibrated forecast" : null;
   const stale = health?.probabilities.lastValid;
@@ -299,6 +324,26 @@ export function ManualOpportunity({
       {fixtureName && <span className="desk-fixture-indicator">Development visual fixture · {fixtureName.replaceAll("-", " ")}</span>}
     </div>
     <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
+    {entryWindow && <section className="desk-entry-window" aria-label="Entry timing and economic research" data-status={entryWindow.state}>
+      <div className="desk-entry-heading"><span>ENTRY WINDOW · $5 RESEARCH</span>
+        <strong role="status">{entryWindow.label}</strong></div>
+      <div className="desk-entry-track" role="progressbar" aria-label="Round elapsed" aria-valuemin={0} aria-valuemax={100}
+        aria-valuenow={Math.round(entryWindow.roundProgressPercent)}>
+        <i style={{width:`${entryWindow.roundProgressPercent}%`}}/>
+      </div>
+      <div className="desk-entry-stats">
+        <span>{entryWindow.remainingSeconds}s left</span>
+        <span>{entryWindow.signal??"No committed direction"}</span>
+        <span>{entryWindow.askCents==null?"Ask unavailable":`${entryWindow.askCents.toFixed(1)}¢ ask`}</span>
+      </div>
+      <div className="desk-entry-stats">
+        <span>Gross if correct: {entryWindow.grossIfWinUsd==null?"Unknown":usd(entryWindow.grossIfWinUsd)}</span>
+        <span>Break-even win rate (before costs): {percent(entryWindow.breakEvenWinProbability)}</span>
+      </div>
+      <p>{entryWindow.reason}</p>
+      <small>Timing is descriptive, not a buy recommendation. Figures assume a full fill and $1 winning-share redemption.
+        WaterX BTC settles against Chainlink TWAP, not Coinbase spot. No independently verified edge or executable quote exists here.</small>
+    </section>}
     {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>
       <p>Before fees, minimums and price impact. Not an executable quote or expected profit.</p>
       {indicative.map(row=><p key={row.side}>{row.side.toUpperCase()} · indicative gross winning receipt {usd(row.receipt)}</p>)}

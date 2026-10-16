@@ -47,6 +47,7 @@ function StatsLine({label,data}:{label:string;data:Stats}){
 export default function DecisionLineageHistory(){
   const [interval,setInterval]=useState("all");
   const [window,setWindow]=useState("24h");
+  const [beforeLocal,setBeforeLocal]=useState("");
   const [reload,setReload]=useState(0);
   const [data,setData]=useState<Payload|null>(null);
   const [error,setError]=useState("");
@@ -54,13 +55,15 @@ export default function DecisionLineageHistory(){
   useEffect(()=>{
     const abort=new AbortController();setLoading(true);setError("");setData(null);
     const query=new URLSearchParams({interval,window,limit:"40"});
+    const before=beforeLocal?new Date(beforeLocal).getTime():NaN;
+    if(Number.isFinite(before)&&before>0)query.set("beforeMs",String(before));
     fetch(`/api/waterx/decision-lineage?${query.toString()}`,{signal:abort.signal})
       .then(async r=>{if(!r.ok)throw new Error(`History unavailable (${r.status}). No data inferred.`);return r.json();})
       .then((p:Payload)=>{if(!abort.signal.aborted)setData(p);})
       .catch(e=>{if(!abort.signal.aborted)setError(String((e as Error).message));})
       .finally(()=>{if(!abort.signal.aborted)setLoading(false);});
     return ()=>abort.abort();
-  },[interval,window,reload]);
+  },[interval,window,beforeLocal,reload]);
   return <section className="two-stage-history" aria-label="Unified verified decision history" aria-busy={loading}>
     <header className="two-stage-history-heading"><div>
       <h2>One round · independent predictions</h2>
@@ -74,6 +77,10 @@ export default function DecisionLineageHistory(){
       <label>Observed window<select value={window} onChange={e=>setWindow(e.target.value)}>
         <option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option>
       </select></label>
+      <label>Show history before (device time)
+        <input type="datetime-local" value={beforeLocal} onChange={e=>setBeforeLocal(e.target.value)}/>
+      </label>
+      {beforeLocal&&<button type="button" onClick={()=>setBeforeLocal("")}>Back to latest</button>}
       <button type="button" onClick={()=>setReload(x=>x+1)}>Refresh once</button>
     </div>
     {loading&&<p>Loading bounded, verified exact-round records…</p>}
@@ -81,6 +88,7 @@ export default function DecisionLineageHistory(){
     {data&&<div>
       <p className="two-stage-cohort">{data.cohortN} discovered rounds on this page · {data.window} ·
         as of {stamp(data.asOfMs)} · no predictions invented for visitor-idle clock slots.
+        {beforeLocal?" Filtered to earlier completed rounds.":""}
         {data.truncated?" Showing latest 40; older records not included in these statistics.":""}</p>
       <StatsLine label="Primary 30-second benchmark" data={data.stats.primary}/>
       <StatsLine label="Early research" data={data.stats.early}/>

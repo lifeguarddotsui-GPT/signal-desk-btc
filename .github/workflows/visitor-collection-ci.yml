@@ -53,4 +53,4 @@ jobs:
             fi
           done
           printf 'Shard %s: %s of %s test files\n' '${{ matrix.shard }}' "${#selected[@]}" "${#files[@]}"
-          timeout 300s node --import tsx --test --test-concurrency=2 "${selected[@]}"
+          timeout 300s node --import tsx --test --test-force-exit --test-concurrency=2 "${selected[@]}"

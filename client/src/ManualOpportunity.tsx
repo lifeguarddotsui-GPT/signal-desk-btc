@@ -7,6 +7,7 @@ import { EventChallengerPanel } from "./EventChallengerPanel";
 import type { TwoStageProjection, StageLock, LockStage } from "../../shared/two-stage";
 import { TWO_STAGE_STRATEGY } from "../../shared/two-stage";
 import { evaluateEntryWindow,type Direction } from "../../shared/entry-window";
+import {summarizeTriad} from "../../shared/stage-congruence";
 
 type Interval = 5 | 15;
 type RoundIdentity = { id: string; startMs: number; expiryMs: number };
@@ -246,15 +247,25 @@ export function ManualOpportunity({
   ];
   const stageMatches = !!twoStageProjection && !!exactRound &&
     twoStageProjection.roundId === exactRound.id && twoStageProjection.startMs === exactRound.startMs &&
-    twoStageProjection.expiryMs === exactRound.expiryMs && twoStageProjection.intervalMinutes === interval;
+    twoStageProjection.expiryMs === exactRound.expiryMs && twoStageProjection.intervalMinutes === interval &&
+    twoStageProjection.strategyVersion === TWO_STAGE_STRATEGY && twoStageProjection.shadowOnly === true &&
+    twoStageProjection.automaticExecutionAllowed === false;
   const stageSides = stageMatches ? (["early","confirmation"] as const)
     .map(name=>twoStageProjection![name]).filter(st=>st.persistence==="COMMITTED" &&
       st.lock?.commitVerified === true && st.lock?.roundId === exactRound!.id &&
       st.lock?.startMs === exactRound!.startMs && st.lock?.expiryMs === exactRound!.expiryMs)
     .map(st=>st.lock!.side) : [];
   const primarySide:Direction|null=locked&&(savedSide==="UP"||savedSide==="DOWN")?savedSide:null;
-  const entrySide:Direction|null=primarySide??stageSides[stageSides.length-1]??null;
-  const signalsConflict=[primarySide,...stageSides].filter(Boolean).some(s=>s!==entrySide);
+  const alignment=summarizeTriad({primary:primarySide,
+    early:stageMatches&&twoStageProjection?.early.persistence==="COMMITTED"&&
+      twoStageProjection.early.lock?.commitVerified===true&&stageSides.includes(twoStageProjection.early.lock.side)?
+      twoStageProjection.early.lock.side:null,
+    confirmation:stageMatches&&twoStageProjection?.confirmation.persistence==="COMMITTED"&&
+      twoStageProjection.confirmation.lock?.commitVerified===true&&stageSides.includes(twoStageProjection.confirmation.lock.side)?
+      twoStageProjection.confirmation.lock.side:null,
+  });
+  const entrySide:Direction|null=alignment.direction;
+  const signalsConflict=alignment.state==="CONFLICT";
   const currentAsk = entrySide==="UP"?purchase?.up:entrySide==="DOWN"?purchase?.down:null;
   const entryWindow=exactRound?evaluateEntryWindow({
     nowMs:now,startMs:exactRound.startMs,expiryMs:exactRound.expiryMs,
@@ -325,6 +336,7 @@ export function ManualOpportunity({
     </div>
     <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
     {entryWindow && <section className="desk-entry-window" aria-label="Entry timing and economic research" data-status={entryWindow.state}>
+      <p className="desk-stage-congruence" role="status">Early / Confirmation / Primary: {alignment.display}</p>
       <div className="desk-entry-heading"><span>ENTRY WINDOW · $5 RESEARCH</span>
         <strong role="status">{entryWindow.label}</strong></div>
       <div className="desk-entry-track" role="progressbar" aria-label="Round elapsed" aria-valuemin={0} aria-valuemax={100}

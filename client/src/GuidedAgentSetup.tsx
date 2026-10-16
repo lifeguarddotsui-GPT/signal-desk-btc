@@ -78,6 +78,9 @@ export default function GuidedAgentSetup(props: Props) {
     props.policy.sizingMode === "AVAILABLE_PERCENT" && !props.policy.compound && props.policy.sizingPercent === 5 ? "Conservative" :
     props.policy.sizingMode === "AVAILABLE_PERCENT" && !props.policy.compound && props.policy.sizingPercent === 10 ? "Balanced" : "Custom");
   const [customOpen, setCustomOpen] = useState(false);
+  const [recoveryAmount,setRecoveryAmount] = useState("");
+  const [recoveryMinimum,setRecoveryMinimum] = useState("");
+  const [recoveryAck,setRecoveryAck] = useState(false);
   const [localExperimental, setLocalExperimental] = useState(false);
   const [localCompounding, setLocalCompounding] = useState(false);
   const [dailyLossInput, setDailyLossInput] = useState(props.policy.dailyLoss?.mode === "AMOUNT" ? (props.policy.dailyLoss.value / 100).toFixed(2) : "");
@@ -92,6 +95,10 @@ export default function GuidedAgentSetup(props: Props) {
   const balanceNumber = props.availableBalanceUsd == null ? null : Number(props.availableBalanceUsd);
   const hasBalance = balanceNumber != null && Number.isFinite(balanceNumber) && balanceNumber > 0;
   const funded = hasBalance;
+  const recoverAmountValid = supportedAmount(recoveryAmount,6) && hasBalance &&
+    Number(recoveryAmount) <= balanceNumber!;
+  const minOutputValid = supportedAmount(recoveryMinimum,6) && recoverAmountValid &&
+    Number(recoveryMinimum) <= Number(recoveryAmount);
   const fundingAmountValid = supportedAmount(props.fundingAmount, props.settlementDecimals);
   const usdcAmountValid = supportedAmount(props.usdcFundingAmount, 6);
   const balanceLabel = balanceNumber == null || !Number.isFinite(balanceNumber) ? "Balance unavailable" : `$${balanceNumber.toFixed(2)}`;
@@ -149,6 +156,14 @@ export default function GuidedAgentSetup(props: Props) {
     const extra = { amountHuman, ...(kind === "FUND" && ids.length ? { coinObjectIds: ids } : {}) };
     if (props.onQuickOwnerAction) props.onQuickOwnerAction(kind, extra);
     else props.onOwnerAction(kind, extra);
+  };
+  const reviewRecovery = () => {
+    if(!props.authorized||!accountReady||!props.ownerSetupSigning||!minOutputValid||
+       !recoveryAck||props.ownerSubmissionPending||props.busy)return;
+    // No quick action: the owner MUST see the simulation and review before wallet signing.
+    const minOutputAtomic = (BigInt(recoveryMinimum.split(".")[0])*1_000_000n+
+      BigInt((recoveryMinimum.split(".")[1]??"").padEnd(6,"0"))).toString();
+    props.onOwnerAction("REDEEM_USDC",{amountHuman:recoveryAmount,minOutputAtomic});
   };
   const createAccount = () => {
     if (props.onQuickOwnerAction) props.onQuickOwnerAction("CREATE_ACCOUNT");
@@ -264,6 +279,43 @@ export default function GuidedAgentSetup(props: Props) {
             <p className="ao-button-caption">This prepares an owner review. It does not mark funding complete.</p>
             {props.notice && <p className="ao-notice" role="status">{props.notice}</p>}
             {(props.pendingAction || props.pendingDescription) && <OwnerReview {...props} />}
+            <section className="ao-recovery" aria-label="Recover funds from owned WaterX account">
+              <h4>Recover funds to your wallet</h4>
+              <p>Your WaterX USD credit is held in the account you control. Request its redemption
+                into native USDC sent to your connected owner wallet. This is a queued withdrawal
+                requiring a WaterX keeper, not an instant transfer. No agent can withdraw for you.</p>
+              <div className="ao-recovery-grid">
+                <label className="ao-small-field">WaterX USD amount
+                  <input aria-label="WaterX USD amount to redeem" inputMode="decimal"
+                    placeholder="0.00" value={recoveryAmount}
+                    onChange={event=>{setRecoveryAmount(event.target.value);setRecoveryAck(false);}}/>
+                </label>
+                <label className="ao-small-field">Minimum acceptable native USDC returned
+                  <input aria-label="Minimum USDC received" inputMode="decimal"
+                    placeholder="Enter your minimum" value={recoveryMinimum}
+                    onChange={event=>{setRecoveryMinimum(event.target.value);setRecoveryAck(false);}}/>
+                </label>
+              </div>
+              {hasBalance && <button type="button" className="ao-button ao-button-secondary"
+                onClick={()=>{setRecoveryAmount(balanceNumber!.toFixed(6));setRecoveryAck(false);}}>
+                Use available WaterX balance ({balanceLabel})
+              </button>}
+              <p className="ao-button-caption">Actual redemption fees, keeper delay and eventual
+                USDC amount have not been independently verified. Your minimum is a transaction
+                constraint, not a quote. Wallet gas is separate. First simulate, then inspect
+                the Slush transaction before approval. Never enter a seed phrase.</p>
+              <label className="ao-recovery-consent"><input type="checkbox" checked={recoveryAck}
+                onChange={event=>setRecoveryAck(event.target.checked)}/>
+                I understand this is a queued redemption, and I will review the transaction
+                and its minimum USDC output before signing.</label>
+              <button type="button" className="ao-button ao-button-secondary ao-full-button"
+                disabled={!props.authorized||!accountReady||!props.ownerSetupSigning||
+                  !minOutputValid||!recoveryAck||props.ownerSubmissionPending||!!props.busy}
+                onClick={reviewRecovery}>Simulate recovery · no funds move yet</button>
+              {!props.ownerSetupSigning&&<p className="ao-inline-hint">Wallet owner signing
+                is unavailable from the server. Recovery cannot be submitted here.</p>}
+              {props.pendingAction==="REDEEM_USDC"&&<OwnerReview {...props}/>}
+            </section>
             <details className="ao-more-funding"><summary>Other funding option</summary>
               <label className="ao-small-field">USDC amount<input inputMode="decimal" value={props.usdcFundingAmount} onChange={event => props.onUsdcFundingAmountChange(event.target.value)} placeholder="0.00" /></label>
               <button type="button" className="ao-button ao-button-secondary" disabled={!accountReady || !props.authorized || !usdcAmountValid || props.ownerSubmissionPending || !!props.busy} onClick={() => submitFunding("FUND_USDC", props.usdcFundingAmount)}>Review USDC conversion</button>

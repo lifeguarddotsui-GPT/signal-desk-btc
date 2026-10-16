@@ -28,6 +28,8 @@ export type TwoStageProjection=TimedRound&{
   relationship:"Agrees with Early Lock"|"Changed direction"|"No confirmation"|"No early decision";
   priceFeatures:unknown;settlementRule:unknown;
   researchPreference?:ResearchPreference;policyRegistry?:unknown;researchActivated?:false;
+  confirmationMode?: "QUALIFIED_MODEL"|"EVIDENCE_RULE_ENABLED"|"UNAVAILABLE";
+  confirmationRuleEnabled?: boolean;
 };
 export type TwoStageRoundRow=TimedRound&{
   marketId:string;early:StageLock|null;confirmation:StageLock|null;

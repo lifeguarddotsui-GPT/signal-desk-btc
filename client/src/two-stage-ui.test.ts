@@ -127,7 +127,7 @@ test("early lock remains a separate shadow stage with honest value status and fr
   assert.match(html, /Indicative \$5\.00 collateral · \$6\.40 total return if correct/);
   assert.match(html, /Below preferred return/);
   assert.match(html, /market-derived evidence · uncalibrated/i);
-  assert.match(html, /Confirmation experiment inactive/);
+  assert.match(html, /Confirmation mode:/);
   assert.match(html, /OPTIONAL EARLY \/ CONFIRMATION EXPERIMENTS/);
   assert.match(html, /PRIMARY RESEARCH · 30-SECOND GATES/);
   assert.match(html, /Frozen research preference · preferred/);

@@ -1,4 +1,5 @@
 import {scoredTimedHistory,timedHistoryQuery} from "./waterx/timed-history";
+import {decisionLineage,lineageQuery} from "./waterx/decision-lineage";
 import {eventLockReport} from "./waterx/event-lock-report";
 import {twoStageHistory,stageHistoryQuery} from "./waterx/two-stage-history";
 import {gateHistory,gateHistoryQuery} from "./waterx/gate-history";
@@ -202,6 +203,12 @@ export function registerRoutes(app: Express) {
         elapsedMs:event.elapsedMs,retryCount:event.attempt,clock:"browser-untrusted"});
     res.status(202).json({status:"diagnostic-only"});
   });
+  app.get("/api/waterx/decision-lineage",safe(async(req,res)=>{
+    const parsed=lineageQuery.safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:"Invalid lineage filter"});return;}
+    try{res.set("Cache-Control","no-store").json(await decisionLineage(parsed.data));}
+    catch{res.status(503).json({error:"Exact-round comparison unavailable; no outcomes inferred."});}
+  }));
   app.get("/api/waterx/timed-history",async(req,res)=>{
     const parsed=timedHistoryQuery.safeParse(req.query);
     if(!parsed.success){res.status(400).json({error:"Invalid timed-history filters"});return;}

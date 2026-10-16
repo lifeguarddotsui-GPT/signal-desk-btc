@@ -78,3 +78,19 @@ Do not run `EXPLAIN ANALYZE` on a large production table just to confirm readine
 - Owner approval required **after** these checks to publish; immediately verify browser-closed idle state, 5m/15m source/data freshness, exact-round scores, absence of unexpected writes and per-project database-compute hours. Rollback to previously published revision if compromised.
 
 **No production SQL, migration, payment, secret or publication action is performed by this document.**
+
+
+## October 16, 10:31 a.m. Belize — owner-confirmed usage baseline
+
+Replit **Usage → Per project → Blue Water Agents → Storage** screenshot:
+
+| Resource | Usage | Rate | Estimated charge |
+|---|---:|---:|---:|
+| Production database compute | 125.93 hours | $0.16 / hour | $20.1488 |
+| Production database logical storage | 0.84 GiB-months | $0.35 / GiB-month | $0.294 |
+| Production database point-in-time recovery storage | 0.63 GiB-months | $0.20 / GiB-month | $0.126 |
+| Project storage and object-storage resource meters | 0 displayed | As shown in Replit | $0 |
+
+Total **approximately $20.57**, of which 98.0% is compute. This is a **period-to-date cumulative** reading, not the incremental charge since visitor-only deployment. A previous account-wide 291.43-hour reading is not directly comparable to this single-project number. Preserve source historical data; deleting approximately $0.42 in stored bytes/recovery charges cannot fix the dominant compute expense.
+
+**Controlled follow-up:** Close every Blue Water dashboard tab on all devices. Only the passive status endpoint is permitted during the test. After at least 60 minutes, capture the same project's production database compute-hours figure and the time; allow for reporting delays by checking again later. The computation target is `Δhours / wall-clock idle hours`, ideally near zero (not a guarantee). If it rises nearly hour-for-hour while passive visitor status reports zero, check independent workers, other database clients and Replit usage reporting lag. No production access or billing assertion is made from these screenshots beyond the displayed cumulative line items.

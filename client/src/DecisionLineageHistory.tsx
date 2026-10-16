@@ -16,6 +16,9 @@ type Payload={asOfMs:number;window:string;interval:string;cohortN:number;truncat
   stats:{primary:Stats;early:Stats;confirmation:Stats};
   paired:{verifiedN:number;agree:number;disagree:number;earlyWrongPrimaryCorrect:number;earlyCorrectPrimaryWrong:number;
     earlyConfirmationVerifiedN:number;confirmationCorrectedEarly:number;confirmationReversedCorrectEarly:number};
+  timingBands?:{stage:"primary"|"early"|"confirmation";intervalMinutes:5|15;
+    band:"FIRST_THIRD"|"MIDDLE_THIRD"|"LAST_THIRD";locked:number;
+    verifiedN:number;correct:number;incorrect:number;descriptiveAccuracy:number|null;minimumSampleN:number}[];
   rows:Row[]};
 const stamp=(n:number|null|undefined)=>n==null?"Not recorded":new Date(n).toLocaleString(undefined,{dateStyle:"short",timeStyle:"short"});
 const percentage=(n:number|null)=>n==null?"Not measurable":`${(n*100).toFixed(1)}%`;
@@ -81,6 +84,23 @@ export default function DecisionLineageHistory(){
       <StatsLine label="Primary 30-second benchmark" data={data.stats.primary}/>
       <StatsLine label="Early research" data={data.stats.early}/>
       <StatsLine label="Confirmation experiment" data={data.stats.confirmation}/>
+      <details className="history-timing-bands">
+        <summary>Historical lock timing by round third · exploratory, not trade entry</summary>
+        <p>These groups use saved prediction acknowledgement time, not actual WaterX purchase time.
+          The same market can change price between a saved decision and an order fill.
+          Accuracy is withheld for fewer than 20 verified observations in a matching cohort.</p>
+        <div className="history-timing-scroll">
+          <table><thead><tr><th>Signal</th><th>Interval</th><th>Frozen window</th><th>Verified n</th>
+            <th>Correct / incorrect</th><th>Historical accuracy</th></tr></thead>
+            <tbody>{(data.timingBands??[]).map(r=><tr key={`${r.stage}-${r.intervalMinutes}-${r.band}`}>
+              <td>{r.stage}</td><td>{r.intervalMinutes}m</td>
+              <td>{r.band==="FIRST_THIRD"?"Early":r.band==="MIDDLE_THIRD"?"Middle":"Late"}</td>
+              <td>{r.verifiedN}</td><td>{r.correct} / {r.incorrect}</td>
+              <td>{r.descriptiveAccuracy==null?"Insufficient sample":percentage(r.descriptiveAccuracy)}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </details>
       <section className="two-stage-paired" aria-label="Primary and early decision congruence">
         <h3>Matched early / primary comparison</h3>
         <p>Verified paired rounds n={data.paired.verifiedN} · same direction {data.paired.agree} ·

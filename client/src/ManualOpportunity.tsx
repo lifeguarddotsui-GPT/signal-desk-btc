@@ -339,9 +339,12 @@ export function ManualOpportunity({
       <div className="desk-entry-stats">
         <span>Gross if correct: {entryWindow.grossIfWinUsd==null?"Unknown":usd(entryWindow.grossIfWinUsd)}</span>
         <span>Break-even win rate (before costs): {percent(entryWindow.breakEvenWinProbability)}</span>
+        <span>With illustrative $0.10 total cost: {percent(entryWindow.illustrativeBreakEvenWith10CentCost)}</span>
       </div>
       <p>{entryWindow.reason}</p>
-      <small>Timing is descriptive, not a buy recommendation. Figures assume a full fill and $1 winning-share redemption.
+      <small>The $0.10 cost is a sensitivity example, NOT your verified WaterX fees or gas cost.
+        It cannot establish positive expected value. Timing is descriptive, not a buy recommendation.
+        Figures assume a full fill and $1 winning-share redemption.
         WaterX BTC settles against Chainlink TWAP, not Coinbase spot. No independently verified edge or executable quote exists here.</small>
     </section>}
     {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>

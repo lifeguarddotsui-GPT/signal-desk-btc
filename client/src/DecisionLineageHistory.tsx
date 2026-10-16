@@ -1,4 +1,5 @@
 import React,{useEffect,useState} from "react";
+import {RealFillAuditPanel} from "./RealFillAuditPanel";
 
 type Choice={
   state:string;side:"UP"|"DOWN"|null;score:string;decisionId:string|null;
@@ -126,6 +127,7 @@ export default function DecisionLineageHistory(){
                 <b>{r.settlementStatus==="VERIFIED"?`VERIFIED · ${r.outcome}`:r.settlementStatus}</b></div>
               <div className="two-stage-fact"><span>Primary vs Early direction</span><b>{r.congruence.replaceAll("_"," ")}</b></div>
               <p><strong>Learning interpretation:</strong> {r.learningNote}</p>
+              <RealFillAuditPanel round={r}/>
               <details><summary>Evidence IDs, policy and acknowledgement timing</summary>
                 <pre>{JSON.stringify({marketId:r.marketId,roundId:r.roundId,startMs:r.startMs,expiryMs:r.expiryMs,
                   primary:r.primary,early:r.early,confirmation:r.confirmation,checkpoint:r.checkpoint},null,2)}</pre>

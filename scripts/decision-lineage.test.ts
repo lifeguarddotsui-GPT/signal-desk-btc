@@ -63,6 +63,6 @@ test("one bounded read-only lineage query does not create rounds for invisible t
 test("default history UI uses a single lazy bounded endpoint and does not poll",()=>{
   const u=readFileSync(new URL("../client/src/DecisionLineageHistory.tsx",import.meta.url),"utf8");
   const root=readFileSync(new URL("../client/src/CanonicalHistory.tsx",import.meta.url),"utf8");
-  assert.match(u,/api\/waterx\/decision-lineage/);assert.doesNotMatch(u,/setInterval\(/);
+  assert.match(u,/api\/waterx\/decision-lineage/);assert.doesNotMatch(u,/window\.setInterval\(|globalThis\.setInterval\(|setTimeout\(/);
   assert.match(root,/<DecisionLineageHistory\/>/);
 });

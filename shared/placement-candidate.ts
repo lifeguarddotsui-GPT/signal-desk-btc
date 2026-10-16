@@ -22,7 +22,9 @@ export function comparePlacementCandidate(input:{
     const d=input.stages[key];
     const before=valid&&d.side!=null&&Number.isSafeInteger(d.acknowledgedAtMs)&&
       d.acknowledgedAtMs!>=input.startMs&&d.acknowledgedAtMs!<=input.placedAtMs;
-    const status:CandidateStage=!valid||!d.side||d.acknowledgedAtMs==null?
+    const validAck=d.acknowledgedAtMs!=null&&Number.isSafeInteger(d.acknowledgedAtMs)&&
+      d.acknowledgedAtMs>=input.startMs&&d.acknowledgedAtMs<input.expiryMs;
+    const status:CandidateStage=!valid||!d.side||!validAck?
       "NOT_RECORDED":before?"AVAILABLE_BEFORE_PLACEMENT":"SAVED_AFTER_PLACEMENT";
     return {name:(key[0].toUpperCase()+key.slice(1)) as "Primary"|"Early"|"Confirmation",
       status,savedSide:d.side??null,supportsSelection:before?d.side===input.side:null};

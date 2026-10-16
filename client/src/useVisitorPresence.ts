@@ -24,7 +24,7 @@ export function useVisitorPresence(): { ready: boolean; pending: boolean } {
     const leave = () => {
       clearRetry();
       if (!visitorMode) return;
-      setState("waiting");
+      if (!cancelled) setState("waiting");
       const body = JSON.stringify({ sessionId });
       // Delivery may fail on mobile suspension. The server's expiring lease
       // still guarantees bounded shutdown if the leave request never arrives.
@@ -50,7 +50,7 @@ export function useVisitorPresence(): { ready: boolean; pending: boolean } {
         if (!response.ok) throw new Error("Visitor collection unavailable");
         const status = await response.json() as PresenceStatus;
         nextHeartbeatDelayMs = status.ready ? 15_000 : 2_000;
-        if (!cancelled) setState(status.ready ? "ready" : "waiting");
+        if (!cancelled) setState(status.ready && document.visibilityState === "visible" ? "ready" : "waiting");
       } catch {
         nextHeartbeatDelayMs = 3_000;
         if (!cancelled) setState("waiting");
@@ -69,21 +69,40 @@ export function useVisitorPresence(): { ready: boolean; pending: boolean } {
     };
     document.addEventListener("visibilitychange", updateVisibility);
     window.addEventListener("pagehide", leave);
+    window.addEventListener("pageshow", updateVisibility);
     // Probe costs zero database queries, and also maintains backwards
     // compatibility with deployments where visitor-only mode is not enabled.
-    void fetch("/api/visitor/status", { cache: "no-store" })
-      .then(async response => response.ok ? response.json() as Promise<PresenceStatus> : null)
-      .then(status => {
+    const probe = async () => {
+      if (cancelled) return;
+      try {
+        const response = await fetch("/api/visitor/status", { cache: "no-store" });
+        // Older app deployments without visitor mode do not expose this route.
+        if (response.status === 404) {
+          if (!cancelled) setState("ready");
+          return;
+        }
+        if (!response.ok) throw new Error("Visitor mode probe unavailable");
+        const status = await response.json() as PresenceStatus;
         if (cancelled) return;
-        visitorMode = status?.mode === "visitor-only";
+        visitorMode = status.mode === "visitor-only";
         if (!visitorMode) setState("ready");
         else if (document.visibilityState === "visible") void heartbeat();
         else setState("waiting");
-      }).catch(() => { if (!cancelled) setState("ready"); });
+      } catch {
+        // Never bypass visitor protection on a temporary network failure:
+        // the server might be enforcing the visitor-only gate.
+        if (!cancelled) {
+          setState("waiting");
+          retry = setTimeout(() => { void probe(); }, 3_000);
+        }
+      }
+    };
+    void probe();
     return () => {
       cancelled = true;
       document.removeEventListener("visibilitychange", updateVisibility);
       window.removeEventListener("pagehide", leave);
+      window.removeEventListener("pageshow", updateVisibility);
       leave();
       clearRetry();
     };

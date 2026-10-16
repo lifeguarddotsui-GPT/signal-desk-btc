@@ -16,6 +16,7 @@ export function useVisitorPresence(): { ready: boolean; pending: boolean } {
     let cancelled = false;
     let visitorMode = false;
     let busy = false;
+    let nextHeartbeatDelayMs = 2_000;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const sessionId = crypto.randomUUID();
     const clearRetry = () => { if (retry) clearTimeout(retry); retry = undefined; };
@@ -48,13 +49,15 @@ export function useVisitorPresence(): { ready: boolean; pending: boolean } {
         });
         if (!response.ok) throw new Error("Visitor collection unavailable");
         const status = await response.json() as PresenceStatus;
+        nextHeartbeatDelayMs = status.ready ? 15_000 : 2_000;
         if (!cancelled) setState(status.ready ? "ready" : "waiting");
       } catch {
+        nextHeartbeatDelayMs = 3_000;
         if (!cancelled) setState("waiting");
       } finally {
         busy = false;
         if (!cancelled && document.visibilityState === "visible")
-          retry = setTimeout(() => { void heartbeat(); }, state === "ready" ? 15_000 : 2_000);
+          retry = setTimeout(() => { void heartbeat(); }, nextHeartbeatDelayMs);
       }
     };
     const updateVisibility = () => {

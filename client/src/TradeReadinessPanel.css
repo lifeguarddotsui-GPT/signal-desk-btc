@@ -61,3 +61,5 @@
 .trade-details-toggle{margin-top:13px;border:1px solid #48686b;border-radius:6px;color:#d5e6de;padding:9px 11px;background:#19343a;font-size:12px;cursor:pointer}
 .trade-diagnostics{font-size:12px;line-height:1.55;color:#bed1cb}
 @media(max-width:450px){.trade-timing-score{flex-basis:86px}.trade-timing-message strong{font-size:14px}.trade-timing-message span{font-size:12px}}
+
+.trade-payout-band{padding:9px 11px;border:1px solid #4b6666;border-radius:7px;background:#243b3c;color:#f2ddac;font-size:12px;font-weight:700;letter-spacing:.025em}

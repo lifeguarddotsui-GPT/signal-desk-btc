@@ -18,8 +18,19 @@ test("only a visible visitor heartbeat can activate data API; passive health nev
   app.get("/health/live", (_req, res) => res.json({ status: "ok" }));
   app.get("/api/check", (_req, res) => res.json({ status: "ok" }));
   const server = app.listen(0, "127.0.0.1");
+  // Address allocation with a hostname is asynchronous. Reading address()
+  // before "listening" may throw while leaving a live server handle behind.
+  await new Promise<void>((resolve, reject) => {
+    if (server.listening) { resolve(); return; }
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
   const address = server.address();
-  if (!address || typeof address === "string") throw new Error("Test HTTP server unavailable");
+  if (!address || typeof address === "string") {
+    server.closeAllConnections();
+    server.close();
+    throw new Error("Test HTTP server unavailable");
+  }
   const base = "http://127.0.0.1:" + address.port;
   const request = (route: string, method = "GET", body?: unknown) =>
     fetch(base + route, {

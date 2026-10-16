@@ -59,7 +59,10 @@ export function projectLineageRow(raw:Record<string,unknown>,now:number):Lineage
   });
   const primaryRaw=obj(raw.primary_decision);
   const primaryOK=raw.primary_id!=null&&raw.primary_outbox_id!=null&&
-    finite(raw.primary_ack)!==null&&finite(raw.primary_ack)!<=expiryMs&&
+    finite(raw.primary_ack)!==null&&finite(primaryRaw.decisionAtMs)!==null&&
+    finite(primaryRaw.decisionAtMs)!>=startMs&&
+    finite(raw.primary_ack)!>=finite(primaryRaw.decisionAtMs)!&&
+    finite(raw.primary_ack)!<expiryMs&&
     exact(primaryRaw)&&primaryRaw.strategyVersion===TIMED_STRATEGY;
   const primary:LineageChoice=primaryOK?{
     state:String(primaryRaw.status??"UNKNOWN"),side:primaryRaw.status==="LOCKED"?side(primaryRaw.side):null,
@@ -75,7 +78,10 @@ export function projectLineageRow(raw:Record<string,unknown>,now:number):Lineage
     const d=obj(raw[`${name}_decision`]),stageName=name==="early"?"EARLY":"CONFIRMATION";
     const matching=Number(raw.stage_match_count)===1&&
       raw[`${name}_id`]!=null&&raw[`${name}_outbox_id`]!=null&&
-      finite(raw[`${name}_ack`])!==null&&finite(raw[`${name}_ack`])!<=expiryMs&&marketId!==null&&
+      finite(raw[`${name}_ack`])!==null&&finite(d.qualifiedAtMs)!==null&&
+      finite(d.qualifiedAtMs)!>=startMs&&
+      finite(raw[`${name}_ack`])!>=finite(d.qualifiedAtMs)!&&
+      finite(raw[`${name}_ack`])!<expiryMs&&marketId!==null&&
       exact(d)&&d.stage===stageName&&d.network==="sui:mainnet"&&d.marketId===marketId&&
       d.strategyVersion===TWO_STAGE_STRATEGY&&
       d.strategyVersion===raw.stage_strategy;

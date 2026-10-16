@@ -29,7 +29,7 @@ test("waterx actual losing fill matches exact stage timing without fabricating l
   assert.equal(a.primary?.agreedWithTrade,null,"later primary forecast cannot explain entry");
   assert.equal(a.confirmation?.state,"MISSING_ACKNOWLEDGED_SIGNAL");
   assert.ok(Math.abs(a.estimatedGrossIfCorrect!-5/.676)<1e-9);
-  assert.equal(a.breakEvenBeforeFees,.676);
+  assert.ok(Math.abs(a.breakEvenBeforeFees!-.676)<1e-9);
 });
 test("similar clock time, missing market ID or different boundaries never matches",()=>{
   for(const p of [

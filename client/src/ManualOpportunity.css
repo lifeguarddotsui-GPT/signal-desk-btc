@@ -1,3 +1,4 @@
+@import "./TradeReadinessPanel.css";
 .chart-time-axis { position: relative; min-height: 1.6rem; margin-top: .4rem; font-size: .75rem; font-variant-numeric: tabular-nums; }
 .chart-time-axis time { position: absolute; top: 0; white-space: nowrap; }
 .chart-boundary-row { display: flex; justify-content: space-between; gap: 1rem; min-height: 1.25rem; font-size: .6875rem; color: #a5b9ae; }

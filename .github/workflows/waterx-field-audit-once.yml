@@ -1,0 +1,35 @@
+name: One-shot public WaterX field check
+on:
+  pull_request:
+    paths:
+      - .github/workflows/waterx-field-audit-once.yml
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Inspect only public field shapes (no auth and no writes)
+        run: |
+          node --input-type=module <<'NODE'
+          for (const interval of [5,15]) {
+            const url = 'https://api.waterx.app/predict/markets/crypto/crypto-btc-updown-'+interval+'m?locale=en';
+            try {
+              const response=await fetch(url,{signal:AbortSignal.timeout(8000)});
+              if(!response.ok){console.log("INTERVAL",interval,"HTTP",response.status);continue;}
+              const data=await response.json();
+              const round=data.round??{};
+              const market=data.market??{};
+              const sides=Array.isArray(round.sides)?round.sides:[];
+              console.log(JSON.stringify({
+                interval,http:response.status,
+                responseFields:Object.keys(data),marketFields:Object.keys(market),
+                roundFields:Object.keys(round),
+                roundIdPresent:typeof round.id==="string",
+                anchorPresent:round.anchorPrice!=null,
+                anchorConfirmedPresent:Object.hasOwn(round,"anchorPriceConfirmed"),
+                anchorConfirmedValue:round.anchorPriceConfirmed===true?"true":round.anchorPriceConfirmed===false?"false":"absent/other",
+                sides:sides.map(s=>({key:s.key,fields:Object.keys(s),oddsPresent:s.oddsCents!=null,probabilityPresent:s.probabilityCents!=null})),
+              }));
+            }catch(e){console.log("INTERVAL",interval,"ERROR",String(e).slice(0,200));}
+          }
+          NODE

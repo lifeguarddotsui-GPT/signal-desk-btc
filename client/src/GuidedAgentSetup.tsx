@@ -460,7 +460,7 @@ export default function GuidedAgentSetup(props: Props) {
 }
 
 function OwnerReview(props: Props) {
-  return <details className="ao-owner-review">
+  return <details className="ao-owner-review" open={!!props.pendingAction}>
     <summary>{props.pendingAction ? `Review prepared action · ${props.pendingAction}` : "Transaction review"}</summary>
     <div className="ao-owner-review-body">
       {props.pendingDescription && <p>{props.pendingDescription}</p>}

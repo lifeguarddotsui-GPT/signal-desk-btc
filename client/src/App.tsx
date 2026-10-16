@@ -585,6 +585,7 @@ function LivePage() {
         fixtureName={fixtureMode}
         marketAsks={{up:oddsDisplay.up.grossAvailable?oddsDisplay.up.priceCents:null,
           down:oddsDisplay.down.grossAvailable?oddsDisplay.down.priceCents:null}}
+        marketProbabilities={{up:oddsDisplay.up.probability,down:oddsDisplay.down.probability}}
         marketReference={{
           price: waterxReferenceValid ? round?.referencePrice ?? null : null,
           quality: roundProvisional ? "provisional" : waterxReferenceValid ? "confirmed" : "unavailable",

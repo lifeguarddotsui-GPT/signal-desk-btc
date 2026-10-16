@@ -33,7 +33,7 @@ export function createVisitorActivityGate(options: GateOptions) {
   let timer: ReturnType<typeof setInterval> | null = null;
   const prune = () => {
     const at = now();
-    for (const [id, seen] of sessions) {
+    for (const [id, seen] of Array.from(sessions)) {
       if (at - seen >= leaseMs || at < seen) sessions.delete(id);
     }
   };

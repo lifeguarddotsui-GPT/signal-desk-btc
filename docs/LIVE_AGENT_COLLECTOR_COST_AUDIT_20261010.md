@@ -70,3 +70,28 @@ Do not paste connection strings or wallet secrets.
 6. Backup/restore, deterministic CI, GitHub-to-Replit approved SHA connection, rollback. **No production permission flips, database deletion, forced delegate action, or automatic deployments**.
 
 **Recommendation:** Fix browser-independent collection **before** attempting high-frequency autonomous orders. Agent automation without uninterrupted capture and post-trade settlement is unsafe. Enable tiny pilot orders only once the restricted signer, executable quotes, on-chain permissions, and complete reconciliation all pass independent checks.
+
+## 6. October 16 billing incident: PostgreSQL compute is the immediate cost target
+
+**New screenshot evidence (account-wide, not yet per-app attributed):** $82.10 usage, $47.98 under the Replit Storage category; a truncated Production resource row shows **291.43 hours**; two production storage metrics show **0.87 and 0.63 GiB-months**. The exact resource names and charges are outside the screenshot.
+
+**Working diagnosis, not a confirmed itemized invoice:** 291.43 hours multiplied by an externally reported Replit database-compute rate of about $0.16/hour equals **$46.63**, close to the Storage category total of $47.98. A billed compute-hour explanation is far more plausible than physical bytes alone. Per-app attribution still requires a fully visible Replit usage breakdown.
+
+Replit's official documentation says production PostgreSQL compute suspends after five uninterrupted minutes without queries (https://docs.replit.com/billing/about-usage-based-billing). Calls that update or query every 5–60 seconds can keep the database awake all day. **PR #3 adaptive provider polling and historical-tick sampling do not alone solve an always-awake PostgreSQL bill.**
+
+### Emergency measure — requires explicit owner choice
+
+To halt further compute spending, the owner may temporarily stop all Replit application/worker processes querying the database through authenticated deployment controls and verify the database can enter an idle state. This will interrupt prospective live collection, future lock/scoring and new history until an independent collector is established. Do not remove the database, secrets, schema, historical tables or published backups. If multiple projects share the same production databases, all their queries matter. A hard budget limit can protect spending but may put apps offline. GitHub branch edits do not change active Replit hosting or production database usage before a release.
+
+### Proposed long-term path with continuous history
+
+1. **Edge collector:** adapt existing Cloudflare Durable Object + D1 prototype, which currently stops after a 26-hour trial. Prove its real quotas and uptime; D1 Free has 5 million rows read/day, 100,000 written/day, 5GB aggregate and 500MB per DB; Workers Free has request and CPU limitations.
+2. **Rebuild evidence parity before any cutover:** the edge prototype is NOT authoritative PostgreSQL training/round history. Add persisted immutable prospective decisions, exact-round IDs, source receipt clocks, settlement proofs, outbox, no-data audit, and a reconciled forward-only migration. No retrospective lock synthesis.
+3. **Keep the public dashboard's frequent reads out of PostgreSQL:** serve live odds, chart and recent history from a shared edge cache; browser-open polling must never silently wake Neon every few seconds.
+4. **Keep PostgreSQL cold for archival:** back up, retain existing immutable production rows unchanged, and archive reconciled edge records in deliberate infrequent batches (for example daily). Any 5-minute or 1-minute persistent database job will undermine autosuspend, including maintenance scans and worker lease checks. Verify ALL readers and writers.
+5. **Release only after owner approval:** run >=24–72 hours of matched shadow collection with browser closed, compare missed locks, correctness/settlement coverage, source freshness, storage billing, backup restore and rollback, then choose a separately approved cutover. Live-money trading stays independently gated and OFF.
+6. **Verify savings instead of promising zero cost:** Cloudflare free limits can be exceeded and Replit historical storage still bills even when compute sleeps. Confirm actual app-specific cost before/after.
+
+### Billing proof needed
+
+In Replit Usage choose Per project -> Blue Water Agents; expand Storage; horizontally scroll to expose full **resource, quantity and dollar amount** for Production Database Compute and Production Database Storage. Also inspect other projects because the screenshot's 291.43 total hours could aggregate across them. Never share database credentials or wallet secrets.

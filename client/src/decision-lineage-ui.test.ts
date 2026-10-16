@@ -13,11 +13,11 @@ test("active 30-second benchmark precedes optional shadow locks on live desk", (
   assert.match(live, /OPTIONAL EARLY \/ CONFIRMATION EXPERIMENTS/);
 });
 
-test("unqualified confirmation is inactive rather than counted as a wrong lock", () => {
+test("confirmation state is explicit and never scores an unavailable model as incorrect", () => {
   assert.match(live, /CONFIRMATION_POLICY_NOT_QUALIFIED/);
-  assert.match(live, /Confirmation experiment inactive/);
-  assert.match(live, /excluded from prediction accuracy/);
-  assert.match(live, /!confirmation/);
+  assert.match(live, /Confirmation disabled on this server/);
+  assert.match(live, /No historical prediction is counted as incorrect/);
+  assert.match(live, /!confirmation && candidate.confirmationMode === "UNAVAILABLE"/);
 });
 
 test("round history first shows active benchmark, with lazy independent cohorts", () => {

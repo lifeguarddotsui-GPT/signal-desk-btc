@@ -1,4 +1,6 @@
 import test from "node:test";
+// Legacy unavailable-model test fixtures explicitly exercise the disabled mode.
+process.env.WATERX_RULE_CONFIRMATION_ENABLED="false";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import pg from "pg";

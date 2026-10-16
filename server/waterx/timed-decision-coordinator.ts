@@ -26,6 +26,7 @@ const realGateScheduler:GateScheduler={schedule(callback,delayMs){
 }};
 const active=new Map<number,{input:TimedInput;timers:(()=>void)[]}>();
 let recoveryTimer:ReturnType<typeof setInterval>|null=null,recovering=false;
+let recoveryEnabled=false, visitorTrainingChild:ReturnType<typeof spawn>|null=null;
 let recovered=0,recoveryFailures=0,lastRecoveryAtMs:number|null=null;
 let skippedRecoveryAtGate=0,lastRecoveryDurationMs:number|null=null,lastRecoveryRows=0;
 let dailyDay="",dailyRunning=false;
@@ -146,7 +147,9 @@ export async function recoverTimedSchedules(db=researchPool,now=Date.now()){
 export function startTimedRecovery(){
   if(!decisionWriterAllowed())return;
   if(recoveryTimer)return;
+  recoveryEnabled=true;
   const tick=async()=>{
+    if(!recoveryEnabled)return;
     if(recovering)return;recovering=true;
     try{
       const at=Date.now(),nearGate=Array.from(active.values()).some(({input})=>{
@@ -163,19 +166,22 @@ export function startTimedRecovery(){
     // can retry on a changed dataset, and stale/failed attempts remain visible.
     const today=`${new Date().toISOString().slice(0,10)}:${Math.floor(Date.now()/21600000)}`;
     if(Date.now()-shadowRefreshAt>=300000){shadowRefreshAt=Date.now();void refreshEarlyShadowModels();}
-    if(!dailyRunning&&dailyDay!==today){
+    if(recoveryEnabled&&!dailyRunning&&dailyDay!==today){
       dailyDay=today;dailyRunning=true;
       // Training CPU and optional DB reads never run in the deadline process.
       const args=process.env.NODE_ENV==="production"&&existsSync("dist/early-training.mjs")?["dist/early-training.mjs"]:
         ["--import","tsx","scripts/train-early-horizons.ts"];
       args.push("--retry-failed");
       const child=spawn(process.execPath,args,{stdio:["ignore","inherit","inherit"]});
+      if(process.env.WATERX_VISITOR_ONLY_MODE==="true")visitorTrainingChild=child;
       const timeout=setTimeout(()=>child.kill("SIGTERM"),600000);timeout.unref?.();
       child.once("error",()=>{
+        if(visitorTrainingChild===child)visitorTrainingChild=null;
         clearTimeout(timeout);dailyRunning=false;dailyDay="";
         console.error("[waterx-early] training subprocess failed to start");
       });
       child.once("exit",code=>{
+        if(visitorTrainingChild===child)visitorTrainingChild=null;
         clearTimeout(timeout);dailyRunning=false;
         if(code!==0){dailyDay="";console.error("[waterx-early] training subprocess failed; inspect persisted jobs");}
       });
@@ -184,7 +190,14 @@ export function startTimedRecovery(){
   void tick();recoveryTimer=setInterval(()=>void tick(),5000);recoveryTimer.unref?.();
 }
 export function stopTimedStrategy(){
+  recoveryEnabled=false;
   if(recoveryTimer)clearInterval(recoveryTimer);recoveryTimer=null;
+  // Training subprocesses can otherwise continue querying PostgreSQL long
+  // after the final browser leaves. Stop them in visitor-only deployments.
+  if(process.env.WATERX_VISITOR_ONLY_MODE==="true"&&visitorTrainingChild){
+    try{visitorTrainingChild.kill("SIGTERM");}catch{/* child already stopped */}
+    visitorTrainingChild=null;
+  }
   for(const entry of Array.from(active.values()))entry.timers.forEach(cancel=>cancel());
   active.clear();
 }

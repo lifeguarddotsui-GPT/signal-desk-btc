@@ -4,6 +4,8 @@
  * Outputs only Sui's PUBLIC sender/effects/balance changes and wallet balances.
  */
 import {SuiGrpcClient} from "@mysten/sui/grpc";
+import {PredictClient,getAccountIds} from "@waterx/sdk/prediction";
+import {PerpClient,getAccountBalance} from "@waterx/sdk/perp";
 const txDigest="Dve8UyZtT5eqbKpC7sjPJ8TFM6SWW6NWQTgKbwZRzchT";
 const owner="0xf9c496e9ac73fa9d6f75ba323b46fff11f714cd0cdcdc5751ebdff3d294f45ba";
 const nativeUsdc="0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC";
@@ -31,3 +33,17 @@ for(const [name,coinType] of [["SUI","0x2::sui::SUI"],["NATIVE_USDC",nativeUsdc]
    console.log("WALLET_BALANCE",name,JSON.stringify(simpl(r)).slice(0,1800));
  }catch(error){console.log("BALANCE_LOOKUP_FAILED",name,String(error).slice(0,320));}
 }
+
+const accountId="0x57ee90694e63249c2ae75696239b8a6b0966d3ca49ce72b134fedf303c86761f";
+try {
+  const c=await PredictClient.mainnet({
+    waterxConfigUrl:"https://main-v2.waterx-config.pages.dev/mainnet.json",
+    timeoutMs:10000,
+  });
+  console.log("WATERX_CONFIG",{network:c.config.network,settlementCoinType:c.settlementCoinType()});
+  const accounts=await getAccountIds(c,{owner});
+  console.log("WATERX_OWNER_ACCOUNT_IDS",JSON.stringify(accounts));
+  const balance=await getAccountBalance(new PerpClient("MAINNET",c.config,{}),accountId,c.settlementCoinType());
+  console.log("WATERX_ACCOUNT_USD_BALANCE_ATOMIC",balance.toString());
+  console.log("WATERX_ACCOUNT_USD_BALANCE",Number(balance)/1_000_000);
+}catch(error){console.log("WATERX_ACCOUNT_BALANCE_CHECK_FAILED",String(error).slice(0,1500));}

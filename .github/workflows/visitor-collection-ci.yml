@@ -70,3 +70,30 @@ jobs:
           else
             timeout 300s node --import tsx --test --test-force-exit --test-concurrency=2 "${selected[@]}"
           fi
+
+  lineage-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: lineage_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lineage_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+    env:
+      TEST_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/lineage_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Verify exact-round lineage SQL on disposable PostgreSQL 16
+        run: timeout 150s node --import tsx --test --test-force-exit scripts/lineage-postgres.integration.ts

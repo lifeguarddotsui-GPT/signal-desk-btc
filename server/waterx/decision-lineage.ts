@@ -169,21 +169,41 @@ export async function decisionLineage(query:unknown,now=Date.now(),db:LockDb=res
   [TIMED_STRATEGY,cutoff,now,q.interval==="all"?null:Number(q.interval),q.limit,
     [TWO_STAGE_STRATEGY,PREVIOUS_TWO_STAGE_STRATEGY]]);
   const rows:LineageRow[]=result.rows.map(raw=>projectLineageRow(raw,now));
+  const median=(values:number[])=>values.length?
+    [...values].sort((a,b)=>a-b)[Math.floor((values.length-1)/2)]:null;
   const stats=(name:"primary"|"early"|"confirmation")=>{
     const locked=rows.filter(r=>r[name].side!==null);
-    const correct=locked.filter(r=>r[name].score==="CORRECT").length,
-      incorrect=locked.filter(r=>r[name].score==="INCORRECT").length;
-    return {locked:locked.length,correct,incorrect,scored:correct+incorrect,
-      accuracy:correct+incorrect?correct/(correct+incorrect):null,
-      coverage:rows.length?locked.length/rows.length:null};
+    const verified=locked.filter(r=>r[name].score==="CORRECT"||r[name].score==="INCORRECT");
+    const correct=verified.filter(r=>r[name].score==="CORRECT").length,
+      incorrect=verified.length-correct;
+    // Diagnostic on frozen source probabilities, never represented as an
+    // independently trained/calibrated Bluewater model or live win probability.
+    const scoredProbability=verified.filter(r=>r[name].probabilityUp!=null&&
+      r[name].probabilityUp!>=0&&r[name].probabilityUp!<=1&&r.outcome!=null);
+    const brier=scoredProbability.length?scoredProbability.reduce((acc,r)=>{
+      const delta=r[name].probabilityUp!-(r.outcome==="UP"?1:0);
+      return acc+delta*delta;
+    },0)/scoredProbability.length:null;
+    const remaining=locked.filter(r=>r[name].acknowledgedAtMs!=null&&
+      r[name].acknowledgedAtMs!>=r.startMs&&r[name].acknowledgedAtMs!<=r.expiryMs)
+      .map(r=>(r.expiryMs-r[name].acknowledgedAtMs!)/1000);
+    return {locked:locked.length,correct,incorrect,scored:verified.length,
+      accuracy:verified.length?correct/verified.length:null,
+      coverage:rows.length?locked.length/rows.length:null,
+      brier,probabilityScoredN:scoredProbability.length,
+      medianSecondsRemainingAtAck:median(remaining)};
   };
   const paired=rows.filter(r=>r.primary.side&&r.early.side&&r.settlementStatus==="VERIFIED");
+  const confirmedPairs=rows.filter(r=>r.early.side&&r.confirmation.side&&r.settlementStatus==="VERIFIED");
   return {asOfMs:now,window:q.window,interval:q.interval,cohortN:rows.length,
     truncated:rows.length===q.limit,source:"prospectively discovered timed rounds, not all theoretical clock slots",
     stats:{primary:stats("primary"),early:stats("early"),confirmation:stats("confirmation")},
     paired:{verifiedN:paired.length,agree:paired.filter(r=>r.congruence==="AGREE").length,
       disagree:paired.filter(r=>r.congruence==="DISAGREE").length,
       earlyWrongPrimaryCorrect:paired.filter(r=>r.early.score==="INCORRECT"&&r.primary.score==="CORRECT").length,
-      earlyCorrectPrimaryWrong:paired.filter(r=>r.early.score==="CORRECT"&&r.primary.score==="INCORRECT").length},
+      earlyCorrectPrimaryWrong:paired.filter(r=>r.early.score==="CORRECT"&&r.primary.score==="INCORRECT").length,
+      earlyConfirmationVerifiedN:confirmedPairs.length,
+      confirmationCorrectedEarly:confirmedPairs.filter(r=>r.early.score==="INCORRECT"&&r.confirmation.score==="CORRECT").length,
+      confirmationReversedCorrectEarly:confirmedPairs.filter(r=>r.early.score==="CORRECT"&&r.confirmation.score==="INCORRECT").length},
     rows};
 }

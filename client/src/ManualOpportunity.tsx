@@ -8,6 +8,7 @@ import type { TwoStageProjection, StageLock, LockStage } from "../../shared/two-
 import { TWO_STAGE_STRATEGY } from "../../shared/two-stage";
 import { evaluateEntryWindow,type Direction } from "../../shared/entry-window";
 import {summarizeTriad} from "../../shared/stage-congruence";
+import {TradeReadinessPanel} from "./TradeReadinessPanel";
 
 type Interval = 5 | 15;
 type RoundIdentity = { id: string; startMs: number; expiryMs: number };
@@ -340,30 +341,9 @@ export function ManualOpportunity({
       {fixtureName && <span className="desk-fixture-indicator">Development visual fixture · {fixtureName.replaceAll("-", " ")}</span>}
     </div>
     <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
-    {entryWindow && <section className="desk-entry-window" aria-label="Entry timing and economic research" data-status={entryWindow.state}>
-      <p className="desk-stage-congruence" role="status">Early / Confirmation / Primary: {alignment.display}</p>
-      <div className="desk-entry-heading"><span>ENTRY WINDOW · $5 RESEARCH</span>
-        <strong role="status">{entryWindow.label}</strong></div>
-      <div className="desk-entry-track" role="progressbar" aria-label="Round elapsed" aria-valuemin={0} aria-valuemax={100}
-        aria-valuenow={Math.round(entryWindow.roundProgressPercent)}>
-        <i style={{width:`${entryWindow.roundProgressPercent}%`}}/>
-      </div>
-      <div className="desk-entry-stats">
-        <span>{entryWindow.remainingSeconds}s left</span>
-        <span>{entryWindow.signal??"No committed direction"}</span>
-        <span>{entryWindow.askCents==null?"Ask unavailable":`${entryWindow.askCents.toFixed(1)}¢ ask`}</span>
-      </div>
-      <div className="desk-entry-stats">
-        <span>Gross if correct: {entryWindow.grossIfWinUsd==null?"Unknown":usd(entryWindow.grossIfWinUsd)}</span>
-        <span>Break-even win rate (before costs): {percent(entryWindow.breakEvenWinProbability)}</span>
-        <span>With illustrative $0.10 total cost: {percent(entryWindow.illustrativeBreakEvenWith10CentCost)}</span>
-      </div>
-      <p>{entryWindow.reason}</p>
-      <small>The $0.10 cost is a sensitivity example, NOT your verified WaterX fees or gas cost.
-        It cannot establish positive expected value. Timing is descriptive, not a buy recommendation.
-        Figures assume a full fill and $1 winning-share redemption.
-        WaterX BTC settles against Chainlink TWAP, not Coinbase spot. No independently verified edge or executable quote exists here.</small>
-    </section>}
+    {entryWindow && <TradeReadinessPanel entry={entryWindow} alignment={alignment}
+      upAsk={purchase?.up.status==="reported"?purchase.up.askCents:null}
+      downAsk={purchase?.down.status==="reported"?purchase.down.askCents:null}/>}
     {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>
       <p>Before fees, minimums and price impact. Not an executable quote or expected profit.</p>
       {indicative.map(row=><p key={row.side}>{row.side.toUpperCase()} · indicative gross winning receipt {usd(row.receipt)}</p>)}

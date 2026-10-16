@@ -343,7 +343,7 @@ export function ManualOpportunity({
       {fixtureName && <span className="desk-fixture-indicator">Development visual fixture · {fixtureName.replaceAll("-", " ")}</span>}
     </div>
     <TwoStageDeskRows projection={twoStageProjection} round={exactRound} interval={interval} now={now} />
-    {entryWindow && exactRound && <TradeReadinessPanel entry={entryWindow} timing={operationalTimingWindow({startMs:exactRound.startMs,expiryMs:exactRound.expiryMs,nowMs:now})} alignment={alignment}
+    {entryWindow && exactRound && <TradeReadinessPanel entry={entryWindow} timing={operationalTimingWindow({startMs:exactRound.startMs,expiryMs:exactRound.expiryMs,nowMs:now})} referenceConfirmed={confirmed} alignment={alignment}
       upAsk={purchase?.up.status==="reported"?purchase.up.askCents:marketAsks?.up??null}
       downAsk={purchase?.down.status==="reported"?purchase.down.askCents:marketAsks?.down??null}/>}
     {indicative.length>0&&<details className="desk-economics"><summary>$5 economics · indicative only</summary>

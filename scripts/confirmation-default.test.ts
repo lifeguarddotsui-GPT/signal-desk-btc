@@ -10,6 +10,10 @@ test("rule Confirmation is shadow-enabled by default; explicit false remains a k
     assert.equal(ruleConfirmationEnabled(),true);
     process.env.WATERX_RULE_CONFIRMATION_ENABLED="false";
     assert.equal(ruleConfirmationEnabled(),false);
+    process.env.WATERX_RULE_CONFIRMATION_ENABLED=" FALSE ";
+    assert.equal(ruleConfirmationEnabled(),false);
+    process.env.WATERX_RULE_CONFIRMATION_ENABLED="OFF";
+    assert.equal(ruleConfirmationEnabled(),false);
   }finally{
     if(original===undefined)delete process.env.WATERX_RULE_CONFIRMATION_ENABLED;
     else process.env.WATERX_RULE_CONFIRMATION_ENABLED=original;

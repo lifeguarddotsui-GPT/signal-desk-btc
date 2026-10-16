@@ -253,7 +253,7 @@ export default function GuidedAgentSetup(props: Props) {
         </div>}
         <div className="ao-reassurance"><LockKeyhole size={15} /><span>Your wallet connection does not move funds or grant trading access.</span></div>
         {props.notice && <p className="ao-notice" role="status">{props.notice}</p>}
-        {(props.pendingAction || props.pendingDescription) && <OwnerReview {...props} />}
+        {(props.pendingAction || props.pendingDescription) && props.pendingAction!=="REDEEM_USDC" && <OwnerReview {...props} />}
         <div className="ao-shadow-card ao-connect-shadow"><div><span className="ao-shadow-label">NO REAL MONEY TRADES</span><strong>Explore the agent safely</strong><p>Shadow mode does not sign or submit orders.</p></div>
           <button type="button" className="ao-button ao-button-secondary" disabled={!props.onTryShadow} onClick={() => props.onTryShadow?.()}>Try shadow mode</button>
         </div>

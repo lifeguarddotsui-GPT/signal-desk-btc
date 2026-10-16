@@ -63,3 +63,5 @@
 @media(max-width:450px){.trade-timing-score{flex-basis:86px}.trade-timing-message strong{font-size:14px}.trade-timing-message span{font-size:12px}}
 
 .trade-payout-band{padding:9px 11px;border:1px solid #4b6666;border-radius:7px;background:#243b3c;color:#f2ddac;font-size:12px;font-weight:700;letter-spacing:.025em}
+
+.trade-waterx-sentiment{font-size:12px;line-height:1.5;color:#c1d7cf;margin:8px 0 12px}.trade-waterx-sentiment strong{display:block;font-size:16px;color:#e5ebd9}.trade-waterx-sentiment small{display:block;font-size:11px;color:#a8bcb6}

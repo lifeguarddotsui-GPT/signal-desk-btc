@@ -29,7 +29,7 @@ test("diagnostics never substitute oracle, claim profitable timing or submit ord
   assert.doesNotMatch(panel,/>BUY NOW</i);
   const app=readFileSync(new URL("../client/src/App.tsx",import.meta.url),"utf8");
   const desk=readFileSync(new URL("../client/src/ManualOpportunity.tsx",import.meta.url),"utf8");
-  assert.match(app,/oddsDisplay\.up\.grossAvailable\?oddsDisplay\.up\.priceCents/);
+  assert.match(app,/marketQuoteDisplay\.up\.grossAvailable\?marketQuoteDisplay\.up\.priceCents/);
   assert.match(app,/marketProbabilities=\{\{up:oddsDisplay\.up\.probability/);
   assert.match(desk,/marketAsks\?\.up/);
   assert.match(panel,/WaterX market-implied odds/);

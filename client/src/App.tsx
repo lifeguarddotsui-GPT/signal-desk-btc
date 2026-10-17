@@ -490,7 +490,7 @@ function LivePage() {
   const streamCursor = useRef("");
   const pendingPaint = useRef<{ id: string; receivedAt: number } | null>(null);
   useEffect(() => {
-    if (fixtureMode) { setStreamStatus("FIXTURE"); return; }
+    if (fixtureMode || !advancedOpen) { setStreamStatus(fixtureMode ? "FIXTURE" : "CONNECTING"); return; }
     let disposed = false, retry: number | undefined, wait = 1000;
     const markFeedGap = (reason: string) => {
       const at = Date.now();
@@ -543,7 +543,7 @@ function LivePage() {
     const onVisible = () => { if (document.visibilityState === "visible" && streamRef.current?.readyState === EventSource.CLOSED) connect(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { disposed = true; if (retry) clearTimeout(retry); streamRef.current?.close(); document.removeEventListener("visibilitychange", onVisible); };
-  }, [fixtureMode]);
+  }, [fixtureMode, advancedOpen]);
   const latestStreamPoint = stream.at(-1);
   const latestStreamAt = latestStreamPoint
     ? typeof latestStreamPoint.at === "number" ? latestStreamPoint.at : Date.parse(latestStreamPoint.at)

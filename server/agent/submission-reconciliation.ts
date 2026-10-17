@@ -83,6 +83,7 @@ export async function reconcileUnknownSubmissions(
   const pending = await db.query(`SELECT id, owner, transaction_digest, status
     FROM bluewater_execution_intents
     WHERE status='UNKNOWN' AND transaction_digest IS NOT NULL
+      AND transaction_bytes IS NOT NULL AND signer_execution_ref IS NOT NULL
     ORDER BY updated_at, id LIMIT 25`);
   for (const raw of pending.rows) {
     const item = raw as PendingExecution;

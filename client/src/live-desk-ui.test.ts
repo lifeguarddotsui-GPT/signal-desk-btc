@@ -50,16 +50,18 @@ test("compact live-desk styles support mobile widths and reduced motion", () => 
   assert.match(styleSource, /prefers-reduced-motion: reduce/);
 });
 
-test("development fixtures disable live polling, and research endpoints stay lazy until expanded", () => {
+test("chart loads by default while optional research endpoints remain lazy and fixtures disable live polling", () => {
   assert.match(appSource, /useLiveSnapshot<LivePayload>\(liveUrl, interval, !fixtureMode\)/);
-  assert.match(appSource, /useApi<ChartPayload>\(chartUrl, 30000, !fixtureMode && advancedOpen\)/);
+  assert.match(appSource, /useApi<ChartPayload>\(chartUrl, 30000, !fixtureMode\)/);
   assert.match(appSource, /useApi<Record<string, unknown>>\(learningUrl, 60000, !fixtureMode && advancedOpen\)/);
   assert.match(appSource, /useApi<WaterxHealth>\(healthUrl, 30000, !fixtureMode && advancedOpen\)/);
   assert.match(manual, /<SimpleLiveDesk/);
-  assert.match(manual, /className="desk-advanced"/);
-  assert.match(appSource, /onAdvancedToggle=\{setAdvancedOpen\}/);
+  assert.match(manual, /className="bw-primary-grid"/);
+  assert.doesNotMatch(manual, /<details className="desk-advanced"/);
+  assert.match(manual, /className="desk-chart-slot"/);
+  assert.match(appSource, /computeAreaSummary\(/);
   assert.match(appSource, /useApi<RefreshHealthReport>\(refreshHealthUrl, 5000\)/);
-  assert.match(appSource, /if \(fixtureMode \|\| !advancedOpen\) \{ setStreamStatus\(fixtureMode \? "FIXTURE" : "CONNECTING"\); return; \}/);
+  assert.match(appSource, /if \(fixtureMode\) \{ setStreamStatus\("FIXTURE"\); return; \}/);
   assert.match(appSource, /"normal".*"loading".*"request-failure".*"rollover".*"locked"/);
   assert.match(appSource, /fixtureMode === "loading" \|\| fixtureMode === "request-failure"/);
 });

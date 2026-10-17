@@ -993,3 +993,5 @@
 .chart-cross-source-caution strong{display:block;color:#fae1a0;letter-spacing:.03em;font-size:11px;margin-bottom:3px}
 .desk-price-difference.is-cross-source strong{color:#d6e5e7!important}
 .desk-cross-source-note{margin:0;padding:12px 14px;color:#c5d9d4;font-size:11px;line-height:1.6;background:#182e32;border-top:1px solid #345057}
+
+.chart-official-link{display:inline-flex;align-items:center;margin-top:8px;color:#c6f4e5;text-decoration:underline;text-underline-offset:3px;font-size:13px;font-weight:650}

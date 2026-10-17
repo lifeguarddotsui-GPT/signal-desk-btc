@@ -968,3 +968,19 @@
 .real-trade-audit button { border: 1px solid #557985; border-radius: 7px; padding: .6rem .8rem; background: #1c3740; color: #d8ebdf; font: inherit; cursor: pointer; }
 .real-trade-result { margin-top: .6rem; border-top: 1px solid #426069; padding-top: .5rem; }
 .real-trade-result strong { color: #ddc68c; }
+
+/* Local-only real fill evaluation; no extra requests or background workers. */
+.fill-research-panel{border:1px solid #3d595c;border-radius:11px;padding:18px;margin:18px 0;background:#13292e;color:#deece6}
+.fill-research-panel h2{font-size:20px;line-height:1.25;margin:7px 0}
+.fill-research-panel p{font-size:13px;line-height:1.6}
+.fill-research-file{display:flex;flex-direction:column;gap:9px;margin:15px 0;font-weight:600;font-size:13px}
+.fill-research-file input{font-size:13px;border:1px solid #517477;padding:9px;max-width:100%;border-radius:7px;color:#dae8e2}
+.fill-research-disclaimer{font-size:11px!important;color:#a8bfb7}
+.fill-research-empty{padding:13px;border:1px dashed #60716c;border-radius:7px}
+.fill-research-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:16px 0}
+.fill-research-facts span{padding:11px;background:#203c3f;border-radius:7px;font-size:12px}
+.fill-research-facts b{display:block;font-size:18px;font-variant-numeric:tabular-nums}
+.fill-research-scroll{overflow:auto;max-width:100%}
+.fill-research-scroll table{border-collapse:collapse;min-width:570px;width:100%;font-size:12px}
+.fill-research-scroll th,.fill-research-scroll td{border-bottom:1px solid #446063;padding:9px;text-align:left}
+.fill-research-scroll th{color:#e7edd9}

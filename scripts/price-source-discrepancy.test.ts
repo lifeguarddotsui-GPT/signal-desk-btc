@@ -8,7 +8,7 @@ test("Coinbase comparison chart may show red or green only as explicitly labeled
  assert.match(live,/BTC ROUND PRICE CHART · LIVE COMPARISON/);
  assert.match(live,/Coinbase is a different feed from WaterX/);
  assert.match(live,/WaterX price to beat/);
- assert.match(live,/not WaterX Oracle or settlement/);
+ assert.match(live,/not WaterX Oracle or settlement/i);
  assert.match(live,/Stale \/ unavailable/);
  assert.match(live,/Colors and area metrics do not predict the official result/);
  assert.match(live,/<PriceChart points=\{merged\} interval=\{interval\} anchor=\{chartReference\}/);

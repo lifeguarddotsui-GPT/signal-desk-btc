@@ -81,3 +81,36 @@ export function computeAreaSummary(points:readonly AreaPoint[],ref:number,startM
     freshestSampleAgeMs:lastValidAt===null?null:cutoff-lastValidAt,pieces,
   };
 }
+
+/** Rolling comparison window: boundary is interpolated only between real adjacent
+ * samples no more than maxGapMs apart, never across outages.
+ */
+export function computeRecentAreaSummary(
+  points:readonly AreaPoint[],ref:number,roundStartMs:number,roundEndMs:number,
+  nowMs:number,windowMs=60_000,maxGapMs=14_000,
+):AreaSummary|null{
+  if(![roundStartMs,roundEndMs,nowMs,windowMs,maxGapMs].every(Number.isFinite)||
+    windowMs<=0||maxGapMs<=0)return null;
+  const to=Math.min(nowMs,roundEndMs);
+  const from=Math.max(roundStartMs,to-windowMs);
+  if(from>=to)return null;
+  const sorted=points.map(p=>({...p,at:Number(p.at)}))
+    .filter(p=>Number.isFinite(p.at)&&p.at<=to)
+    .sort((a,b)=>a.at-b.at);
+  let before:typeof sorted[number]|null=null;
+  let after:typeof sorted[number]|null=null;
+  for(const p of sorted){
+    if(p.at<=from)before=p;
+    if(p.at>from){after=p;break;}
+  }
+  const selected=sorted.filter(p=>p.at>=from);
+  if(before&&after&&!before.gap&&!after.gap&&before.price!=null&&after.price!=null&&
+    Number.isFinite(before.price)&&Number.isFinite(after.price)&&
+    after.at-before.at>0&&after.at-before.at<=maxGapMs&&before.at<from){
+    const factor=(from-before.at)/(after.at-before.at);
+    selected.unshift({at:from,price:before.price+(after.price-before.price)*factor});
+  }else if(before?.at===from&&!selected.some(p=>p.at===from)){
+    selected.unshift(before);
+  }
+  return computeAreaSummary(selected,ref,from,to,to,maxGapMs);
+}

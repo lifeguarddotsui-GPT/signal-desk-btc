@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link, Route, Switch, useLocation } from "wouter";
 import { Activity, BookOpen, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldAlert, ShieldCheck, Waves, X } from "lucide-react";
 import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
+import {CHAINLINK_BTC_TWAP60_REFERENCE,verifiedWaterxTwapSettlement} from "../../shared/chainlink-twap-provenance";
 import { insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxReference, sseReconnectUrl } from "./waterx-ui-contract";
 import { mergeComparisonPoints } from "./chart-contract";
 import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
@@ -610,6 +611,7 @@ function LivePage() {
           <div><span>WATERX STARTING REFERENCE</span><b>{roundCurrent && waterxReferenceValid ? fmtUsd(round?.referencePrice) : "Unavailable"}</b><small>{roundCurrent && round?.anchorConfirmed === true ? "Provider confirmed" : "Provider unconfirmed · do not treat as final"}</small></div>
           <div className="source-trust-unknown"><span>WATERX LIVE ORACLE PREVIEW</span><b>Not supplied here</b><small>View the same active market on WaterX</small></div>
         </div>
+        <div className="oracle-authority-strip" role="note"><b>Official settlement: Chainlink BTC/USD TWAP60</b><span>The WaterX Oracle chart is a preview; this app has no authenticated live Chainlink stream. Do not reinterpret Coinbase as Chainlink.</span><a href={CHAINLINK_BTC_TWAP60_REFERENCE} target="_blank" rel="noopener noreferrer">Official Chainlink TWAP60 stream reference ↗</a></div>
         <div className="chart-cross-source-caution" role="note"><strong>DO NOT TRADE FROM THIS CHART COLOR</strong> Coinbase spot and the WaterX Oracle preview are separate feeds. This chart is deliberately neutral and has NO WaterX price-to-beat line. WaterX may be green while Coinbase is lower. Confirm the exact WaterX live market and its settlement reference before making any order. {roundCurrent && round?.url?.startsWith("https://waterx.app/") && <a href={round.url} target="_blank" rel="noopener noreferrer" className="chart-official-link">Check this exact round on WaterX ↗</a>}</div>
           {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <div className="chart-empty"><Activity size={22} /><strong>Archive unavailable</strong><span>The live comparison feed remains independent.</span></div> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
              <PriceChart points={merged} interval={interval} anchor={null} referenceConfirmed={false} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
@@ -749,7 +751,7 @@ function HistoryPage() {
   const rows = intervalResponseReady ? result.data?.rows ?? [] : [];
   return <div className="page inner-page">
     <PageTitle index="02" title="Round history"><div className="heading-right"><label className="history-source-select">HISTORY SOURCE<select value={historySource} onChange={event => setHistorySource(event.target.value as HistorySource)}><option value="baseline">WaterX market baseline</option><option value="bluewater">Bluewater champion</option><option value="fallback">Deterministic 50/50 fallback · research-only</option></select></label><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
-    <div className="intro-line"><p>Recorded WaterX rounds and their reported reference prices. Each interval is a different market duration.</p><span>{historySourceLabel(historySource)} · {rows.length} rows</span></div>
+    <div className="intro-line"><p>Recorded WaterX rounds and their reported reference prices. Settlement uses <a href={CHAINLINK_BTC_TWAP60_REFERENCE} target="_blank" rel="noopener noreferrer">Chainlink BTC/USD TWAP60</a>; only WaterX-verified post-expiry labels are marked as such.</p><span>{historySourceLabel(historySource)} · {rows.length} rows</span></div>
     {historySource === "fallback" && <div className="history-note"><ShieldAlert size={15} /> Deterministic 50/50 tie-break evidence only · low-confidence research cohort, isolated from baseline and champion denominators. No trade, return, or P&amp;L inference.</div>}
     {result.error && result.errorUrl === url ? <ErrorBox message={result.error} retry={result.reload} /> : !intervalResponseReady ? <Skeleton height={330} /> :
       rows.length ? <div className="table-frame"><table><thead><tr><th>Round</th><th>Start · UTC</th><th>Close · UTC</th><th>Price to beat</th><th>Settlement</th><th>Outcome</th><th>Evidence</th><th>Market UP at capture</th></tr></thead><tbody>{rows.map((r, i) => {
@@ -758,11 +760,16 @@ function HistoryPage() {
         const ended = r.expiryMs;
         const anchor = typeof r.anchorPrice === "number" ? r.anchorPrice : null;
         const evidence = r.evidence && typeof r.evidence === "object" ? r.evidence as Record<string, unknown> : {};
+        const twapLabel=verifiedWaterxTwapSettlement({
+          labelStatus:r.labelStatus,disputed:r.settlementDisputed??r.disputed,
+          anchorConfirmed:r.anchorConfirmed,anchorPrice:r.anchorPrice,
+          settlePrice:r.settlePrice,outcome:r.outcome,expiryMs:r.expiryMs,settledAtMs:r.settledAt,
+        });
         const tieBreakApplied = evidence.tieBreakApplied === true;
         const evidenceLabel = tieBreakApplied ? "50/50 tie-break · research-only"
           : historySource === "fallback" ? "Fallback cohort · tie-break evidence unavailable"
             : String(r.labelStatus ?? "unresolved");
-        return <tr key={id}><td className="mono-cell" title={id}>{id.slice(0, 8)}…</td><td>{utc(typeof started === "number" ? started : undefined)}</td><td>{utc(typeof ended === "number" ? ended : undefined)}</td><td>{fmtUsd(anchor)}{r.anchorConfirmed !== true && <small> · pending confirmation</small>}</td><td>{fmtUsd(typeof r.settlePrice === "number" ? r.settlePrice : null)}</td><td><span className={`outcome ${String(r.outcome ?? "").toLowerCase()}`}>{String(r.outcome ?? "Unresolved")}</span></td><td title={typeof r.withheldReason === "string" ? r.withheldReason : undefined}>{evidenceLabel}</td><td>{typeof r.probabilityUp === "number" ? `${(r.probabilityUp * 100).toFixed(1)}%` : "Not captured"}</td></tr>;
+        return <tr key={id}><td className="mono-cell" title={id}>{id.slice(0, 8)}…</td><td>{utc(typeof started === "number" ? started : undefined)}</td><td>{utc(typeof ended === "number" ? ended : undefined)}</td><td>{fmtUsd(anchor)}{r.anchorConfirmed !== true && <small> · pending confirmation</small>}</td><td>{fmtUsd(typeof r.settlePrice === "number" ? r.settlePrice : null)}{twapLabel&&<small> · WaterX verified TWAP outcome</small>}</td><td><span className={`outcome ${String(r.outcome ?? "").toLowerCase()}`}>{String(r.outcome ?? "Unresolved")}</span></td><td title={typeof r.withheldReason === "string" ? r.withheldReason : undefined}>{evidenceLabel}</td><td>{typeof r.probabilityUp === "number" ? `${(r.probabilityUp * 100).toFixed(1)}%` : "Not captured"}</td></tr>;
       })}</tbody></table></div> : <div className="empty-state"><Clock3 size={22} /><strong>No recorded rounds returned</strong><span>History is shown only when the WaterX archive has recorded rows. No examples are fabricated.</span></div>}
     <div className="history-note"><ShieldCheck size={15} /> These are observed records, not a performance claim or trading recommendation.</div>
   </div>;

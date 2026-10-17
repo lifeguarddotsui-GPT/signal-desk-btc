@@ -356,22 +356,23 @@ export function ManualOpportunity({
 
     <details className="desk-price-details" open={!compactPrices||pricesExpanded}
       onToggle={event=>{if(compactPrices)setPricesExpanded(event.currentTarget.open);}}>
-    <summary>BTC, reference and price difference</summary>
+    <summary>BTC price sources · why colors can disagree</summary>
     <div className="desk-price-strip" aria-label="BTC comparison and WaterX reference prices">
       <div className="desk-price-item">
-        <span>BTC comparison</span><strong>{usd(comparisonPrice)}</strong>
+        <span>Coinbase BTC spot (NOT WaterX oracle)</span><strong>{usd(comparisonPrice)}</strong>
         <small>{comparison?.source && comparisonPrice != null ? `Updated ${time(comparison.receivedAtMs)}` : "Waiting for a live comparison"}</small>
       </div>
       <div className="desk-price-item">
-        <span>WaterX price to beat</span><strong>{usd(referencePrice)}</strong>
+        <span>WaterX beginning reference (different feed)</span><strong>{usd(referencePrice)}</strong>
         <small>{confirmed ? "Confirmed round reference" : referencePrice != null ? "Provisional WaterX reference" : "Reference unavailable"}</small>
       </div>
-      <div className={`desk-price-difference${priceDifference == null ? "" : priceDifference >= 0 ? " is-above" : " is-below"}`}>
-        <span>Difference</span>
+      <div className="desk-price-difference is-cross-source">
+        <span>Spot/reference gap · NOT WaterX direction</span>
         <strong>{priceDifference == null ? "—" : `${priceDifference >= 0 ? "+" : "−"}${usd(Math.abs(priceDifference))}`}</strong>
-        <small>{differencePercent == null ? "Both prices required" : `${differencePercent >= 0 ? "+" : "−"}${Math.abs(differencePercent).toFixed(2)}% from reference`}</small>
+        <small>{differencePercent == null ? "Both source prices required" : `Coinbase spot ${differencePercent >= 0 ? "higher" : "lower"} by ${Math.abs(differencePercent).toFixed(2)}% · NOT evidence of WaterX UP/DOWN`}</small>
       </div>
     </div>
+    <p className="desk-cross-source-note">WaterX live Oracle preview and official Chainlink BTC/USD TWAP settlement are NOT Coinbase spot. The two feeds can disagree in sign. Never use this difference as a YES/NO trade signal or guaranteed settlement outcome.</p>
     </details>
     {children&&<div className="desk-chart-slot">{children}</div>}
     <details className="desk-details">

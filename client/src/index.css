@@ -2729,3 +2729,9 @@ input:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
 .source-trust-strip .source-trust-unknown { border-color:rgba(235,189,112,.35); }
 .source-trust-strip .source-trust-unknown b { color:#f3cf9c; }
 @media(max-width:700px){.source-trust-strip{grid-template-columns:1fr;}.source-trust-strip>div{padding:9px 10px;}}
+
+/* Distinguish the official WaterX Chainlink settlement product from spot previews. */
+.oracle-authority-strip{display:flex;flex-wrap:wrap;align-items:baseline;gap:.45rem 1rem;padding:.8rem 1rem;margin:.6rem 0 1rem;border:1px solid #547b78;border-radius:.65rem;background:#183439;color:#d6e7df;font-size:.78rem;line-height:1.5}
+.oracle-authority-strip b{color:#cfecdb}
+.oracle-authority-strip span{flex:1 1 260px}
+.oracle-authority-strip a{color:#bcdfd7;text-decoration:underline;text-underline-offset:3px}

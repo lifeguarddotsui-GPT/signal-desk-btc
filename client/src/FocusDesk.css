@@ -105,3 +105,17 @@
  .live-page .bw-focus-layout .bw-chart-source-note{display:none}
 }
 @media(prefers-reduced-motion:reduce){.live-page .bw-focus-layout *{animation:none!important;transition:none!important}}
+
+
+/* The graph uses the remaining chart-panel height, instead of an inflexible
+   pixel height that clips the area metrics on laptop-height screens. */
+@media(min-width:1024px){
+ .live-page .bw-focus-layout .chart-wrap{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;overflow:hidden}
+ .live-page .bw-focus-layout .chart-controls,
+ .live-page .bw-focus-layout .chart-price-labels,
+ .live-page .bw-focus-layout .chart-time-axis,
+ .live-page .bw-focus-layout .chart-boundary-row{flex:none}
+ .live-page .bw-focus-layout .chart-measure{height:auto!important;min-height:125px!important;flex:1 1 auto!important;max-height:none!important}
+ .live-page .bw-focus-layout .bw-area-metrics,
+ .live-page .bw-focus-layout .bw-area-coverage{flex:none}
+}

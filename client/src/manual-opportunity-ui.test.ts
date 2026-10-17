@@ -169,7 +169,7 @@ test("fresh snapshots show current WaterX odds and the continuous provisional le
     assert.match(html, new RegExp(`· ${interval}m`));
     assert.match(html, /LEANING UP/);
     assert.match(html, /WaterX market/);
-    assert.match(html, /\+0\.02% from reference/);
+    assert.match(html, /Coinbase spot higher by 0\.02% · NOT evidence of WaterX UP\/DOWN/);
     assert.match(html, /72\.0%/);
     assert.match(html, /28\.0%/);
     assert.match(html, /MARKET DATA<\/span><b>CURRENT/);

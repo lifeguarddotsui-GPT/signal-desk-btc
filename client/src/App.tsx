@@ -604,16 +604,16 @@ function LivePage() {
       >
       <div className="chart-market-layout">
         <section className="chart-panel">
-        <div className="section-head chart-head"><div><div className="eyebrow">PRICE OBSERVATIONS</div><h2>BTC / USD</h2><p>Coinbase spot comparison only · NOT the WaterX oracle or settlement price. Spot may show the opposite direction.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
-        <div className="chart-cross-source-caution" role="note"><strong>NOT A WATERX UP/DOWN SIGNAL</strong> The chart is Coinbase spot; WaterX shows a separate Oracle preview and resolves using Chainlink BTC/USD TWAP. Green on WaterX can coincide with a lower Coinbase spot price. Trust WaterX for its live oracle preview; neither preview guarantees the final settlement. {roundCurrent && round?.url?.startsWith("https://waterx.app/") && <a href={round.url} target="_blank" rel="noopener noreferrer" className="chart-official-link">Check this exact round on WaterX ↗</a>}</div>
+        <div className="section-head chart-head"><div><div className="eyebrow">COINBASE COMPARISON DATA</div><h2>Coinbase BTC / USD · not WaterX</h2><p>Separate Coinbase spot feed, not the WaterX live preview or Chainlink settlement reference. Its direction may disagree with WaterX.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
+        <div className="chart-cross-source-caution" role="note"><strong>DO NOT TRADE FROM THIS CHART COLOR</strong> Coinbase spot and the WaterX Oracle preview are separate feeds. This chart is deliberately neutral and has NO WaterX price-to-beat line. WaterX may be green while Coinbase is lower. Confirm the exact WaterX live market and its settlement reference before making any order. {roundCurrent && round?.url?.startsWith("https://waterx.app/") && <a href={round.url} target="_blank" rel="noopener noreferrer" className="chart-official-link">Check this exact round on WaterX ↗</a>}</div>
           {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <div className="chart-empty"><Activity size={22} /><strong>Archive unavailable</strong><span>The live comparison feed remains independent.</span></div> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
-             <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} referenceConfirmed={round?.anchorConfirmed === true} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
+             <PriceChart points={merged} interval={interval} anchor={null} referenceConfirmed={false} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
           }
          {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive unavailable. Live comparison observations remain visible where available.</div>}
           {chartPayload?.coverage?.partial && (typeof chartWindow === "number" || chartWindow === "round") && <div className="gap-caption">Rolling archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. This does not describe complete coverage of the current round.</div>}
         {chartPayload && !archiveMatches && <div className="gap-caption">Archive source mismatch: historical points withheld; expected Coinbase comparison data.</div>}
         
-        <div className="legend-row"><span><i className="legend-price" /> Coinbase spot (comparison only)</span><span><i className="legend-anchor" /> WaterX starting reference (different source)</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
+        <div className="legend-row"><span><i className="legend-price" /> Coinbase spot (comparison only)</span><span>WaterX starting reference shown separately — not overlaid on Coinbase</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
         <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live observations{typeof chartWindow === "number" ? ` · rolling archive coverage ${chartPayload?.coverage?.percent == null ? "not reported" : `${chartPayload.coverage.percent}%`}` : " · active-round window; archive coverage is separate"}</span></div>
       </section>
       </div>
@@ -700,8 +700,8 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
       {active && <button className="return-live" onClick={() => setSelectedKey(null)}>Return to live</button>}
     </div>
     <div className="chart-price-labels">
-      <span>Coinbase spot {latestFresh ? "· fresh" : "· historical/stale"} <strong>{fmtUsd(latest?.price)}</strong></span>
-      {anchor!=null&&<span>WaterX beginning reference {referenceConfirmed ? "· confirmed" : "· unconfirmed"} <strong>{fmtUsd(anchor)}</strong></span>}
+      <span>COINBASE SPOT ONLY {latestFresh ? "· fresh" : "· historical/stale"} <strong>{fmtUsd(latest?.price)}</strong></span>
+      <span>WaterX live oracle preview is NOT available from this Coinbase chart. Compare it directly on WaterX.</span>
     </div>
     {samples.length ? <><div className="chart-measure">
        <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase spot observations only, neutral color, not WaterX prediction or settlement, over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>

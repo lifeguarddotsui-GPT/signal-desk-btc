@@ -12,6 +12,7 @@ import type { RoundDecision } from "../../shared/round-decision";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
 import CanonicalHistory from "./CanonicalHistory";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
+import { VerifiedFillLearningPanel } from "./VerifiedFillLearningPanel";
 import EarlyLearningJobsPanel from "./EarlyLearningJobsPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
 import type { BluewaterReport } from "../../shared/bluewater-research";
@@ -823,6 +824,7 @@ function LearningPage() {
   return <div className="page inner-page">
     <PageTitle index="03" title="Learning evidence"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
     <div className="learning-lede"><BookOpen size={19} /><p>Evidence is assessed separately for each WaterX market duration. WaterX odds are market probabilities, not a BluewaterAI forecast. Only verified settlement labels enter evaluation.</p></div>
+    <VerifiedFillLearningPanel interval={interval}/>
     <EarlyLearningSummary interval={interval} />
     <EarlyLearningJobsPanel />
     <BluewaterResearchPanel

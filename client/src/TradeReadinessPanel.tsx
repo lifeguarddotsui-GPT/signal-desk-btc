@@ -71,7 +71,7 @@ export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,m
     <div className="trade-pricing" aria-label="WaterX buy-in value comparison">
       <div className="trade-value-goal">
         <strong>Target: +$1 to +$2 on a winning $5 position</strong>
-        <small>Price needed for +$1: at most {(100*5/(6+costs)).toFixed(1)}¢ · +$2: at most {(100*5/(7+costs)).toFixed(1)}¢ (with your entered additional costs)</small>
+        <small>{costsValid?`Price needed for +$1: at most ${(100*5/(6+costs)).toFixed(1)}¢ · +$2: at most ${(100*5/(7+costs)).toFixed(1)}¢ (with your entered additional costs)`:"Enter valid costs to evaluate the target price range."}</small>
       </div>
       <strong>Compare actual WaterX purchase price</strong>
       <p>Use the YES or NO price WaterX shows when you place a $5 position.</p>

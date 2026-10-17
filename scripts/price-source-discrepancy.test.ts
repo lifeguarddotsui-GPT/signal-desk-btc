@@ -12,7 +12,7 @@ test("Coinbase comparison chart may show red or green only as explicitly labeled
  assert.match(live,/Stale \/ unavailable/);
  assert.match(live,/Colors and area metrics do not predict the official result/);
  assert.match(live,/<PriceChart points=\{merged\} interval=\{interval\} anchor=\{chartReference\}/);
- assert.match(live,/const tone = anchor==null\?"neutral"/);
+ assert.match(live,/const tone = anchor==null\|\|!latestFresh\|\|latest\?\.price==null\?"neutral"/);
  assert.match(live,/splitAtReference\(/);
  assert.match(css,/\.price-chart\.neutral \.price-line\s*\{ stroke: #9acbc0;/);
 });

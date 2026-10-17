@@ -10,6 +10,7 @@ import { evaluateEntryWindow,type Direction } from "../../shared/entry-window";
 import {summarizeTriad} from "../../shared/stage-congruence";
 import {TradeReadinessPanel} from "./TradeReadinessPanel";
 import {SimpleLiveDesk} from "./SimpleLiveDesk";
+import {FocusRail} from "./FocusRail";
 import {operationalTimingWindow} from "../../shared/operational-timing";
 
 type Interval = 5 | 15;
@@ -295,8 +296,20 @@ export function ManualOpportunity({
     stale.receivedAtMs <= now;
 
   return <section className={`manual-opportunity compact-decision${children ? " has-chart" : ""}${locked ? " is-locked" : ""}`} aria-label="Exact-round research state" aria-busy={loading}>
+    <div className="bw-focus-layout">
+      <div className="bw-focus-chart">{children}</div>
+      <FocusRail interval={interval} now={now} round={exactRound}
+        probabilityUp={odds?.probabilityUp ?? null} probabilityDown={odds?.probabilityDown ?? null}
+        probabilityReceivedAtMs={odds?.receivedAtMs ?? null}
+        lean={currentSide==="UP"||currentSide==="DOWN"?currentSide:null}
+        lockedSide={locked&&savedSide? savedSide as "UP"|"DOWN":null}
+        decisionState={state} decisionReason={message} nextGateAtMs={nextGateAtMs}
+        verifiedModelEdge={false} stages={twoStageProjection}
+        asks={marketAsks??{up:null,down:null}} quoteFresh={quoteFresh} quoteAtMs={quoteAtMs}
+        failed={failed} onRetry={onRetry}/>
+    </div>
+    <details className="bw-focus-archive"><summary>Extended research details</summary>
     <div className="bw-primary-grid">
-      {children && <div className="desk-chart-slot">{children}</div>}
       <SimpleLiveDesk interval={interval} now={now} round={exactRound} referencePrice={referencePrice}
         referenceConfirmed={confirmed} quoteFresh={quoteFresh} quoteAtMs={quoteAtMs}
         upAsk={marketAsks?.up ?? null} downAsk={marketAsks?.down ?? null}/>
@@ -413,6 +426,7 @@ export function ManualOpportunity({
         <span>Snapshot revision</span><b>{!exactDecision || view.snapshotVersion == null ? "Not available" : `v${view.snapshotVersion} · ${time(view.componentTimestamps.snapshotPublishedAtMs)}`}</b>
       </div>
       <p className="desk-detail-note">This is read-only market research, not a forecast or trading instruction. Comparison price does not determine WaterX settlement. Automatic execution is disabled.</p>
+    </details>
     </details>
   </section>;
 }

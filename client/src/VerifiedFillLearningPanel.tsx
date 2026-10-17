@@ -15,6 +15,8 @@ export function VerifiedFillLearningPanel({interval}:{interval:5|15}){
       const parsed:unknown=JSON.parse(await file.text());
       if(!Array.isArray(parsed)||parsed.length>10000)
         throw new Error("Expected a JSON array of at most 10,000 externally verified WaterX fill records.");
+      if(!parsed.every(record=>record!==null&&typeof record==="object"&&!Array.isArray(record)))
+        throw new Error("Every imported fill record must be a structured object.");
       setRows(parsed as EntryFillEvidence[]);setName(file.name);
     }catch(e){setError(e instanceof Error?e.message:"Unable to read research file.");}
   }

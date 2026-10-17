@@ -11,7 +11,9 @@ test("opposite real screenshot prices may be correct for different feeds; render
   assert.ok(Math.abs(waterxOraclePreview-coinbaseSpot-15.56)<1e-6);
   assert.match(app,/const tone = "neutral";/);
   assert.doesNotMatch(app,/const tone = anchor == null \|\| latest\?\.price == null \? "neutral"/);
-  assert.match(app,/NOT A WATERX UP\/DOWN SIGNAL/);
+  assert.match(app,/DO NOT TRADE FROM THIS CHART COLOR/);
+  assert.match(app,/NO WaterX price-to-beat line/);
+  assert.match(app,/anchor=\{null\} referenceConfirmed=\{false\}/);
   assert.match(app,/Coinbase spot .*historical\/stale/);
   assert.doesNotMatch(app,/className="reference-zone-above"/);
   assert.doesNotMatch(app,/className="reference-zone-below"/);

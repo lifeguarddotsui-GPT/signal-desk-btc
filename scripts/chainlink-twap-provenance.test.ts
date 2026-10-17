@@ -26,10 +26,10 @@ test("no final or live TWAP is invented from tentative reference, missing settle
 });
 test("chart shows authoritative TWAP source but never assumes authenticated Chainlink live streaming",()=>{
  const src=readFileSync(new URL("../client/src/App.tsx",import.meta.url),"utf8");
- assert.match(src,/Official settlement: Chainlink BTC\/USD TWAP60/);
- assert.match(src,/this app has no authenticated live Chainlink stream/);
+ assert.match(src,/Coinbase is a different feed from WaterX\x27s Chainlink TWAP60 settlement/);
+ assert.match(src,/Colors and area metrics do not predict the official result/);
  assert.match(src,/verifiedWaterxTwapSettlement/);
- assert.match(src,/anchor=\{null\} referenceConfirmed=\{false\}/);
- assert.match(src,/const tone = "neutral"/);
- assert.doesNotMatch(src,/const tone = anchor == null \|\| latest\?\.price/);
+ assert.match(src,/anchor=\{chartReference\}/);
+ assert.match(src,/const tone = anchor==null\?"neutral"/);
+ assert.match(src,/splitAtReference\(/);
 });

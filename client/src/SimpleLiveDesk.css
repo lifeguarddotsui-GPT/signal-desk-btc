@@ -29,3 +29,64 @@
 .desk-advanced[open]>summary{border-bottom:1px solid #2f494f}
 .desk-advanced>.desk-primary-card{margin:0}
 @media(max-width:480px){.bw-simple-desk{gap:14px}.bw-simple-facts{gap:8px}.bw-simple-side{padding:10px}.bw-simple-sides{gap:8px}.bw-simple-sides dl>div{display:block}.bw-simple-sides dd{margin-top:3px}.bw-simple-foot>div{flex-wrap:wrap}.bw-simple-header h2{font-size:23px}}
+
+
+/* Chart-first desk: preserve all primary market, benchmark and lock panels. */
+.live-page .manual-opportunity{max-width:none;width:100%;display:block;min-width:0}
+.live-page .bw-primary-grid{display:grid;grid-template-columns:minmax(0,1.85fr) minmax(315px,.85fr);align-items:stretch;gap:12px;margin-bottom:14px;min-width:0}
+.live-page .bw-primary-grid>.desk-chart-slot{min-width:0;width:100%;order:0;display:block}
+.live-page .bw-primary-grid>.bw-simple-desk{order:1;margin:0;min-width:0}
+.live-page .bw-primary-grid .chart-market-layout{display:block!important;margin:0!important;width:100%;max-width:none}
+.live-page .bw-primary-grid .chart-panel{width:100%;max-width:none;padding:16px 17px!important;margin:0;overflow:hidden}
+.live-page .bw-primary-grid .chart-measure{height:clamp(420px,42vw,640px)!important}
+.live-page .bw-primary-grid .chart-wrap{min-width:0;width:100%}
+.live-page .bw-primary-grid .price-chart{width:100%;height:100%}
+.live-page .bw-primary-grid .chart-head h2{font-size:clamp(21px,2.4vw,28px);line-height:1.25}
+.live-page .bw-primary-grid .chart-head p{font-size:12px;display:block!important;line-height:1.4}
+.live-page .bw-primary-grid .chart-head .eyebrow{display:block!important}
+.live-page .bw-primary-grid .bw-simple-desk .bw-simple-facts,.live-page .bw-primary-grid .bw-simple-sides{grid-template-columns:repeat(2,minmax(0,1fr))}
+.live-page .bw-primary-grid .bw-simple-side{min-width:0}
+.live-page .bw-primary-grid .bw-simple-side-top{flex-wrap:wrap}
+.live-page .bw-primary-grid .bw-simple-side-top strong{font-size:clamp(22px,2.4vw,32px)}
+.live-page .bw-primary-grid .bw-simple-sides dl>div{display:block}
+.live-page .bw-primary-grid .bw-simple-sides dd{margin-top:3px}
+.live-page .bw-chart-reference-bar{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px 16px;border:1px solid #35515b;border-radius:9px;padding:9px 12px;font-size:12px;color:#d2e8e2}
+.live-page .bw-chart-reference-bar strong{color:#fff;font-size:14px;white-space:nowrap}
+.live-page .bw-chart-source-note{font-size:11px!important;line-height:1.45;color:#c9bba1;margin:9px 0}
+.live-page .bw-area-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0 8px}
+.live-page .bw-area-metric{border:1px solid #304b51;background:#12282e;border-radius:11px;padding:10px;min-width:0;display:flex;flex-direction:column;gap:4px}
+.live-page .bw-area-metric small{font-size:11px;line-height:1.25;color:#b0c6c7}
+.live-page .bw-area-metric strong{font-size:clamp(18px,2vw,24px);color:#ebf7f2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;line-height:1.25}
+.live-page .bw-area-metric span{font-size:11px;color:#9fb5b6}
+.live-page .bw-area-metric.is-above strong{color:#91efb1}
+.live-page .bw-area-metric.is-below strong{color:#ff9b9d}
+.live-page .bw-area-coverage{color:#b7c1c2;font-size:11px;line-height:1.4;margin:8px 0}
+.live-page .price-chart .bw-above-zone{fill:rgba(69,171,108,.035);pointer-events:none}
+.live-page .price-chart .bw-below-zone{fill:rgba(227,80,85,.035);pointer-events:none}
+.live-page .price-chart .bw-price-fill-above{fill:rgba(69,224,121,.19);stroke:none;pointer-events:none}
+.live-page .price-chart .bw-price-fill-below{fill:rgba(252,91,98,.20);stroke:none;pointer-events:none}
+.live-page .price-chart .bw-price-line-above{stroke:#91f9ab;stroke-width:2.9;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 2px rgba(77,211,102,.3));pointer-events:none}
+.live-page .price-chart .bw-price-line-below{stroke:#ff878c;stroke-width:2.9;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 2px rgba(242,85,88,.3));pointer-events:none}
+.live-page .bw-primary-grid .anchor-line{stroke:#f2d37e;stroke-width:1.8;stroke-dasharray:5 4}
+.live-page .manual-opportunity>.desk-primary-card{width:100%;margin:0 0 12px;padding:15px 20px;max-width:none}
+.live-page .manual-opportunity .desk-chart-slot{margin:0;padding:0}
+.live-page .manual-opportunity .desk-chart-slot>.chart-market-layout{margin:0}
+@media(max-width:940px){
+ .live-page .bw-primary-grid{grid-template-columns:minmax(0,1fr)}
+ .live-page .bw-primary-grid>.desk-chart-slot{order:0}
+ .live-page .bw-primary-grid>.bw-simple-desk{order:1}
+ .live-page .bw-primary-grid .chart-measure{height:clamp(345px,64vw,490px)!important}
+ .live-page .bw-primary-grid .bw-simple-sides dl>div{display:flex}
+}
+@media(max-width:520px){
+ .live-page .bw-primary-grid{gap:8px}
+ .live-page .bw-primary-grid .chart-panel{padding:12px 8px!important}
+ .live-page .bw-primary-grid .chart-measure{height:clamp(320px,98vw,430px)!important}
+ .live-page .bw-area-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+ .live-page .bw-area-metric{padding:9px}
+ .live-page .bw-primary-grid .bw-simple-desk .bw-simple-facts,.live-page .bw-primary-grid .bw-simple-sides{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .live-page .bw-primary-grid .bw-simple-sides dl>div{display:block}
+ .live-page .manual-opportunity>.desk-primary-card{padding:10px}
+ .live-page .chart-controls{flex-wrap:wrap}
+ .live-page .bw-chart-reference-bar{font-size:11px}
+}

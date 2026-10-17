@@ -986,3 +986,10 @@
 .fill-research-scroll table{border-collapse:collapse;min-width:570px;width:100%;font-size:12px}
 .fill-research-scroll th,.fill-research-scroll td{border-bottom:1px solid #446063;padding:9px;text-align:left}
 .fill-research-scroll th{color:#e7edd9}
+
+
+/* Different price sources must never imply the same BTC YES/NO settlement signal. */
+.chart-cross-source-caution{margin:11px 14px;padding:11px 13px;border:1px solid rgba(175,205,218,.35);border-radius:8px;background:rgba(28,56,67,.85);color:#d2e4e6;font-size:12px;line-height:1.55}
+.chart-cross-source-caution strong{display:block;color:#fae1a0;letter-spacing:.03em;font-size:11px;margin-bottom:3px}
+.desk-price-difference.is-cross-source strong{color:#d6e5e7!important}
+.desk-cross-source-note{margin:0;padding:12px 14px;color:#c5d9d4;font-size:11px;line-height:1.6;background:#182e32;border-top:1px solid #345057}

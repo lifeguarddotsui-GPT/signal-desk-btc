@@ -34,7 +34,7 @@ type Availability = { roundMetadata?: { status?: string; reason?: string | null 
 type LivePayload = LiveSnapshotEnvelope & {
   serverTime?: string; status?: string; intervalMinutes?: number; reason?: string;
   round?: { id: string; marketId?: string; startMs: number; expiryMs: number; referencePrice: number | null; anchorConfirmed: boolean; phase?: string; url?: string } | null;
-  odds?: { up: number | null; down: number | null; upPriceCents: number | null; downPriceCents: number | null; asOf: string; source: string } | null;
+  odds?: { up: number | null; down: number | null; upPriceCents: number | null; downPriceCents: number | null; asOf: string | null; priceAsOf?: string | null; roundId?: string | null; source: string } | null;
   comparison?: { price: number; asOf: string; source: string } | null;
   availability?: Availability;
   learning?: Record<string, unknown>;
@@ -180,6 +180,7 @@ function IntervalSwitch({ value, onChange }: { value: Interval; onChange: (n: In
 function LivePage() {
   const [interval, setInterval] = useIntervalPreference();
   const [chartWindow, setChartWindow] = useState<"observed" | "round" | 5 | 15>("observed");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const rolloverSince = useRef<number | null>(null);
   const fixtureNames = ["normal", "high-likelihood-up", "high-likelihood-down", "favorable-risk-reward-up", "favorable-risk-reward-down", "wait", "unvalidated", "stale-quote", "missing-odds", "collector-stalled", "loading", "request-failure", "rollover", "too-late", "locked"] as const;
@@ -201,12 +202,12 @@ function LivePage() {
   const bluewaterUrl = `/api/waterx/bluewater?interval=${interval}`;
   const live = useLiveSnapshot<LivePayload>(liveUrl, interval, !fixtureMode);
   const validatedAtomicSnapshot = useRef<{ url: string; data: LivePayload } | null>(null);
-  const chart = useApi<ChartPayload>(chartUrl, 30000, !fixtureMode);
-  const learning = useApi<Record<string, unknown>>(learningUrl, 60000, !fixtureMode);
-  const health = useApi<WaterxHealth>(healthUrl, 10000, !fixtureMode);
-  const research = useApi<ResearchReport>(researchUrl, 60000, !fixtureMode);
-  const lockReadiness = useApi<LockReadinessReport>(lockReadinessUrl, 60000, !fixtureMode);
-  const bluewater = useApi<BluewaterReport>(bluewaterUrl, 5000, !fixtureMode);
+  const chart = useApi<ChartPayload>(chartUrl, 30000, !fixtureMode && advancedOpen);
+  const learning = useApi<Record<string, unknown>>(learningUrl, 60000, !fixtureMode && advancedOpen);
+  const health = useApi<WaterxHealth>(healthUrl, 30000, !fixtureMode && advancedOpen);
+  const research = useApi<ResearchReport>(researchUrl, 60000, !fixtureMode && advancedOpen);
+  const lockReadiness = useApi<LockReadinessReport>(lockReadinessUrl, 60000, !fixtureMode && advancedOpen);
+  const bluewater = useApi<BluewaterReport>(bluewaterUrl, 30000, !fixtureMode && advancedOpen);
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const fixtureNow = now;
   const fixturePhase=fixtureMode?new URLSearchParams(window.location.search).get("phase"):null;
@@ -341,6 +342,20 @@ function LivePage() {
     odds,
     availability: oddsAvailability,
   });
+  // Read the exact-round provider quote independently of model persistence.
+  // A missing research lock or probability pair must not suppress a fresh
+  // WaterX indicative ask. No exchange spot or synthetic price is substituted.
+  const providerQuoteDisplay = selectWaterxOddsDisplay({
+    snapshotCurrent, roundCurrent,
+    requestedInterval: interval, responseInterval: payload?.intervalMinutes,
+    roundId: roundCurrent ? round?.id : null, roundStartMs: roundCurrent ? round?.startMs : null,
+    serverNowMs: serverNow, odds: payload?.odds, availability: payload?.availability?.odds,
+  });
+  const marketQuoteDisplay = providerQuoteDisplay.fresh ? providerQuoteDisplay : oddsDisplay;
+  const marketQuoteAt = providerQuoteDisplay.fresh
+    ? payload?.odds?.priceAsOf ?? payload?.odds?.asOf ?? null
+    : atomicOdds?.priceAsOf ?? atomicOdds?.asOf ?? null;
+  const marketQuoteAtMs = marketQuoteAt ? Date.parse(marketQuoteAt) : NaN;
   const oddsFresh = oddsDisplay.fresh;
   const upLocked = oddsDisplay.up.locked;
   const downLocked = oddsDisplay.down.locked;
@@ -475,7 +490,7 @@ function LivePage() {
   const streamCursor = useRef("");
   const pendingPaint = useRef<{ id: string; receivedAt: number } | null>(null);
   useEffect(() => {
-    if (fixtureMode) { setStreamStatus("FIXTURE"); return; }
+    if (fixtureMode || !advancedOpen) { setStreamStatus(fixtureMode ? "FIXTURE" : "CONNECTING"); return; }
     let disposed = false, retry: number | undefined, wait = 1000;
     const markFeedGap = (reason: string) => {
       const at = Date.now();
@@ -528,7 +543,7 @@ function LivePage() {
     const onVisible = () => { if (document.visibilityState === "visible" && streamRef.current?.readyState === EventSource.CLOSED) connect(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { disposed = true; if (retry) clearTimeout(retry); streamRef.current?.close(); document.removeEventListener("visibilitychange", onVisible); };
-  }, [fixtureMode]);
+  }, [fixtureMode, advancedOpen]);
   const latestStreamPoint = stream.at(-1);
   const latestStreamAt = latestStreamPoint
     ? typeof latestStreamPoint.at === "number" ? latestStreamPoint.at : Date.parse(latestStreamPoint.at)
@@ -585,8 +600,11 @@ function LivePage() {
         interval={interval}
         round={roundCurrent && round ? { id: round.id, startMs: round.startMs, expiryMs: round.expiryMs } : null}
         fixtureName={fixtureMode}
-        marketAsks={{up:oddsDisplay.up.grossAvailable?oddsDisplay.up.priceCents:null,
-          down:oddsDisplay.down.grossAvailable?oddsDisplay.down.priceCents:null}}
+        marketAsks={{up:marketQuoteDisplay.up.grossAvailable?marketQuoteDisplay.up.priceCents:null,
+          down:marketQuoteDisplay.down.grossAvailable?marketQuoteDisplay.down.priceCents:null}}
+        quoteFresh={marketQuoteDisplay.fresh}
+        quoteAtMs={Number.isFinite(marketQuoteAtMs) ? marketQuoteAtMs : null}
+        onAdvancedToggle={setAdvancedOpen}
         marketProbabilities={{up:oddsDisplay.up.probability,down:oddsDisplay.down.probability}}
         marketReference={{
           price: waterxReferenceValid ? round?.referencePrice ?? null : null,
@@ -1109,7 +1127,7 @@ function HealthPage() {
        {snapshotCurrent && !roundCurrent && typeof snapshot?.reason === "string" && <p className="health-warning">WaterX round withheld: {snapshot.reason}</p>}
       <section className="provenance-grid">
          <article><span className="source-number">01</span><div className="eyebrow">WATERX BEGINNING REFERENCE</div><h2>Price to beat</h2><strong>{referenceValid ? fmtUsd(round?.referencePrice) : "Withheld"}</strong><p>{referenceValid ? `Reported by WaterX. ${referenceAvailability?.status === "provisional" || !round?.anchorConfirmed ? "Provisional; confirmation pending." : "Reference confirmation is reported."}` : referenceAvailability?.reason || "No positive active-round reference is available."}</p><small>Settlement source: Chainlink BTC/USD TWAP · round {round?.id || "not currently verified"}</small></article>
-        <article><span className="source-number">02</span><div className="eyebrow">MARKET PRICES</div><h2>WaterX odds</h2><strong>{oddsAvailabilityStatus === "unavailable" ? "Odds temporarily unavailable" : oddsAvailabilityStatus === "locked" ? "Locked" : oddsCurrent && snapshot?.odds ? `${fmtOdds(snapshot.odds.upPriceCents)} / ${fmtOdds(snapshot.odds.downPriceCents)}` : "Withheld"}</strong><p>{oddsCurrent && snapshot?.odds ? `Source ${snapshot.odds.source} · ${ago(snapshot.odds.asOf)}. Market probabilities, not model forecasts.` : oddsAvailability?.reason || "No fresh WaterX odds for the active round."}</p><small>Interval {interval} minutes · prices not executable</small></article>
+        <article><span className="source-number">02</span><div className="eyebrow">MARKET PRICES</div><h2>WaterX odds</h2><strong>{oddsAvailabilityStatus === "unavailable" ? "Odds temporarily unavailable" : oddsAvailabilityStatus === "locked" ? "Locked" : oddsCurrent && snapshot?.odds ? `${fmtOdds(snapshot.odds.upPriceCents)} / ${fmtOdds(snapshot.odds.downPriceCents)}` : "Withheld"}</strong><p>{oddsCurrent && snapshot?.odds ? `Source ${snapshot.odds.source} · ${ago(snapshot.odds.asOf ?? undefined)}. Market probabilities, not model forecasts.` : oddsAvailability?.reason || "No fresh WaterX odds for the active round."}</p><small>Interval {interval} minutes · prices not executable</small></article>
         <article><span className="source-number">03</span><div className="eyebrow">COMPARISON ONLY</div><h2>Coinbase live feed</h2><strong>{comparisonCurrent && snapshot?.comparison ? fmtUsd(snapshot.comparison.price) : "Withheld"}</strong><p>{comparisonCurrent && snapshot?.comparison ? `Source ${snapshot.comparison.source} · ${ago(snapshot.comparison.asOf)}. Never used for settlement.` : "No fresh Coinbase comparison for the active round."}</p><small>Separate from the Chainlink settlement TWAP</small></article>
       </section>
        <section className="panel chart-health"><div className="section-head"><div><div className="eyebrow">OBSERVATION ARCHIVE</div><h2>Chart data availability</h2></div><button className="quiet-button" onClick={chart.reload}><RefreshCw size={14} /> Refresh</button></div>

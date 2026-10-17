@@ -692,6 +692,7 @@ function LivePage() {
 function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; referenceConfirmed:boolean; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void }) {
   const measureRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const chartMeasureRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(720);
   const [chartHeight,setChartHeight]=useState(420);
   const [textScale,setTextScale]=useState(1);
@@ -701,14 +702,15 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
     if (!element) return;
     const update = () => {
       setWidth(Math.max(180, Math.round(element.getBoundingClientRect().width)));
-      if(svgRef.current)setChartHeight(Math.max(220,Math.round(svgRef.current.getBoundingClientRect().height)));
+      if(chartMeasureRef.current)setChartHeight(Math.max(220,Math.round(chartMeasureRef.current.getBoundingClientRect().height)));
       setTextScale(Math.max(1,parseFloat(getComputedStyle(document.documentElement).fontSize)/16));
     };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);
+    if(chartMeasureRef.current)observer.observe(chartMeasureRef.current);
     return () => observer.disconnect();
-  }, []);
+  }, [points.length]);
   const compact = width < 390;
   const H = chartHeight, left = compact ? 51 : 74, right = compact ? 20 : 30, top = 36, bottom = 20;
   const plotRight = width - right;
@@ -770,7 +772,7 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
       <span>COINBASE SPOT ONLY {latestFresh ? "· fresh" : "· historical/stale"} <strong>{fmtUsd(latest?.price)}</strong></span>
       <span>{anchor==null?"No matched WaterX opening reference":`Relative to WaterX opening reference ${fmtUsd(anchor)} · ${referenceConfirmed?"confirmed":"provisional"} · NOT settlement`}</span>
     </div>
-    {samples.length ? <><div className="chart-measure">
+    {samples.length ? <><div className="chart-measure" ref={chartMeasureRef}>
        <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase spot observations only, comparison color, not WaterX prediction or settlement, over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
         <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
          {anchor!=null&&<><rect x={left} y={top} width={plotRight-left} height={Math.max(0,y(anchor)-top)} className="bw-above-zone"/><rect x={left} y={y(anchor)} width={plotRight-left} height={Math.max(0,H-bottom-y(anchor))} className="bw-below-zone"/></>}

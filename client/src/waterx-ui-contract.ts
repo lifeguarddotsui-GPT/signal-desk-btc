@@ -10,6 +10,7 @@ export type WaterxDisplayOdds = {
   upPriceCents?: number | null;
   downPriceCents?: number | null;
   asOf?: string | null;
+  priceAsOf?: string | null;
   source?: string | null;
   roundId?: string | null;
 };
@@ -95,16 +96,23 @@ export function selectWaterxOddsDisplay(input: {
   if (!odds || (availability?.status === "unavailable" && !hasReportedPrice))
     return unavailable("unavailable");
 
-  const asOfMs = odds.asOf ? Date.parse(odds.asOf) : NaN;
   const intervalMatches = input.responseInterval === input.requestedInterval;
   const identityMatches = odds.roundId == null || odds.roundId === input.roundId;
   const startMs = input.roundStartMs;
-  const timeMatches = Number.isFinite(asOfMs) && Number.isFinite(input.serverNowMs) &&
-    asOfMs <= input.serverNowMs + 1_000 &&
-    input.serverNowMs - asOfMs <= 14_000 &&
-    typeof startMs === "number" && Number.isFinite(startMs) && asOfMs >= startMs;
-  const fresh = input.snapshotCurrent && input.roundCurrent && intervalMatches &&
-    identityMatches && timeMatches && isWaterxMarketSource(odds.source);
+  const validReceipt = (iso: string | null | undefined) => {
+    const receiptMs = iso ? Date.parse(iso) : NaN;
+    return Number.isFinite(receiptMs) && Number.isFinite(input.serverNowMs) &&
+      receiptMs <= input.serverNowMs + 1_000 && input.serverNowMs - receiptMs <= 14_000 &&
+      typeof startMs === "number" && Number.isFinite(startMs) && receiptMs >= startMs;
+  };
+  const sourceValid = input.snapshotCurrent && input.roundCurrent && intervalMatches &&
+    identityMatches && isWaterxMarketSource(odds.source);
+  // The provider timestamps indicative side prices separately from market
+  // probability pairs. A missing probability must not hide a valid side ask;
+  // a fresh ask must not revive stale/missing probabilities.
+  const probabilityFresh = sourceValid && validReceipt(odds.asOf);
+  const priceFresh = sourceValid && validReceipt(odds.priceAsOf ?? odds.asOf);
+  const fresh = probabilityFresh || priceFresh;
   if (!fresh) return unavailable("withheld");
 
   const selectSide = (
@@ -113,9 +121,9 @@ export function selectWaterxOddsDisplay(input: {
     sideAvailability: WaterxSideDisplayAvailability | undefined,
   ) => {
     const sideMissing = sideAvailability?.side === "unavailable";
-    const probabilityAvailable = !sideMissing && sideAvailability?.probability !== "unavailable" &&
+    const probabilityAvailable = probabilityFresh && !sideMissing && sideAvailability?.probability !== "unavailable" &&
       typeof probability === "number" && Number.isFinite(probability) && probability >= 0 && probability <= 1;
-    const priceAvailable = !sideMissing && sideAvailability?.price !== "unavailable" &&
+    const priceAvailable = priceFresh && !sideMissing && sideAvailability?.price !== "unavailable" &&
       typeof priceCents === "number" && Number.isFinite(priceCents) && priceCents >= 0 && priceCents <= 100;
     const selectedPrice = priceAvailable ? priceCents! : null;
     const locked = sideAvailability?.side === "locked" || selectedPrice === 0;

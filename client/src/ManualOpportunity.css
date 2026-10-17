@@ -970,6 +970,8 @@
 .real-trade-result strong { color: #ddc68c; }
 
 /* Local-only real fill evaluation; no extra requests or background workers. */
+.fill-research-selected{margin:13px 0;padding:12px;border:1px solid #587774;border-radius:7px;background:#1b373a}
+.fill-research-selected strong{font-size:15px}
 .fill-research-panel{border:1px solid #3d595c;border-radius:11px;padding:18px;margin:18px 0;background:#13292e;color:#deece6}
 .fill-research-panel h2{font-size:20px;line-height:1.25;margin:7px 0}
 .fill-research-panel p{font-size:13px;line-height:1.6}

@@ -9,7 +9,7 @@ const css = readFileSync(new URL("./index.css", import.meta.url), "utf8");
 
 test("research report is interval-polled and never fetched during existing live fixtures", () => {
   assert.match(app, /`\/api\/waterx\/research\?interval=\$\{interval\}`/);
-  assert.match(app, /useApi<ResearchReport>\(researchUrl, 60000, !fixtureMode\)/,
+  assert.match(app, /useApi<ResearchReport>\(researchUrl, 60000, !fixtureMode && advancedOpen\)/,
     "Historical context must not add a high-frequency database poll to live readiness.");
   assert.match(app, /research\.loadedUrl === researchUrl && research\.data\?\.intervalMinutes === interval/);
   assert.match(app, /DEVELOPMENT-ONLY FIXTURES/);

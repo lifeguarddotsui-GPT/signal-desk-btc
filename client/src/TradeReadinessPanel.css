@@ -65,3 +65,8 @@
 .trade-payout-band{padding:9px 11px;border:1px solid #4b6666;border-radius:7px;background:#243b3c;color:#f2ddac;font-size:12px;font-weight:700;letter-spacing:.025em}
 
 .trade-waterx-sentiment{font-size:12px;line-height:1.5;color:#c1d7cf;margin:8px 0 12px}.trade-waterx-sentiment strong{display:block;font-size:16px;color:#e5ebd9}.trade-waterx-sentiment small{display:block;font-size:11px;color:#a8bcb6}
+
+.trade-value-goal{display:flex;flex-direction:column;gap:7px;padding:13px 14px;background:#143c32;border:1px solid #438b73;border-radius:9px;margin-bottom:12px}
+.trade-value-goal strong{font-size:17px;line-height:1.35;color:#c8f2d8}
+.trade-value-goal small{font-size:12px;line-height:1.5;color:#c5dccd}
+.trade-pricing .trade-payout-band{background:#243b3c;border:1px solid #6b827c}

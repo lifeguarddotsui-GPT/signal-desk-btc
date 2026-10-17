@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link, Route, Switch, useLocation } from "wouter";
 import { Activity, BookOpen, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldAlert, ShieldCheck, Waves, X } from "lucide-react";
 import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
+import {CHAINLINK_BTC_TWAP60_REFERENCE,verifiedWaterxTwapSettlement} from "../../shared/chainlink-twap-provenance";
 import { insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxReference, sseReconnectUrl } from "./waterx-ui-contract";
 import { mergeComparisonPoints } from "./chart-contract";
 import { browserRenderSummary, recordBrowserRender } from "./browser-latency";
@@ -12,6 +13,7 @@ import type { RoundDecision } from "../../shared/round-decision";
 import type { LockReadinessReport } from "../../shared/lock-readiness";
 import CanonicalHistory from "./CanonicalHistory";
 import { ResearchLearningPanel } from "./ResearchLearningPanel";
+import { VerifiedFillLearningPanel } from "./VerifiedFillLearningPanel";
 import EarlyLearningJobsPanel from "./EarlyLearningJobsPanel";
 import { BluewaterResearchPanel } from "./BluewaterResearchPanel";
 import type { BluewaterReport } from "../../shared/bluewater-research";
@@ -603,14 +605,22 @@ function LivePage() {
       >
       <div className="chart-market-layout">
         <section className="chart-panel">
-        <div className="section-head chart-head"><div><div className="eyebrow">PRICE OBSERVATIONS</div><h2>BTC / USD</h2><p>Observed prices only · missing intervals remain blank.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
+        <div className="section-head chart-head"><div><div className="eyebrow">COINBASE COMPARISON DATA</div><h2>Coinbase BTC / USD · not WaterX</h2><p>Separate Coinbase spot feed, not the WaterX live preview or Chainlink settlement reference. Its direction may disagree with WaterX.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
+        <div className="source-trust-strip" aria-label="Distinct BTC price sources">
+          <div><span>COINBASE SPOT · COMPARISON ONLY</span><b>{coinbasePriceFresh ? fmtUsd(coinbaseDisplayPrice) : "Unavailable"}</b><small>Not the WaterX settlement feed</small></div>
+          <div><span>WATERX STARTING REFERENCE</span><b>{roundCurrent && waterxReferenceValid ? fmtUsd(round?.referencePrice) : "Unavailable"}</b><small>{roundCurrent && round?.anchorConfirmed === true ? "Provider confirmed" : "Provider unconfirmed · do not treat as final"}</small></div>
+          <div className="source-trust-unknown"><span>WATERX LIVE ORACLE PREVIEW</span><b>Not supplied here</b><small>View the same active market on WaterX</small></div>
+        </div>
+        <div className="oracle-authority-strip" role="note"><b>Official settlement: Chainlink BTC/USD TWAP60</b><span>The WaterX Oracle chart is a preview; this app has no authenticated live Chainlink stream. Do not reinterpret Coinbase as Chainlink.</span><a href={CHAINLINK_BTC_TWAP60_REFERENCE} target="_blank" rel="noopener noreferrer">Official Chainlink TWAP60 stream reference ↗</a></div>
+        <div className="chart-cross-source-caution" role="note"><strong>DO NOT TRADE FROM THIS CHART COLOR</strong> Coinbase spot and the WaterX Oracle preview are separate feeds. This chart is deliberately neutral and has NO WaterX price-to-beat line. WaterX may be green while Coinbase is lower. Confirm the exact WaterX live market and its settlement reference before making any order. {roundCurrent && round?.url?.startsWith("https://waterx.app/") && <a href={round.url} target="_blank" rel="noopener noreferrer" className="chart-official-link">Check this exact round on WaterX ↗</a>}</div>
           {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <div className="chart-empty"><Activity size={22} /><strong>Archive unavailable</strong><span>The live comparison feed remains independent.</span></div> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
-             <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
+             <PriceChart points={merged} interval={interval} anchor={null} referenceConfirmed={false} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
           }
          {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive unavailable. Live comparison observations remain visible where available.</div>}
           {chartPayload?.coverage?.partial && (typeof chartWindow === "number" || chartWindow === "round") && <div className="gap-caption">Rolling archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. This does not describe complete coverage of the current round.</div>}
         {chartPayload && !archiveMatches && <div className="gap-caption">Archive source mismatch: historical points withheld; expected Coinbase comparison data.</div>}
-        <div className="legend-row"><span><i className="legend-price" /> Coinbase observations</span><span><i className="legend-anchor" /> WaterX price to beat</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
+        
+        <div className="legend-row"><span><i className="legend-price" /> Coinbase spot (comparison only)</span><span>WaterX starting reference shown separately — not overlaid on Coinbase</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
         <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live observations{typeof chartWindow === "number" ? ` · rolling archive coverage ${chartPayload?.coverage?.percent == null ? "not reported" : `${chartPayload.coverage.percent}%`}` : " · active-round window; archive coverage is separate"}</span></div>
       </section>
       </div>
@@ -618,7 +628,7 @@ function LivePage() {
   </div>;
 }
 
-function PriceChart({ points, interval, anchor, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void }) {
+function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; referenceConfirmed:boolean; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void }) {
   const measureRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(720);
@@ -667,7 +677,11 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
     else chunk.push(p);
   });
   if (chunk.length) chunks.push(chunk);
-  const tone = anchor == null || latest?.price == null ? "neutral" : latest.price >= anchor ? "positive" : "negative";
+  // Coinbase and WaterX/Chainlink are different price feeds. A cross-source
+  // comparison CANNOT identify WaterX UP or DOWN, so never render red/green.
+  const tone = "neutral";
+  const latestAt = latest ? Number(latest.at) : NaN;
+  const latestFresh = Number.isFinite(latestAt) && latestAt <= nowAt + 1000 && nowAt-latestAt <= 14000;
   const selectAt = (clientX: number) => {
     const bounds = svgRef.current?.getBoundingClientRect();
     if (!bounds || !samples.length) return;
@@ -693,13 +707,13 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
       {active && <button className="return-live" onClick={() => setSelectedKey(null)}>Return to live</button>}
     </div>
     <div className="chart-price-labels">
-      <span>Latest observed BTC <strong>{fmtUsd(latest?.price)}</strong></span>
-      {anchor!=null&&<span>WaterX price to beat <strong>{fmtUsd(anchor)}</strong></span>}
+      <span>COINBASE SPOT ONLY {latestFresh ? "· fresh" : "· historical/stale"} <strong>{fmtUsd(latest?.price)}</strong></span>
+      <span>WaterX live oracle preview is NOT available from this Coinbase chart. Compare it directly on WaterX.</span>
     </div>
     {samples.length ? <><div className="chart-measure">
-       <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase BTC comparison observations over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
+       <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase spot observations only, neutral color, not WaterX prediction or settlement, over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
         <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
-         {anchor != null && <><rect x={left} y={top} width={plotRight - left} height={Math.max(0, y(anchor) - top)} className="reference-zone-above" /><rect x={left} y={y(anchor)} width={plotRight - left} height={Math.max(0, H - bottom - y(anchor))} className="reference-zone-below" /></>}
+         {/* Do not shade above/below zones when plotting Coinbase against a different WaterX oracle. */}
          {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); const axisPrice = width < 500 ? new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(price) : fmtUsd(price); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 7} y={py + 4} textAnchor="end" className="axis-label">{axisPrice}</text></g>; })}
          {axisTicks.map(tick=><line key={tick.at} x1={x(tick.at)} x2={x(tick.at)} y1={top} y2={H-bottom} className="time-tick" />)}
           {nowInside && <><rect x={nowX} y={top} width={Math.max(0, plotRight - nowX)} height={H - top - bottom} className="future-shade" /><line x1={nowX} x2={nowX} y1={top} y2={H - bottom} className="now-line" /><text x={nowLabelX} y={top + 13} textAnchor={nowLabelRightAligned ? "end" : "start"} className="now-label">NOW</text></>}
@@ -737,7 +751,7 @@ function HistoryPage() {
   const rows = intervalResponseReady ? result.data?.rows ?? [] : [];
   return <div className="page inner-page">
     <PageTitle index="02" title="Round history"><div className="heading-right"><label className="history-source-select">HISTORY SOURCE<select value={historySource} onChange={event => setHistorySource(event.target.value as HistorySource)}><option value="baseline">WaterX market baseline</option><option value="bluewater">Bluewater champion</option><option value="fallback">Deterministic 50/50 fallback · research-only</option></select></label><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
-    <div className="intro-line"><p>Recorded WaterX rounds and their reported reference prices. Each interval is a different market duration.</p><span>{historySourceLabel(historySource)} · {rows.length} rows</span></div>
+    <div className="intro-line"><p>Recorded WaterX rounds and their reported reference prices. Settlement uses <a href={CHAINLINK_BTC_TWAP60_REFERENCE} target="_blank" rel="noopener noreferrer">Chainlink BTC/USD TWAP60</a>; only WaterX-verified post-expiry labels are marked as such.</p><span>{historySourceLabel(historySource)} · {rows.length} rows</span></div>
     {historySource === "fallback" && <div className="history-note"><ShieldAlert size={15} /> Deterministic 50/50 tie-break evidence only · low-confidence research cohort, isolated from baseline and champion denominators. No trade, return, or P&amp;L inference.</div>}
     {result.error && result.errorUrl === url ? <ErrorBox message={result.error} retry={result.reload} /> : !intervalResponseReady ? <Skeleton height={330} /> :
       rows.length ? <div className="table-frame"><table><thead><tr><th>Round</th><th>Start · UTC</th><th>Close · UTC</th><th>Price to beat</th><th>Settlement</th><th>Outcome</th><th>Evidence</th><th>Market UP at capture</th></tr></thead><tbody>{rows.map((r, i) => {
@@ -746,11 +760,16 @@ function HistoryPage() {
         const ended = r.expiryMs;
         const anchor = typeof r.anchorPrice === "number" ? r.anchorPrice : null;
         const evidence = r.evidence && typeof r.evidence === "object" ? r.evidence as Record<string, unknown> : {};
+        const twapLabel=verifiedWaterxTwapSettlement({
+          labelStatus:r.labelStatus,disputed:r.settlementDisputed??r.disputed,
+          anchorConfirmed:r.anchorConfirmed,anchorPrice:r.anchorPrice,
+          settlePrice:r.settlePrice,outcome:r.outcome,expiryMs:r.expiryMs,settledAtMs:r.settledAt,
+        });
         const tieBreakApplied = evidence.tieBreakApplied === true;
         const evidenceLabel = tieBreakApplied ? "50/50 tie-break · research-only"
           : historySource === "fallback" ? "Fallback cohort · tie-break evidence unavailable"
             : String(r.labelStatus ?? "unresolved");
-        return <tr key={id}><td className="mono-cell" title={id}>{id.slice(0, 8)}…</td><td>{utc(typeof started === "number" ? started : undefined)}</td><td>{utc(typeof ended === "number" ? ended : undefined)}</td><td>{fmtUsd(anchor)}{r.anchorConfirmed !== true && <small> · pending confirmation</small>}</td><td>{fmtUsd(typeof r.settlePrice === "number" ? r.settlePrice : null)}</td><td><span className={`outcome ${String(r.outcome ?? "").toLowerCase()}`}>{String(r.outcome ?? "Unresolved")}</span></td><td title={typeof r.withheldReason === "string" ? r.withheldReason : undefined}>{evidenceLabel}</td><td>{typeof r.probabilityUp === "number" ? `${(r.probabilityUp * 100).toFixed(1)}%` : "Not captured"}</td></tr>;
+        return <tr key={id}><td className="mono-cell" title={id}>{id.slice(0, 8)}…</td><td>{utc(typeof started === "number" ? started : undefined)}</td><td>{utc(typeof ended === "number" ? ended : undefined)}</td><td>{fmtUsd(anchor)}{r.anchorConfirmed !== true && <small> · pending confirmation</small>}</td><td>{fmtUsd(typeof r.settlePrice === "number" ? r.settlePrice : null)}{twapLabel&&<small> · WaterX verified TWAP outcome</small>}</td><td><span className={`outcome ${String(r.outcome ?? "").toLowerCase()}`}>{String(r.outcome ?? "Unresolved")}</span></td><td title={typeof r.withheldReason === "string" ? r.withheldReason : undefined}>{evidenceLabel}</td><td>{typeof r.probabilityUp === "number" ? `${(r.probabilityUp * 100).toFixed(1)}%` : "Not captured"}</td></tr>;
       })}</tbody></table></div> : <div className="empty-state"><Clock3 size={22} /><strong>No recorded rounds returned</strong><span>History is shown only when the WaterX archive has recorded rows. No examples are fabricated.</span></div>}
     <div className="history-note"><ShieldCheck size={15} /> These are observed records, not a performance claim or trading recommendation.</div>
   </div>;
@@ -823,6 +842,7 @@ function LearningPage() {
   return <div className="page inner-page">
     <PageTitle index="03" title="Learning evidence"><div className="heading-right"><span className="muted-label">MARKET DURATION</span><IntervalSwitch value={interval} onChange={setInterval} /></div></PageTitle>
     <div className="learning-lede"><BookOpen size={19} /><p>Evidence is assessed separately for each WaterX market duration. WaterX odds are market probabilities, not a BluewaterAI forecast. Only verified settlement labels enter evaluation.</p></div>
+    <VerifiedFillLearningPanel interval={interval}/>
     <EarlyLearningSummary interval={interval} />
     <EarlyLearningJobsPanel />
     <BluewaterResearchPanel

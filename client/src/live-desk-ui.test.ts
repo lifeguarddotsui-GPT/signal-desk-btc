@@ -22,7 +22,7 @@ test("the live desk places one shared live decision before the existing chart wi
 
 test("the top decision shows source facts without economic or execution claims", () => {
   assert.match(manual, /BTC comparison/);
-  assert.match(manual, /WaterX price to beat/);
+  assert.match(manual, /WaterX beginning reference \(different feed\)/);
   assert.match(manual, /WaterX market/);
   assert.match(manual, /WaterX market/);
   assert.match(manual, /Automatic execution is disabled/);

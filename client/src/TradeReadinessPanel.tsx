@@ -1,6 +1,7 @@
 import * as React from "react";
 import type {EntryWindowResult,Direction} from "../../shared/entry-window";
 import type {TimingWindow} from "../../shared/operational-timing";
+import {dollarOutcome} from "../../shared/dollar-entry-target";
 
 /** Timing is an OPERATIONAL heuristic, not empirical expected value or a buy recommendation. */
 export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,marketProbabilities,upAsk,downAsk}:{
@@ -23,9 +24,7 @@ export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,m
   const gross=valid?5/(effectiveAsk!/100):null;
   const winNet=gross==null?null:gross-5-costs;
   const breakeven=gross==null?null:(5+costs)/gross;
-  const payoutBand=gross==null?"ENTER AN ASK TO COMPARE":
-    gross<6?"LOW RETURN · UNDER $6 GROSS":
-    gross<=8?"$6–$8 GROSS TARGET RANGE":"HIGHER GROSS · HIGHER WIN-RATE UNCERTAINTY";
+  const targetValue=valid?dollarOutcome(effectiveAsk!,5,costs):null;
   const money=(x:number|null)=>x==null?"—":`$${x.toFixed(2)}`;
   const fmtPct=(x:number|null)=>x==null?"—":`${(x*100).toFixed(1)}%`;
   const severity=timing.score>=7?"review":timing.score>=4?"watch":"avoid";
@@ -70,6 +69,10 @@ export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,m
       <small> Market prices, not Blue Water calibrated forecast probabilities.</small>
     </p>
     <div className="trade-pricing" aria-label="WaterX buy-in value comparison">
+      <div className="trade-value-goal">
+        <strong>Target: +$1 to +$2 on a winning $5 position</strong>
+        <small>{costsValid?`Price needed for +$1: at most ${(100*5/(6+costs)).toFixed(1)}¢ · +$2: at most ${(100*5/(7+costs)).toFixed(1)}¢ (with your entered additional costs)`:"Enter valid costs to evaluate the target price range."}</small>
+      </div>
       <strong>Compare actual WaterX purchase price</strong>
       <p>Use the YES or NO price WaterX shows when you place a $5 position.</p>
       <div className="trade-readiness-inputs">
@@ -84,13 +87,17 @@ export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,m
           min="0" max="5" step=".01" value={typedCosts} onChange={e=>setTypedCosts(e.target.value)}/></label>
       </div>
       <small>{quoteSource}. YES: {upAsk==null?"not reported":`${upAsk.toFixed(1)}¢`} · NO: {downAsk==null?"not reported":`${downAsk.toFixed(1)}¢`}</small>
-      <p className="trade-payout-band" aria-label="Target payout range">{payoutBand}</p>
+      <p className="trade-payout-band" aria-label="Target payout range">{targetValue==null?
+        "Enter a WaterX price to evaluate the payout":targetValue.target==="ONE_TO_TWO_DOLLARS"?
+        "PAYOUT TARGET MET IF CORRECT · FORECAST EDGE NOT VERIFIED":targetValue.target==="BELOW_ONE_DOLLAR"?
+        "PAYOUT TOO SMALL FOR +$1 GOAL": "HIGHER PAYOUT IF CORRECT · GREATER UNCERTAINTY OF WIN"}</p>
       <div className="trade-readiness-results">
         <span>Gross if right <b>{money(gross)}</b></span>
         <span>Net if right <b>{money(winNet)}</b></span>
         <span>Loss if wrong <b>{valid?money(5+costs):"—"}</b></span>
         <span>Win rate to break even <b>{fmtPct(breakeven)}</b></span>
       </div>
+      <p className="trade-readiness-caution">These are winning-only results, not guaranteed gains. An incorrect $5 position loses the entire stake. The live quote may not fill at the displayed price.</p>
       <p className="trade-readiness-caution">A profitable entry requires a validated independent forecast above this break-even threshold, after uncertainty, fees and slippage. Blue Water has not established one. Price and time alone cannot show a positive expected return.</p>
     </div>
     <button type="button" className="trade-details-toggle" onClick={()=>setShowBreakdown(v=>!v)}>

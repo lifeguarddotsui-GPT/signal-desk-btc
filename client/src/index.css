@@ -2714,3 +2714,24 @@ input:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
   .agent-funding-quickfacts > div { grid-template-columns: minmax(0,1fr) auto; }
   .agent-funding-quickfacts small { grid-column: 1 / -1; }
 }
+
+/* Do not compare independent Coinbase spot with WaterX's oracle using trade colors. */
+.live-page .chart-market-layout .price-chart.neutral .price-line { stroke: #9acbc0; }
+.live-page .chart-market-layout .price-chart.neutral .price-area { fill: rgba(154,203,192,.17); }
+.live-page .chart-market-layout .price-chart.neutral .latest-halo,
+.live-page .chart-market-layout .price-chart.neutral .latest-dot { fill: #9acbc0; stroke: none; }
+.source-trust-strip { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0;padding:0; }
+.source-trust-strip>div { min-width:0;padding:12px 10px;border:1px solid rgba(144,187,181,.35);background:rgba(20,43,46,.8);border-radius:8px; }
+.source-trust-strip span,.source-trust-strip b,.source-trust-strip small { display:block;overflow-wrap:anywhere; }
+.source-trust-strip span { color:#a9c5c2;font:600 10px/1.5 var(--mono);letter-spacing:.02em; }
+.source-trust-strip b { color:#e6ede9;font:600 16px/1.5 var(--mono);font-variant-numeric:tabular-nums;margin:5px 0; }
+.source-trust-strip small { color:#b4c6c0;font:11px/1.5 var(--mono); }
+.source-trust-strip .source-trust-unknown { border-color:rgba(235,189,112,.35); }
+.source-trust-strip .source-trust-unknown b { color:#f3cf9c; }
+@media(max-width:700px){.source-trust-strip{grid-template-columns:1fr;}.source-trust-strip>div{padding:9px 10px;}}
+
+/* Distinguish the official WaterX Chainlink settlement product from spot previews. */
+.oracle-authority-strip{display:flex;flex-wrap:wrap;align-items:baseline;gap:.45rem 1rem;padding:.8rem 1rem;margin:.6rem 0 1rem;border:1px solid #547b78;border-radius:.65rem;background:#183439;color:#d6e7df;font-size:.78rem;line-height:1.5}
+.oracle-authority-strip b{color:#cfecdb}
+.oracle-authority-strip span{flex:1 1 260px}
+.oracle-authority-strip a{color:#bcdfd7;text-decoration:underline;text-underline-offset:3px}

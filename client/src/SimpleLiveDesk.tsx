@@ -1,5 +1,4 @@
 import * as React from "react";
-import "./SimpleLiveDesk.css";
 
 type Interval = 5 | 15;
 type Round = { id: string; startMs: number; expiryMs: number };

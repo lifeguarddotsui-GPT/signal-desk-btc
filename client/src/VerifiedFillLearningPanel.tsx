@@ -37,7 +37,12 @@ export function VerifiedFillLearningPanel({interval}:{interval:5|15}){
         <span>Held-out net P&L <b>{report.testNetUsd.toFixed(2)} USD</b></span>
         <span>Trading authority <b>OFF</b></span>
       </div>
-      {report.reasons.map(x=><p key={x}>{x}</p>)}
+      {report.researchSelection&&<div className="fill-research-selected">
+        <strong>Research timing candidate · {report.researchSelection.band.replaceAll("_"," ")} · {report.researchSelection.side}</strong>
+        <p>Selected with {report.researchSelection.trainN} training and {report.researchSelection.calibrationN} calibration fills; then evaluated on {report.researchSelection.heldOutN} untouched test fills. Held-out mean net: {report.researchSelection.heldOutMeanNetUsd==null?"Insufficient observations":`${report.researchSelection.heldOutMeanNetUsd.toFixed(2)}`}.</p>
+        <p>This is a retrospective, selection-biased research candidate. It cannot be promoted to a trade timing recommendation.</p>
+      </div>}
+      {report.reasons.map(x=><p key={x}>{x}</p>)
       <div className="fill-research-scroll"><table>
         <thead><tr><th>Entry period</th><th>Side</th><th>Fills</th><th>Correct</th><th>Mean net</th><th>+$1–$2 if won</th></tr></thead>
         <tbody>{report.testCohorts.map(row=><tr key={row.band+row.side}>

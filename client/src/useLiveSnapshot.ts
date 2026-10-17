@@ -4,15 +4,22 @@ import {validateDecisionSnapshot,validateLiveEnvelope,type LiveSnapshotEnvelope}
 export const snapshotRetryDelay=(attempt:number,random=Math.random)=>Math.min(2500,300*2**attempt)+Math.floor(random()*200);
 export const transientSnapshotFailure=(code:string)=>/^(NETWORK_ERROR|REQUEST_TIMEOUT|HTTP_(408|429|500|502|503|504))$/.test(code);
 type RefreshStage="REQUEST_START"|"BROWSER_RECEIPT"|"BROWSER_RENDER";
+const lastBrowserReport = new Map<string,number>();
+export const snapshotRefreshDelay=(refreshMs:number,hidden:boolean)=>
+  hidden?Math.max(refreshMs,30_000):refreshMs;
 function clientEvent(interval:5|15,stage:RefreshStage,attempt:number,elapsedMs:number,payload?:LiveSnapshotEnvelope){
-  if(!payload?.round||!payload.decision)return;
+  if(!payload?.round||!payload.decision||typeof document!=="undefined"&&document.visibilityState==="hidden")return;
+  // Diagnostics are sampled to reduce needless browser POSTs and billed requests.
+  const key=`${interval}:${stage}`,now=Date.now();
+  if(now-(lastBrowserReport.get(key)??-Infinity)<60_000)return;
+  lastBrowserReport.set(key,now);
   // Strict, address-free fields only. Server treats browser clocks as untrusted diagnostics.
   void fetch("/api/waterx/decision-client-event",{method:"POST",headers:{"Content-Type":"application/json"},
     credentials:"omit",body:JSON.stringify({interval,stage,attempt,elapsedMs:Math.max(0,elapsedMs),
       roundId:payload.round.id,streamId:payload.decision.streamId,stateVersion:payload.decision.stateVersion}),
     keepalive:true}).catch(()=>{});
 }
-export function useLiveSnapshot<T extends LiveSnapshotEnvelope>(url:string,interval:5|15,enabled=true,refreshMs=3000){
+export function useLiveSnapshot<T extends LiveSnapshotEnvelope>(url:string,interval:5|15,enabled=true,refreshMs=5000){
   const [data,setData]=useState<T|null>(null),[atomicData,setAtomicData]=useState<T|null>(null);
   const [error,setError]=useState(""),[errorUrl,setErrorUrl]=useState("");
   const [loading,setLoading]=useState(true),[updated,setUpdated]=useState(0),[atomicUpdated,setAtomicUpdated]=useState(0);
@@ -36,6 +43,7 @@ export function useLiveSnapshot<T extends LiveSnapshotEnvelope>(url:string,inter
     });
     async function refresh(){
       if(!active())return;
+      timer=undefined;
       setLoading(true);
       for(let attempt=0;attempt<3&&active();attempt++){
         const started=performance.now(),request=new AbortController();
@@ -78,10 +86,15 @@ export function useLiveSnapshot<T extends LiveSnapshotEnvelope>(url:string,inter
           clearTimeout(timeout);owner.signal.removeEventListener("abort",cancel);
         }
       }
-      if(active()){setLoading(false);timer=setTimeout(()=>void refresh(),refreshMs);}
+      if(active()){setLoading(false);timer=setTimeout(()=>void refresh(),snapshotRefreshDelay(refreshMs,document.visibilityState==="hidden"));}
     }
+    const onVisible=()=>{
+      if(document.visibilityState!=="visible"||!active()||timer===undefined)return;
+      clearTimeout(timer);timer=setTimeout(()=>void refresh(),0);
+    };
+    document.addEventListener("visibilitychange",onVisible);
     void refresh();
-    return()=>{owner.abort();if(timer)clearTimeout(timer);};
+    return()=>{document.removeEventListener("visibilitychange",onVisible);owner.abort();if(timer)clearTimeout(timer);};
   },[url,interval,enabled,refreshMs,nonce]);
   useEffect(()=>{
     if(!atomicData?.decision)return;

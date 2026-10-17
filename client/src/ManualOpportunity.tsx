@@ -9,6 +9,7 @@ import { TWO_STAGE_STRATEGY } from "../../shared/two-stage";
 import { evaluateEntryWindow,type Direction } from "../../shared/entry-window";
 import {summarizeTriad} from "../../shared/stage-congruence";
 import {TradeReadinessPanel} from "./TradeReadinessPanel";
+import {SimpleLiveDesk} from "./SimpleLiveDesk";
 import {operationalTimingWindow} from "../../shared/operational-timing";
 
 type Interval = 5 | 15;
@@ -24,6 +25,8 @@ type Props = {
   marketReference?: { price: number | null; quality: string; source: string };
   marketAsks?: {up:number|null;down:number|null};
   marketProbabilities?:{up:number|null;down:number|null};
+  quoteFresh?: boolean;
+  quoteAtMs?: number | null;
   comparison?: { price: number | null; source: string; receivedAtMs: number | null };
   fixtureName?: string | null;
   children?: React.ReactNode;
@@ -155,7 +158,7 @@ function TwoStageDeskRows({ projection, round, interval, now }: {
 
 export function ManualOpportunity({
   view, now, interval = view.decision?.intervalMinutes ?? 5, round, onIntervalChange, onRetry, refresh,
-  marketReference, marketAsks, marketProbabilities, comparison, fixtureName, children, economics,
+  marketReference, marketAsks, marketProbabilities, quoteFresh = false, quoteAtMs = null, comparison, fixtureName, children, economics,
 }: Props) {
   const [compactPrices,setCompactPrices]=React.useState(()=>typeof window!=="undefined"&&window.matchMedia("(max-width: 900px)").matches);
   const [pricesExpanded,setPricesExpanded]=React.useState(false);
@@ -291,6 +294,11 @@ export function ManualOpportunity({
     stale.receivedAtMs <= now;
 
   return <section className={`manual-opportunity compact-decision${children ? " has-chart" : ""}${locked ? " is-locked" : ""}`} aria-label="Exact-round research state" aria-busy={loading}>
+    <SimpleLiveDesk interval={interval} now={now} round={exactRound} referencePrice={referencePrice}
+      referenceConfirmed={confirmed} quoteFresh={quoteFresh} quoteAtMs={quoteAtMs}
+      upAsk={marketAsks?.up ?? null} downAsk={marketAsks?.down ?? null}/>
+    <details className="desk-advanced">
+      <summary>Advanced research, chart and diagnostics</summary>
     <div className="desk-primary-card">
     <header className="desk-round-header">
       <div className="desk-round-identity">
@@ -404,6 +412,7 @@ export function ManualOpportunity({
         <span>Snapshot revision</span><b>{!exactDecision || view.snapshotVersion == null ? "Not available" : `v${view.snapshotVersion} · ${time(view.componentTimestamps.snapshotPublishedAtMs)}`}</b>
       </div>
       <p className="desk-detail-note">This is read-only market research, not a forecast or trading instruction. Comparison price does not determine WaterX settlement. Automatic execution is disabled.</p>
+    </details>
     </details>
   </section>;
 }

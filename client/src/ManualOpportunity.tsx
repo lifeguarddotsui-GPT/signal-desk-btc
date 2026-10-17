@@ -27,6 +27,7 @@ type Props = {
   marketProbabilities?:{up:number|null;down:number|null};
   quoteFresh?: boolean;
   quoteAtMs?: number | null;
+  onAdvancedToggle?: (open: boolean) => void;
   comparison?: { price: number | null; source: string; receivedAtMs: number | null };
   fixtureName?: string | null;
   children?: React.ReactNode;
@@ -158,7 +159,7 @@ function TwoStageDeskRows({ projection, round, interval, now }: {
 
 export function ManualOpportunity({
   view, now, interval = view.decision?.intervalMinutes ?? 5, round, onIntervalChange, onRetry, refresh,
-  marketReference, marketAsks, marketProbabilities, quoteFresh = false, quoteAtMs = null, comparison, fixtureName, children, economics,
+  marketReference, marketAsks, marketProbabilities, quoteFresh = false, quoteAtMs = null, onAdvancedToggle, comparison, fixtureName, children, economics,
 }: Props) {
   const [compactPrices,setCompactPrices]=React.useState(()=>typeof window!=="undefined"&&window.matchMedia("(max-width: 900px)").matches);
   const [pricesExpanded,setPricesExpanded]=React.useState(false);
@@ -297,7 +298,7 @@ export function ManualOpportunity({
     <SimpleLiveDesk interval={interval} now={now} round={exactRound} referencePrice={referencePrice}
       referenceConfirmed={confirmed} quoteFresh={quoteFresh} quoteAtMs={quoteAtMs}
       upAsk={marketAsks?.up ?? null} downAsk={marketAsks?.down ?? null}/>
-    <details className="desk-advanced">
+    <details className="desk-advanced" onToggle={event => onAdvancedToggle?.(event.currentTarget.open)}>
       <summary>Advanced research, chart and diagnostics</summary>
     <div className="desk-primary-card">
     <header className="desk-round-header">

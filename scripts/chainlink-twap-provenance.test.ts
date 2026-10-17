@@ -30,6 +30,6 @@ test("chart shows authoritative TWAP source but never assumes authenticated Chai
  assert.match(src,/Colors and area metrics do not predict the official result/);
  assert.match(src,/verifiedWaterxTwapSettlement/);
  assert.match(src,/anchor=\{chartReference\}/);
- assert.match(src,/const tone = anchor==null\?"neutral"/);
+ assert.match(src,/const tone = anchor==null\|\|!latestFresh\|\|latest\?\.price==null\?"neutral"/);
  assert.match(src,/splitAtReference\(/);
 });

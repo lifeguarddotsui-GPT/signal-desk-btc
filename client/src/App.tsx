@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link, Route, Switch, useLocation } from "wouter";
 import { Activity, BookOpen, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldAlert, ShieldCheck, Waves, X } from "lucide-react";
 import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
+import { computeAreaSummary, splitAtReference } from "./round-area-metrics";
 import {CHAINLINK_BTC_TWAP60_REFERENCE,verifiedWaterxTwapSettlement} from "../../shared/chainlink-twap-provenance";
 import { insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxReference, sseReconnectUrl } from "./waterx-ui-contract";
 import { mergeComparisonPoints } from "./chart-contract";
@@ -179,7 +180,7 @@ function IntervalSwitch({ value, onChange }: { value: Interval; onChange: (n: In
 
 function LivePage() {
   const [interval, setInterval] = useIntervalPreference();
-  const [chartWindow, setChartWindow] = useState<"observed" | "round" | 5 | 15>("observed");
+  const [chartWindow, setChartWindow] = useState<"observed" | "round" | 5 | 15>("round");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const rolloverSince = useRef<number | null>(null);
@@ -202,7 +203,7 @@ function LivePage() {
   const bluewaterUrl = `/api/waterx/bluewater?interval=${interval}`;
   const live = useLiveSnapshot<LivePayload>(liveUrl, interval, !fixtureMode);
   const validatedAtomicSnapshot = useRef<{ url: string; data: LivePayload } | null>(null);
-  const chart = useApi<ChartPayload>(chartUrl, 30000, !fixtureMode && advancedOpen);
+  const chart = useApi<ChartPayload>(chartUrl, 30000, !fixtureMode);
   const learning = useApi<Record<string, unknown>>(learningUrl, 60000, !fixtureMode && advancedOpen);
   const health = useApi<WaterxHealth>(healthUrl, 30000, !fixtureMode && advancedOpen);
   const research = useApi<ResearchReport>(researchUrl, 60000, !fixtureMode && advancedOpen);
@@ -490,7 +491,7 @@ function LivePage() {
   const streamCursor = useRef("");
   const pendingPaint = useRef<{ id: string; receivedAt: number } | null>(null);
   useEffect(() => {
-    if (fixtureMode || !advancedOpen) { setStreamStatus(fixtureMode ? "FIXTURE" : "CONNECTING"); return; }
+    if (fixtureMode) { setStreamStatus("FIXTURE"); return; }
     let disposed = false, retry: number | undefined, wait = 1000;
     const markFeedGap = (reason: string) => {
       const at = Date.now();
@@ -543,7 +544,7 @@ function LivePage() {
     const onVisible = () => { if (document.visibilityState === "visible" && streamRef.current?.readyState === EventSource.CLOSED) connect(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { disposed = true; if (retry) clearTimeout(retry); streamRef.current?.close(); document.removeEventListener("visibilitychange", onVisible); };
-  }, [fixtureMode, advancedOpen]);
+  }, [fixtureMode]);
   const latestStreamPoint = stream.at(-1);
   const latestStreamAt = latestStreamPoint
     ? typeof latestStreamPoint.at === "number" ? latestStreamPoint.at : Date.parse(latestStreamPoint.at)
@@ -579,6 +580,12 @@ function LivePage() {
     );
   }, [acceptedPoints, stream, fixtureMode, fixtureNow]);
 
+  const chartReference=roundCurrent&&waterxReferenceValid&&round?round.referencePrice:null;
+  const areaSummary=roundCurrent&&round&&chartReference!=null
+    ?computeAreaSummary(merged,chartReference,round.startMs,round.expiryMs,serverNow)
+    :null;
+  const mmss=(ms:number)=>`${Math.floor(ms/60000)}:${String(Math.floor(ms/1000)%60).padStart(2,"0")}`;
+  const asPct=(num:number|null|undefined)=>num==null?"—":`${num.toFixed(1)}%`;
   return <div className="page live-page">
       <div className="desk-toolbar">
       <div className="desk-market"><span className="eyebrow">LIVE DESK</span></div>
@@ -604,7 +611,7 @@ function LivePage() {
           down:marketQuoteDisplay.down.grossAvailable?marketQuoteDisplay.down.priceCents:null}}
         quoteFresh={marketQuoteDisplay.fresh}
         quoteAtMs={Number.isFinite(marketQuoteAtMs) ? marketQuoteAtMs : null}
-        onAdvancedToggle={setAdvancedOpen}
+
         marketProbabilities={{up:oddsDisplay.up.probability,down:oddsDisplay.down.probability}}
         marketReference={{
           price: waterxReferenceValid ? round?.referencePrice ?? null : null,
@@ -623,22 +630,30 @@ function LivePage() {
       >
       <div className="chart-market-layout">
         <section className="chart-panel">
-        <div className="section-head chart-head"><div><div className="eyebrow">COINBASE COMPARISON DATA</div><h2>Coinbase BTC / USD · not WaterX</h2><p>Separate Coinbase spot feed, not the WaterX live preview or Chainlink settlement reference. Its direction may disagree with WaterX.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
-        <div className="source-trust-strip" aria-label="Distinct BTC price sources">
-          <div><span>COINBASE SPOT · COMPARISON ONLY</span><b>{coinbasePriceFresh ? fmtUsd(coinbaseDisplayPrice) : "Unavailable"}</b><small>Not the WaterX settlement feed</small></div>
-          <div><span>WATERX STARTING REFERENCE</span><b>{roundCurrent && waterxReferenceValid ? fmtUsd(round?.referencePrice) : "Unavailable"}</b><small>{roundCurrent && round?.anchorConfirmed === true ? "Provider confirmed" : "Provider unconfirmed · do not treat as final"}</small></div>
-          <div className="source-trust-unknown"><span>WATERX LIVE ORACLE PREVIEW</span><b>Not supplied here</b><small>View the same active market on WaterX</small></div>
+        <div className="section-head chart-head"><div><div className="eyebrow">BTC ROUND PRICE CHART · LIVE COMPARISON</div><h2>BTC / USD · {interval} minute round</h2><p>Green = Coinbase above WaterX opening reference · Red = below. Not WaterX Oracle or settlement.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
+        <div className="bw-chart-reference-bar">
+          <span>WaterX price to beat: <strong>{chartReference!=null?fmtUsd(chartReference):"Unavailable"}</strong></span>
+          <span>{chartReference==null?"No matched reference":round?.anchorConfirmed?"Provider confirmed":"Provisional reference"}</span>
+          <span>Coinbase: <strong>{coinbasePriceFresh?fmtUsd(coinbaseDisplayPrice):"Stale / unavailable"}</strong></span>
         </div>
-        <div className="oracle-authority-strip" role="note"><b>Official settlement: Chainlink BTC/USD TWAP60</b><span>The WaterX Oracle chart is a preview; this app has no authenticated live Chainlink stream. Do not reinterpret Coinbase as Chainlink.</span><a href={CHAINLINK_BTC_TWAP60_REFERENCE} target="_blank" rel="noopener noreferrer">Official Chainlink TWAP60 stream reference ↗</a></div>
-        <div className="chart-cross-source-caution" role="note"><strong>DO NOT TRADE FROM THIS CHART COLOR</strong> Coinbase spot and the WaterX Oracle preview are separate feeds. This chart is deliberately neutral and has NO WaterX price-to-beat line. WaterX may be green while Coinbase is lower. Confirm the exact WaterX live market and its settlement reference before making any order. {roundCurrent && round?.url?.startsWith("https://waterx.app/") && <a href={round.url} target="_blank" rel="noopener noreferrer" className="chart-official-link">Check this exact round on WaterX ↗</a>}</div>
+        <p className="bw-chart-source-note">Comparison visualization only. Coinbase is a different feed from WaterX's Chainlink TWAP60 settlement. Colors and area metrics do not predict the official result.</p>
           {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <div className="chart-empty"><Activity size={22} /><strong>Archive unavailable</strong><span>The live comparison feed remains independent.</span></div> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
-             <PriceChart points={merged} interval={interval} anchor={null} referenceConfirmed={false} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
+             <PriceChart points={merged} interval={interval} anchor={chartReference} referenceConfirmed={round?.anchorConfirmed===true} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
           }
+        <div className="bw-area-metrics" aria-label="Comparison time and signed-area measurements">
+          <div className="bw-area-metric is-above"><small>Green time · observed</small><strong>{areaSummary&&areaSummary.observedMs>0?mmss(areaSummary.aboveMs):"—"}</strong><span>{areaSummary&&areaSummary.observedMs>0?asPct(areaSummary.aboveTimePercent):"No coverage"}</span></div>
+          <div className="bw-area-metric is-below"><small>Red time · observed</small><strong>{areaSummary&&areaSummary.observedMs>0?mmss(areaSummary.belowMs):"—"}</strong><span>{areaSummary&&areaSummary.observedMs>0?asPct(areaSummary.belowTimePercent):"No coverage"}</span></div>
+          <div className="bw-area-metric"><small>Above area share</small><strong>{asPct(areaSummary?.aboveAreaPercent)}</strong><span>USD × time</span></div>
+          <div className="bw-area-metric"><small>Below area share</small><strong>{asPct(areaSummary?.belowAreaPercent)}</strong><span>USD × time</span></div>
+          <div className="bw-area-metric"><small>Net area bias</small><strong>{areaSummary?.netAreaBiasPercent!=null?`${areaSummary.netAreaBiasPercent>0?"+":""}${areaSummary.netAreaBiasPercent.toFixed(1)}%`:"—"}</strong><span>Descriptive only</span></div>
+          <div className="bw-area-metric"><small>Current streak / crosses</small><strong>{areaSummary?.currentSide?`${areaSummary.currentSide==="ABOVE"?"Green":"Red"} ${mmss(areaSummary.currentStreakMs)}`:"—"}</strong><span>{areaSummary?.observedMs?`${areaSummary.crossings} crosses`:"No coverage"}</span></div>
+        </div>
+        <p className="bw-area-coverage">Observed coverage: {areaSummary?asPct(areaSummary.coveragePercent):"—"} of elapsed round. Gaps over 14s are excluded; percentages describe sampled intervals only, not a guaranteed winning probability.</p>
          {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive unavailable. Live comparison observations remain visible where available.</div>}
           {chartPayload?.coverage?.partial && (typeof chartWindow === "number" || chartWindow === "round") && <div className="gap-caption">Rolling archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. This does not describe complete coverage of the current round.</div>}
         {chartPayload && !archiveMatches && <div className="gap-caption">Archive source mismatch: historical points withheld; expected Coinbase comparison data.</div>}
         
-        <div className="legend-row"><span><i className="legend-price" /> Coinbase spot (comparison only)</span><span>WaterX starting reference shown separately — not overlaid on Coinbase</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
+        <div className="legend-row"><span><i className="legend-price" /> Coinbase spot (comparison only)</span><span>Dashed line: WaterX start reference · comparison only</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
         <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live observations{typeof chartWindow === "number" ? ` · rolling archive coverage ${chartPayload?.coverage?.percent == null ? "not reported" : `${chartPayload.coverage.percent}%`}` : " · active-round window; archive coverage is separate"}</span></div>
       </section>
       </div>
@@ -695,9 +710,8 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
     else chunk.push(p);
   });
   if (chunk.length) chunks.push(chunk);
-  // Coinbase and WaterX/Chainlink are different price feeds. A cross-source
-  // comparison CANNOT identify WaterX UP or DOWN, so never render red/green.
-  const tone = "neutral";
+  // Above/below is a cross-source comparison ONLY, not a settlement sign.
+  const tone = anchor==null?"neutral":latest?.price==null?"neutral":latest.price>=anchor?"positive":"negative";
   const latestAt = latest ? Number(latest.at) : NaN;
   const latestFresh = Number.isFinite(latestAt) && latestAt <= nowAt + 1000 && nowAt-latestAt <= 14000;
   const selectAt = (clientX: number) => {
@@ -726,19 +740,29 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
     </div>
     <div className="chart-price-labels">
       <span>COINBASE SPOT ONLY {latestFresh ? "· fresh" : "· historical/stale"} <strong>{fmtUsd(latest?.price)}</strong></span>
-      <span>WaterX live oracle preview is NOT available from this Coinbase chart. Compare it directly on WaterX.</span>
+      <span>{anchor==null?"No matched WaterX opening reference":`Relative to WaterX opening reference ${fmtUsd(anchor)} · ${referenceConfirmed?"confirmed":"provisional"} · NOT settlement`}</span>
     </div>
     {samples.length ? <><div className="chart-measure">
        <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase spot observations only, neutral color, not WaterX prediction or settlement, over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
         <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
-         {/* Do not shade above/below zones when plotting Coinbase against a different WaterX oracle. */}
+         {anchor!=null&&<><rect x={left} y={top} width={plotRight-left} height={Math.max(0,y(anchor)-top)} className="bw-above-zone"/><rect x={left} y={y(anchor)} width={plotRight-left} height={Math.max(0,H-bottom-y(anchor))} className="bw-below-zone"/></>}
          {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); const axisPrice = width < 500 ? new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(price) : fmtUsd(price); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 7} y={py + 4} textAnchor="end" className="axis-label">{axisPrice}</text></g>; })}
          {axisTicks.map(tick=><line key={tick.at} x1={x(tick.at)} x2={x(tick.at)} y1={top} y2={H-bottom} className="time-tick" />)}
           {nowInside && <><rect x={nowX} y={top} width={Math.max(0, plotRight - nowX)} height={H - top - bottom} className="future-shade" /><line x1={nowX} x2={nowX} y1={top} y2={H - bottom} className="now-line" /><text x={nowLabelX} y={top + 13} textAnchor={nowLabelRightAligned ? "end" : "start"} className="now-label">NOW</text></>}
          {anchor != null && <line x1={left} x2={plotRight} y1={y(anchor)} y2={y(anchor)} className="anchor-line" />}
-        {chunks.map((segment, idx) => <g key={idx}>
-          {segment.length > 1 && <polygon points={`${x(Number(segment[0].at))},${H - bottom} ${segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} ${x(Number(segment.at(-1)!.at))},${H - bottom}`} className="price-area" />}
-          {segment.length > 1 && <polyline points={segment.map(p => `${x(Number(p.at))},${y(p.price!)}`).join(" ")} className="price-line" />}
+        {anchor!=null ? chunks.flatMap((chunk,ci)=>chunk.flatMap((p,pi)=>{
+          if(pi===0)return [];
+          const prev=chunk[pi-1];
+          const at0=Number(prev.at),at1=Number(p.at);
+          if(at1-at0>14000||at1<=at0)return [];
+          return splitAtReference({at:at0,price:prev.price!},{at:at1,price:p.price!},anchor)
+            .map((seg,si)=><g key={`${ci}-${pi}-${si}`}>
+              <polygon points={`${x(seg.startMs)},${y(anchor)} ${x(seg.startMs)},${y(seg.startPrice)} ${x(seg.endMs)},${y(seg.endPrice)} ${x(seg.endMs)},${y(anchor)}`} className={seg.side==="ABOVE"?"bw-price-fill-above":"bw-price-fill-below"}/>
+              <line x1={x(seg.startMs)} y1={y(seg.startPrice)} x2={x(seg.endMs)} y2={y(seg.endPrice)}
+                className={seg.side==="ABOVE"?"bw-price-line-above":"bw-price-line-below"}/>
+            </g>);
+        })) : chunks.map((segment,idx)=><g key={idx}>
+          {segment.length>1&&<polyline points={segment.map(p=>`${x(Number(p.at))},${y(p.price!)}`).join(" ")} className="price-line"/>}
         </g>)}
          {latest?.price != null && <g><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="8" className="latest-halo" /><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="4" className="latest-dot" /></g>}
         {active?.price != null && <g><line x1={x(Number(active.at))} x2={x(Number(active.at))} y1={top} y2={H - bottom} className="inspect-line" /><circle cx={x(Number(active.at))} cy={y(active.price)} r="5" className="inspect-point" /></g>}

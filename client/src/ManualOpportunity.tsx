@@ -295,11 +295,12 @@ export function ManualOpportunity({
     stale.receivedAtMs <= now;
 
   return <section className={`manual-opportunity compact-decision${children ? " has-chart" : ""}${locked ? " is-locked" : ""}`} aria-label="Exact-round research state" aria-busy={loading}>
-    <SimpleLiveDesk interval={interval} now={now} round={exactRound} referencePrice={referencePrice}
-      referenceConfirmed={confirmed} quoteFresh={quoteFresh} quoteAtMs={quoteAtMs}
-      upAsk={marketAsks?.up ?? null} downAsk={marketAsks?.down ?? null}/>
-    <details className="desk-advanced" onToggle={event => onAdvancedToggle?.(event.currentTarget.open)}>
-      <summary>Advanced research, chart and diagnostics</summary>
+    <div className="bw-primary-grid">
+      {children && <div className="desk-chart-slot">{children}</div>}
+      <SimpleLiveDesk interval={interval} now={now} round={exactRound} referencePrice={referencePrice}
+        referenceConfirmed={confirmed} quoteFresh={quoteFresh} quoteAtMs={quoteAtMs}
+        upAsk={marketAsks?.up ?? null} downAsk={marketAsks?.down ?? null}/>
+    </div>
     <div className="desk-primary-card">
     <header className="desk-round-header">
       <div className="desk-round-identity">
@@ -383,7 +384,6 @@ export function ManualOpportunity({
     </div>
     <p className="desk-cross-source-note">WaterX live Oracle preview and official Chainlink BTC/USD TWAP settlement are NOT Coinbase spot. The two feeds can disagree in sign. Never use this difference as a YES/NO trade signal or guaranteed settlement outcome.</p>
     </details>
-    {children&&<div className="desk-chart-slot">{children}</div>}
     <details className="desk-details">
       <summary>Details</summary>
       <div className="desk-policy-choice">
@@ -413,7 +413,6 @@ export function ManualOpportunity({
         <span>Snapshot revision</span><b>{!exactDecision || view.snapshotVersion == null ? "Not available" : `v${view.snapshotVersion} · ${time(view.componentTimestamps.snapshotPublishedAtMs)}`}</b>
       </div>
       <p className="desk-detail-note">This is read-only market research, not a forecast or trading instruction. Comparison price does not determine WaterX settlement. Automatic execution is disabled.</p>
-    </details>
     </details>
   </section>;
 }

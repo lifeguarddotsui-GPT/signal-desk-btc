@@ -669,7 +669,11 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
     else chunk.push(p);
   });
   if (chunk.length) chunks.push(chunk);
-  // Coinbase and WaterX/Chainlink are different price feeds. A cross-source\n  // comparison CANNOT identify WaterX UP or DOWN, so never render red/green.\n  const tone = "neutral";\n  const latestAt = latest ? Number(latest.at) : NaN;\n  const latestFresh = Number.isFinite(latestAt) && latestAt <= nowAt + 1000 && nowAt-latestAt <= 14000;
+  // Coinbase and WaterX/Chainlink are different price feeds. A cross-source
+  // comparison CANNOT identify WaterX UP or DOWN, so never render red/green.
+  const tone = "neutral";
+  const latestAt = latest ? Number(latest.at) : NaN;
+  const latestFresh = Number.isFinite(latestAt) && latestAt <= nowAt + 1000 && nowAt-latestAt <= 14000;
   const selectAt = (clientX: number) => {
     const bounds = svgRef.current?.getBoundingClientRect();
     if (!bounds || !samples.length) return;

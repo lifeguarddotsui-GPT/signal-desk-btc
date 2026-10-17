@@ -68,3 +68,25 @@ test("no model, no full fill or no verified TWAP label means no trade-ready timi
  assert.equal(r.testN,0);
  assert.equal(r.qualifiedEdge,false);
 });
+
+test("time cohort is learned on train/cal only, then frozen before held-out outcomes",()=>{
+  const rows=Array.from({length:240},(_,i)=>{
+    const r=evidence(i),band=i%4;
+    const win=band===0?(Math.floor(i/4)%4!==0):band===2;
+    return {...r,settlement:{...r.settlement,settlementPrice:win?81010:80990}};
+  });
+  const now=rows.at(-1)!.expiryMs+120000;
+  const first=researchVerifiedFills(rows,5,now);
+  assert.equal(first.status,"OBSERVATIONAL_TEST_AVAILABLE");
+  assert.equal(first.researchSelection?.band,"FIRST_20_PERCENT");
+  assert.equal(first.researchSelection?.side,"UP");
+  assert.equal(first.researchSelection?.canTrade,false);
+  const altered=rows.map((r,i)=>i<192?r:{...r,settlement:{...r.settlement,
+    settlementPrice:r.settlement.settlementPrice>81000?80990:81010}});
+  const second=researchVerifiedFills(altered,5,now);
+  assert.equal(second.researchSelection?.band,first.researchSelection?.band);
+  assert.equal(second.researchSelection?.trainingMeanNetUsd,first.researchSelection?.trainingMeanNetUsd);
+  assert.equal(second.researchSelection?.calibrationMeanNetUsd,first.researchSelection?.calibrationMeanNetUsd);
+  assert.notEqual(second.researchSelection?.heldOutMeanNetUsd,first.researchSelection?.heldOutMeanNetUsd);
+  assert.equal(second.automaticPromotion,false);
+});

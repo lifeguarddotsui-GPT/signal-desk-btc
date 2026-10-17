@@ -271,7 +271,7 @@ test("missing probabilities have one waiting message and no failed qualification
   for(const interval of [5,15] as const){
     const {decision:current}=decision(interval,{market:null});
     const html=render(interval,viewFor(current,false,health("PROBABILITIES_MISSING")));
-    assert.equal((html.match(/Waiting for WaterX odds\./g)??[]).length,1);
+    assert.equal((html.split('<details class="bw-focus-archive"')[0].match(/Waiting for WaterX odds\./g)??[]).length,1);
     assert.match(html,/Not evaluated: missing odds/);
     assert.doesNotMatch(html,/0 of 4 conditions|Qualification progress|title="Fresh input"/);
     assert.match(html,/probability-up/);assert.match(html,/probability-down/);
@@ -279,14 +279,16 @@ test("missing probabilities have one waiting message and no failed qualification
   }
 });
 
-test("one shared primary card owns the responsive chart/sidebar and mobile prices can expand",()=>{
+test("focused chart leads the compact decision rail while extended research is off the default screen",()=>{
   const {round,decision:current}=decision(5);
   const html=renderToStaticMarkup(React.createElement(ManualOpportunity,{
     view:viewFor(current,true,health("CURRENT")),now,interval:5,round,
     children:React.createElement("section",{className:"chart-panel"},"Chart")}));
   assert.equal((html.match(/aria-label="WaterX market odds"/g)??[]).length,1);
   assert.equal((html.match(/class="desk-primary-card"/g)??[]).length,1);
-  assert.equal((html.match(/class="desk-chart-slot"/g)??[]).length,1);
+  assert.equal((html.match(/class="bw-focus-chart"/g)??[]).length,1);
+  assert.equal((html.match(/class="bw-focus-rail"/g)??[]).length,1);
+  assert.match(html,/<details class="bw-focus-archive"/);
   assert.match(html,/<details class="desk-price-details"/);
   assert.match(css,/grid-template-columns: minmax\(0,2fr\) minmax\(280px,1fr\)/);
   assert.match(css,/@media \(max-width: 900px\)/);

@@ -33,6 +33,6 @@ test("diagnostics never substitute oracle, claim profitable timing or submit ord
   assert.match(app,/marketProbabilities=\{\{up:oddsDisplay\.up\.probability/);
   assert.match(desk,/marketAsks\?\.up/);
   assert.match(panel,/WaterX market-implied odds/);
-  assert.match(panel,/\$6–\$8 GROSS TARGET RANGE/);
+  assert.match(panel,/Target: \+\$1 to \+\$2 on a winning \$5 position/);
   assert.doesNotMatch(panel,/signAndExecuteTransaction|placeOrder\(/);
 });

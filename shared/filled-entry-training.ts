@@ -112,9 +112,31 @@ export function researchVerifiedFills(rows:EntryFillEvidence[],interval:5|15,asO
     reasons.push("Requires >=60 train, >=24 calibration, >=30 untouched test verified whole-round fills after label embargo");
   if([training,calibration,test].some(part=>new Set(part.map(r=>r.settlement.settlementPrice>=r.settlement.anchorPrice?"UP":"DOWN")).size<2))
     reasons.push("Both WaterX official settlement outcomes must exist in each chronological partition");
+  // Research selection uses TRAIN and CALIBRATION ONLY; the untouched TEST
+  // cohort is evaluated after a candidate has already been frozen.
+  const trainResults=training.map(outcomeOfEntry),calResults=calibration.map(outcomeOfEntry);
+  const candidates=(!reasons.length?bands.flatMap(band=>(["UP","DOWN"] as const).map(side=>{
+    const train=trainResults.filter(r=>r.band===band&&r.row.side===side),
+      cal=calResults.filter(r=>r.band===band&&r.row.side===side);
+    const avg=(items:FilledEntryResult[])=>items.length?
+      items.reduce((total,r)=>total+r.netUsd,0)/items.length:0;
+    const classes=(items:FilledEntryResult[])=>new Set(items.map(r=>r.correct)).size===2;
+    return {band,side,trainN:train.length,calibrationN:cal.length,
+      trainingMeanNetUsd:avg(train),calibrationMeanNetUsd:avg(cal),
+      eligible:train.length>=10&&cal.length>=6&&classes(train)&&classes(cal)&&avg(train)>0&&avg(cal)>0};
+  })).filter(x=>x.eligible):[]).sort((a,b)=>b.calibrationMeanNetUsd-a.calibrationMeanNetUsd||
+    b.trainingMeanNetUsd-a.trainingMeanNetUsd||a.band.localeCompare(b.band)||a.side.localeCompare(b.side));
+  const chosen=candidates[0]??null;
+  const selectedTest=chosen?test.map(outcomeOfEntry).filter(r=>r.band===chosen.band&&r.row.side===chosen.side):[];
+  const researchSelection=chosen?{band:chosen.band,side:chosen.side,trainN:chosen.trainN,
+    calibrationN:chosen.calibrationN,trainingMeanNetUsd:chosen.trainingMeanNetUsd,
+    calibrationMeanNetUsd:chosen.calibrationMeanNetUsd,heldOutN:selectedTest.length,
+    heldOutMeanNetUsd:selectedTest.length?
+      selectedTest.reduce((total,r)=>total+r.netUsd,0)/selectedTest.length:null,
+    researchOnly:true,canTrade:false,selectionBiasWarning:"Observed fills are selected, not a representative sample of all available prices."}:null;
   const results=test.map(outcomeOfEntry),report={interval,status:reasons.length?"INSUFFICIENT_VERIFIED_FILLS":"OBSERVATIONAL_TEST_AVAILABLE",
     generatedAtMs:asOfMs,totalInput:rows.filter(r=>r.intervalMinutes===interval).length,
-    acceptedUniqueRounds:n,excluded,
+    acceptedUniqueRounds:n,excluded,researchSelection,
     partitionCounts:{training:training.length,calibration:calibration.length,test:test.length},
     testCohorts:cohortSummary(results),testNetUsd:results.reduce((v,r)=>v+r.netUsd,0),
     testCorrect:results.filter(r=>r.correct).length,

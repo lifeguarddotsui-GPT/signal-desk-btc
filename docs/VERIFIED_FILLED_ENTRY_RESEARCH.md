@@ -35,8 +35,12 @@ All times are epoch milliseconds. Confirm match of exact round, side, market and
 - Isolate 5m and 15m. Four mutually exclusive clock fractions (0–20%,20–40%,40–70%,70–100%), stratified by YES/NO.
 - Keep one whole unique market/round per dataset record; chronological 60/20/20 training/calibration/untouched test, labeling embargo equal to interval duration.
 - Require at least 60 train, 24 calibration, 30 test and both outcomes per partition. Report missing and invalid evidence counts, test win/loss, actual net USD, average purchase cost, $1–$2 winning-return count and forecast model edge only where an independently qualified pre-entry forecast exists.
+- **Candidate timing research:** from TRAIN and CALIBRATION only, identify a (time band, YES/NO side) with at least 10 training and 6 calibration actual fills, both wins and losses, and positive mean net on both. Freeze the selected band before viewing the held-out TEST cohort. Display held-out count and mean realized net, with selection bias warning. Final TEST results cannot select or tune the band.
 - **Even a full dataset remains OBSERVATIONAL_TEST_AVAILABLE, NOT an approved strategy.** Validate an independent probability model and all-round unselected baselines on later non-overlapping data, compare post-fee predictive expected value and confidence bands, and independently verify full-size execution quotes.
 - Losses can be the entire $5 plus costs. Explicit fail-closed on unresolved/contradictory labels and after-entry forecasts.
 
 ## Cost and production safety
 This patch does not change collection cadence, visitor-only mode, database schema, agent trading flags, wallet signing or keeper withdrawal. Training is a manually invoked offline step and makes **zero Replit production database queries**.
+
+## Learning page local import
+Use Learning → Executed fills / offline training → choose the externally reconciled JSON file. This evaluates the same validated schema for the selected 5m/15m interval entirely inside your browser, with no Replit storage or network upload. It is not automatic acquisition or cryptographic verification of WaterX receipts. Without actual confirmed fill and settlement proofs, the section intentionally says no eligible dataset rather than returning a fabricated success rate.

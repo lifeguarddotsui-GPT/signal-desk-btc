@@ -14,6 +14,12 @@
 | Browser-independent trading worker absent | `shadowWorkerTick` is development-only and intentionally cannot submit. Live collectors depend on visitor/Autoscale behavior. | Dedicated bounded scheduled worker under separate runtime, with durable event source, idempotent checkpoint, health/lease, exact-round dispatch and reconciliation. No extra paid machine by default; evaluate Cloudflare Free limits and observed latency before choosing hosting. |
 | Prediction advantage unvalidated | Research/advisory estimates and indicative public asks are not confirmed executable edge. | Chronological holdout samples, real historical submitted/fill price and fees, verified WaterX Chainlink TWAP60 settlement, calibration and confidence intervals. Monitor adverse selection, fill rate, missed-lock timing and realized net results. Do not promote a model based on a synthetic win-rate or chart color. |
 
+### Additional release-boundary findings
+
+- The current development schema for `bluewater_agents.status` allows PAUSED, SHADOW, LOSS_STOP and TARGET_REACHED, but **not LIVE**. Changing an environment variable cannot activate agent trading. A reviewed, additive status-transition migration and associated safety tests are required only *after* the pilot release is approved.
+- The existing `beginExecutionSubmission` path previously required an ARMED session and compatible account/policy, but did not itself consult the global database kill switch. This branch now requires `bluewater_agent_execution_control.disabled=false` before UNKNOWN-before-submit transition. The switch is **not** enabled.
+- Session permit verification now rejects a signed permit that does not explicitly opt into the one-order pilot. **That check is not durable permit consumption**: independent replay protection and one-order serial execution still must be implemented in the isolated signer.
+
 ## What this branch adds
 
 - `server/agent/submission-reconciliation.ts`: independently invoke a pinned Sui mainnet RPC for a **persisted** transaction digest and promote only `UNKNOWN -> ACCEPTED` when the *exact digest* has successful finalized transaction effects on the pinned network.

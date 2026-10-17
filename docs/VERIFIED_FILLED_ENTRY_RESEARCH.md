@@ -44,3 +44,20 @@ This patch does not change collection cadence, visitor-only mode, database schem
 
 ## Learning page local import
 Use Learning → Executed fills / offline training → choose the externally reconciled JSON file. This evaluates the same validated schema for the selected 5m/15m interval entirely inside your browser, with no Replit storage or network upload. It is not automatic acquisition or cryptographic verification of WaterX receipts. Without actual confirmed fill and settlement proofs, the section intentionally says no eligible dataset rather than returning a fabricated success rate.
+
+## 2026-10-17 additional Chainlink reference / chart correction
+
+The **official BTC 5m/15m outcome** is based on Chainlink's **BTC/USD TWAP60 stream** per WaterX market rules:
+https://data.chain.link/streams/btc-usd-twap-60s-streams
+
+We must distinguish THREE sources:
+1. **Coinbase spot**: independent comparison price (Blue Water current chart). Its position relative to the WaterX reference cannot define a WaterX UP/DOWN win. New UI uses a neutral line with no cross-source red/green fill.
+2. **WaterX live Oracle preview**: rendered on WaterX.app but NOT available in the current authenticated Blue Water provider payload. A screenshot at one instant showed WaterX Oracle $81,234.56 (above $81,224.97) while Coinbase showed $81,219 (below). An apparent $15.56 discrepancy is not a broken Coinbase tick; the feeds are different. Do not replace the missing Oracle preview with Coinbase or a guessed arithmetic average.
+3. **Official Chainlink TWAP60 settlement**: the contract-defined BTC/USD stream determines the final market result. The current source parser exposes WaterX-reported historical settlement/anchor/price and strict verification states. These can be displayed as **WaterX provider-verified post-expiry outcomes** only if status='verified', anchorConfirmed=true, settledAt>expiry, price/outcome agree, and not disputed. This is NOT an independent replay of cryptographic Chainlink report proof.
+
+The new Live Desk links to Chainlink's authoritative feed listing but **does not advertise a live Chainlink price** because no authenticated supported stream endpoint or credentials have been verified. It does not introduce unapproved paid access, polling, chart misrepresentation, or fund movement.
+
+### Release gate
+- Full CI on exact GitHub commit (four regression shards + production build/cost + isolated PostgreSQL) before syncing Replit.
+- Replit's republish action publishes the CURRENT editor checkout; do not publish a different older branch simply because GitHub was updated. Require clean checkout of exact frozen branch before promoting.
+- No new production data migrations, new worker, extra API polling, model qualification or order execution. User may choose to pause wagering until oracle/source alignment is resolved.

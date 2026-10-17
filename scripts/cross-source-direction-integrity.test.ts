@@ -9,7 +9,7 @@ test("opposite real screenshot prices may coexist; red is labeled Coinbase compa
   assert.ok(waterxOraclePreview-anchor>0);
   assert.ok(coinbaseSpot-anchor<0);
   assert.ok(Math.abs(waterxOraclePreview-coinbaseSpot-15.56)<1e-6);
-  assert.match(app,/const tone = anchor==null\?"neutral"/);
+  assert.match(app,/const tone = anchor==null\|\|!latestFresh\|\|latest\?\.price==null\?"neutral"/);
   assert.match(app,/COINBASE SPOT ONLY/);
   assert.match(app,/Comparison visualization only/);
   assert.match(app,/Colors and area metrics do not predict the official result/);

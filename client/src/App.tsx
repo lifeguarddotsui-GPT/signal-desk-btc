@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link, Route, Switch, useLocation } from "wouter";
 import { Activity, BookOpen, ChevronDown, CircleHelp, Clock3, Database, ExternalLink, Menu, RefreshCw, ShieldAlert, ShieldCheck, Waves, X } from "lucide-react";
 import { inspectedPointKey, pointerTimestamp } from "./chart-contract";
-import { computeAreaSummary, splitAtReference } from "./round-area-metrics";
+import { computeAreaSummary, computeRecentAreaSummary, splitAtReference } from "./round-area-metrics";
+import { spotMarketCheck } from "./spot-market-check";
 import {CHAINLINK_BTC_TWAP60_REFERENCE,verifiedWaterxTwapSettlement} from "../../shared/chainlink-twap-provenance";
 import { insertTimestampGaps, isActiveWaterxRound, isCoinbaseSource, isFreshWaterxSnapshot, isWaterxMarketSource, resetSseCursor, selectWaterxOddsDisplay, selectWaterxReference, sseReconnectUrl } from "./waterx-ui-contract";
 import { mergeComparisonPoints } from "./chart-contract";
@@ -321,7 +322,8 @@ function LivePage() {
   const comparisonFresh = !!comparison && Number.isFinite(comparisonMs) &&
     comparisonMs <= (Number.isFinite(serverNow) ? serverNow : now) + 1000 &&
     now - comparisonMs <= 14000 && now - comparisonMs >= -1000 &&
-    isCoinbaseSource(comparison.source);
+    isCoinbaseSource(comparison.source) && typeof comparison.price === "number" &&
+    Number.isFinite(comparison.price) && comparison.price > 0;
   const decisionMarket = !fixtureMode && atomicDecisionView.fresh
     ? atomicDecisionView.decision?.market ?? null : null;
   const atomicOdds = !fixtureMode ? atomicEnvelope?.odds ?? null : null;
@@ -553,12 +555,16 @@ function LivePage() {
     isCoinbaseSource(latestStreamPoint.source) && typeof latestStreamPoint.price === "number" &&
     Number.isFinite(latestStreamPoint.price) && latestStreamPoint.price > 0 &&
     Number.isFinite(latestStreamAt) && now - latestStreamAt >= -1000 && now - latestStreamAt <= 14_000;
+  // Choose the newest *verified Coinbase* observation instead of preferring an
+  // older advisory snapshot to a newer plotted SSE tick.
+  const preferStream = streamCoinbaseFresh && (!comparisonFresh || latestStreamAt >= comparisonMs);
   const coinbasePriceFresh = comparisonFresh || streamCoinbaseFresh;
-  const coinbaseDisplayPrice = comparisonFresh ? comparison?.price ?? null
-    : streamCoinbaseFresh ? latestStreamPoint?.price ?? null : null;
-  const coinbaseDisplayAt = comparisonFresh ? comparison?.asOf : streamCoinbaseFresh ? latestStreamPoint?.at : undefined;
-  const coinbaseDisplaySource = comparisonFresh ? comparison?.source ?? ""
-    : streamCoinbaseFresh ? latestStreamPoint?.source ?? "" : "";
+  const coinbaseDisplayPrice = preferStream ? latestStreamPoint?.price ?? null
+    : comparisonFresh ? comparison?.price ?? null : null;
+  const coinbaseDisplayAt = preferStream ? latestStreamPoint?.at
+    : comparisonFresh ? comparison?.asOf : undefined;
+  const coinbaseDisplaySource = preferStream ? latestStreamPoint?.source ?? ""
+    : comparisonFresh ? comparison?.source ?? "" : "";
   useEffect(() => {
     const pending = pendingPaint.current;
     if (!pending || String(stream.at(-1)?.eventId ?? "") !== pending.id) return;
@@ -574,16 +580,29 @@ function LivePage() {
     return insertTimestampGaps(
       mergeComparisonPoints(
         acceptedPoints.map(point => ({ ...point, at: Number(point.at) })),
-        stream.map(point => ({ ...point, at: Number(point.at) })),
+        [...stream.map(point => ({ ...point, at: Number(point.at) })),
+          ...(comparisonFresh && comparison && Number.isFinite(comparisonMs) && comparison.price != null
+            ? [{ at: comparisonMs, price: comparison.price, source: "Coinbase", sourceAt: comparison?.asOf }] : [])],
       ).filter(point => Number(point.at) >= Date.now() - 15 * 60_000),
       14_000,
     );
-  }, [acceptedPoints, stream, fixtureMode, fixtureNow]);
+  }, [acceptedPoints, stream, comparisonFresh, comparisonMs, comparison?.price, comparison?.asOf, fixtureMode, fixtureNow]);
 
   const chartReference=roundCurrent&&waterxReferenceValid&&round?round.referencePrice:null;
   const areaSummary=roundCurrent&&round&&chartReference!=null
-    ?computeAreaSummary(merged,chartReference,round.startMs,round.expiryMs,serverNow)
+    ?computeAreaSummary(merged,chartReference,round.startMs,round.expiryMs,now)
     :null;
+  const recentArea=roundCurrent&&round&&chartReference!=null
+    ?computeRecentAreaSummary(merged,chartReference,round.startMs,round.expiryMs,now)
+    :null;
+  const crossSource=spotMarketCheck({
+    spot:coinbaseDisplayPrice,reference:chartReference,
+    upProbability:oddsDisplay.up.probability,downProbability:oddsDisplay.down.probability,
+    priceFresh:coinbasePriceFresh,oddsFresh:oddsFresh,
+  });
+  // Recent time dominance is not the same statistic as cumulative round time.
+  const recentComplete=!!recentArea&&recentArea.coveragePercent>=80&&
+    recentArea.freshestSampleAgeMs!=null&&recentArea.freshestSampleAgeMs<=14_000;
   const mmss=(ms:number)=>`${Math.floor(ms/60000)}:${String(Math.floor(ms/1000)%60).padStart(2,"0")}`;
   const asPct=(num:number|null|undefined)=>num==null?"—":`${num.toFixed(1)}%`;
   return <div className="page live-page">
@@ -636,17 +655,26 @@ function LivePage() {
           <span>{chartReference==null?"No matched reference":round?.anchorConfirmed?"Provider confirmed":"Provisional reference"}</span>
           <span>Coinbase: <strong>{coinbasePriceFresh?fmtUsd(coinbaseDisplayPrice):"Stale / unavailable"}</strong></span>
         </div>
+        <div className={`bw-cross-source-context${crossSource.differentIndicators?" is-divergent":""}`} role="status" aria-label="WaterX odds and Coinbase price cross-check">
+          <span>{crossSource.label}</span><small>{crossSource.differentIndicators?"Independent sources; do not recolor the chart from market odds.":"Coinbase comparison · not settlement direction"}</small>
+        </div>
         <p className="bw-chart-source-note">Comparison visualization only. Coinbase is a different feed from WaterX's Chainlink TWAP60 settlement. Colors and area metrics do not predict the official result.</p>
           {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <div className="chart-empty"><Activity size={22} /><strong>Archive unavailable</strong><span>The live comparison feed remains independent.</span></div> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
              <PriceChart points={merged} interval={interval} anchor={chartReference} referenceConfirmed={round?.anchorConfirmed===true} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
           }
+        <div className="bw-recent-band" aria-label="Last 60 seconds of observed Coinbase comparison">
+          <strong>Last 60s</strong>
+          <span className="bw-recent-above">Above {recentComplete?asPct(recentArea!.aboveTimePercent):"—"}</span>
+          <span className="bw-recent-below">Below {recentComplete?asPct(recentArea!.belowTimePercent):"—"}</span>
+          <small>{recentArea?`${asPct(recentArea.coveragePercent)} coverage`:"No observed samples"}</small>
+        </div>
         <div className="bw-area-metrics" aria-label="Comparison time and signed-area measurements">
-          <div className="bw-area-metric is-above"><small>Green time · observed</small><strong>{areaSummary&&areaSummary.observedMs>0?mmss(areaSummary.aboveMs):"—"}</strong><span>{areaSummary&&areaSummary.observedMs>0?asPct(areaSummary.aboveTimePercent):"No coverage"}</span></div>
-          <div className="bw-area-metric is-below"><small>Red time · observed</small><strong>{areaSummary&&areaSummary.observedMs>0?mmss(areaSummary.belowMs):"—"}</strong><span>{areaSummary&&areaSummary.observedMs>0?asPct(areaSummary.belowTimePercent):"No coverage"}</span></div>
-          <div className="bw-area-metric"><small>Above area share</small><strong>{asPct(areaSummary?.aboveAreaPercent)}</strong><span>USD × time</span></div>
-          <div className="bw-area-metric"><small>Below area share</small><strong>{asPct(areaSummary?.belowAreaPercent)}</strong><span>USD × time</span></div>
+          <div className="bw-area-metric is-above"><small>Round above time · Coinbase</small><strong>{areaSummary&&areaSummary.observedMs>0?mmss(areaSummary.aboveMs):"—"}</strong><span>{areaSummary&&areaSummary.observedMs>0?asPct(areaSummary.aboveTimePercent):"No coverage"}</span></div>
+          <div className="bw-area-metric is-below"><small>Round below time · Coinbase</small><strong>{areaSummary&&areaSummary.observedMs>0?mmss(areaSummary.belowMs):"—"}</strong><span>{areaSummary&&areaSummary.observedMs>0?asPct(areaSummary.belowTimePercent):"No coverage"}</span></div>
+          <div className="bw-area-metric"><small>Round above area</small><strong>{asPct(areaSummary?.aboveAreaPercent)}</strong><span>USD × time</span></div>
+          <div className="bw-area-metric"><small>Round below area</small><strong>{asPct(areaSummary?.belowAreaPercent)}</strong><span>USD × time</span></div>
           <div className="bw-area-metric"><small>Net area bias</small><strong>{areaSummary?.netAreaBiasPercent!=null?`${areaSummary.netAreaBiasPercent>0?"+":""}${areaSummary.netAreaBiasPercent.toFixed(1)}%`:"—"}</strong><span>Descriptive only</span></div>
-          <div className="bw-area-metric"><small>Current streak / crosses</small><strong>{areaSummary?.currentSide?`${areaSummary.currentSide==="ABOVE"?"Green":"Red"} ${mmss(areaSummary.currentStreakMs)}`:"—"}</strong><span>{areaSummary?.observedMs?`${areaSummary.crossings} crosses`:"No coverage"}</span></div>
+          <div className="bw-area-metric"><small>Streak / crosses</small><strong>{areaSummary?.currentSide?`${areaSummary.currentSide==="ABOVE"?"Green":"Red"} ${mmss(areaSummary.currentStreakMs)}`:"—"}</strong><span>{areaSummary?.observedMs?`${areaSummary.crossings} crosses`:"No coverage"}</span></div>
         </div>
         <p className="bw-area-coverage">Observed coverage: {areaSummary?asPct(areaSummary.coveragePercent):"—"} of elapsed round. Gaps over 14s are excluded; percentages describe sampled intervals only, not a guaranteed winning probability.</p>
          {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive unavailable. Live comparison observations remain visible where available.</div>}
@@ -664,8 +692,9 @@ function LivePage() {
 function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; referenceConfirmed:boolean; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void }) {
   const measureRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const chartMeasureRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(720);
-  const [chartHeight,setChartHeight]=useState(460);
+  const [chartHeight,setChartHeight]=useState(420);
   const [textScale,setTextScale]=useState(1);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   useEffect(() => {
@@ -673,14 +702,15 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
     if (!element) return;
     const update = () => {
       setWidth(Math.max(180, Math.round(element.getBoundingClientRect().width)));
-      if(svgRef.current)setChartHeight(Math.max(180,Math.round(svgRef.current.getBoundingClientRect().height)));
+      if(chartMeasureRef.current)setChartHeight(Math.max(220,Math.round(chartMeasureRef.current.getBoundingClientRect().height)));
       setTextScale(Math.max(1,parseFloat(getComputedStyle(document.documentElement).fontSize)/16));
     };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);
+    if(chartMeasureRef.current)observer.observe(chartMeasureRef.current);
     return () => observer.disconnect();
-  }, []);
+  }, [points.length]);
   const compact = width < 390;
   const H = chartHeight, left = compact ? 51 : 74, right = compact ? 20 : 30, top = 36, bottom = 20;
   const plotRight = width - right;
@@ -711,9 +741,9 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
   });
   if (chunk.length) chunks.push(chunk);
   // Above/below is a cross-source comparison ONLY, not a settlement sign.
-  const tone = anchor==null?"neutral":latest?.price==null?"neutral":latest.price>=anchor?"positive":"negative";
   const latestAt = latest ? Number(latest.at) : NaN;
   const latestFresh = Number.isFinite(latestAt) && latestAt <= nowAt + 1000 && nowAt-latestAt <= 14000;
+  const tone = anchor==null||!latestFresh||latest?.price==null?"neutral":latest.price>=anchor?"positive":"negative";
   const selectAt = (clientX: number) => {
     const bounds = svgRef.current?.getBoundingClientRect();
     if (!bounds || !samples.length) return;
@@ -742,8 +772,8 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
       <span>COINBASE SPOT ONLY {latestFresh ? "· fresh" : "· historical/stale"} <strong>{fmtUsd(latest?.price)}</strong></span>
       <span>{anchor==null?"No matched WaterX opening reference":`Relative to WaterX opening reference ${fmtUsd(anchor)} · ${referenceConfirmed?"confirmed":"provisional"} · NOT settlement`}</span>
     </div>
-    {samples.length ? <><div className="chart-measure">
-       <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase spot observations only, neutral color, not WaterX prediction or settlement, over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
+    {samples.length ? <><div className="chart-measure" ref={chartMeasureRef}>
+       <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase spot observations only, comparison color, not WaterX prediction or settlement, over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
         <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
          {anchor!=null&&<><rect x={left} y={top} width={plotRight-left} height={Math.max(0,y(anchor)-top)} className="bw-above-zone"/><rect x={left} y={y(anchor)} width={plotRight-left} height={Math.max(0,H-bottom-y(anchor))} className="bw-below-zone"/></>}
          {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); const axisPrice = width < 500 ? new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(price) : fmtUsd(price); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 7} y={py + 4} textAnchor="end" className="axis-label">{axisPrice}</text></g>; })}
@@ -764,7 +794,7 @@ function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus
         })) : chunks.map((segment,idx)=><g key={idx}>
           {segment.length>1&&<polyline points={segment.map(p=>`${x(Number(p.at))},${y(p.price!)}`).join(" ")} className="price-line"/>}
         </g>)}
-         {latest?.price != null && <g><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="8" className="latest-halo" /><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="4" className="latest-dot" /></g>}
+         {latestFresh && latest?.price != null && <g><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="8" className="latest-halo" /><circle cx={x(Number(latest.at))} cy={y(latest.price)} r="4" className="latest-dot" /></g>}
         {active?.price != null && <g><line x1={x(Number(active.at))} x2={x(Number(active.at))} y1={top} y2={H - bottom} className="inspect-line" /><circle cx={x(Number(active.at))} cy={y(active.price)} r="5" className="inspect-point" /></g>}
         {startInside && <line x1={x(round!.startMs)} x2={x(round!.startMs)} y1={top} y2={H - bottom} className="round-boundary" />}
         {endInside && <line x1={x(round!.expiryMs)} x2={x(round!.expiryMs)} y1={top} y2={H - bottom} className="round-boundary" />}

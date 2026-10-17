@@ -25,9 +25,6 @@ export function TradeReadinessPanel({entry,timing,alignment,referenceConfirmed,m
   const winNet=gross==null?null:gross-5-costs;
   const breakeven=gross==null?null:(5+costs)/gross;
   const targetValue=valid?dollarOutcome(effectiveAsk!,5,costs):null;
-  const payoutBand=gross==null?"ENTER AN ASK TO COMPARE":
-    gross<6?"LOW RETURN · UNDER $6 GROSS":
-    gross<=8?"$6–$8 GROSS TARGET RANGE":"HIGHER GROSS · HIGHER WIN-RATE UNCERTAINTY";
   const money=(x:number|null)=>x==null?"—":`$${x.toFixed(2)}`;
   const fmtPct=(x:number|null)=>x==null?"—":`${(x*100).toFixed(1)}%`;
   const severity=timing.score>=7?"review":timing.score>=4?"watch":"avoid";

@@ -45,6 +45,8 @@ test("reconciliation promotes only an UNKNOWN receipt to ACCEPTED, with restrict
   assert.deepEqual(result, { inspected: 1, accepted: 1, held: 0, failures: 0 });
   assert.equal(statements.length, 2);
   assert.match(statements[0].sql, /status='UNKNOWN'/);
+  assert.match(statements[0].sql, /transaction_bytes IS NOT NULL/);
+  assert.match(statements[0].sql, /signer_execution_ref IS NOT NULL/);
   assert.match(statements[0].sql, /LIMIT 25/);
   assert.match(statements[1].sql, /status='ACCEPTED'/);
   assert.match(statements[1].sql, /status='UNKNOWN'/);

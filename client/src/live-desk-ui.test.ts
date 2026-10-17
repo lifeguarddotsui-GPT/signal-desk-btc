@@ -58,7 +58,7 @@ test("chart loads by default while optional research endpoints remain lazy and f
   assert.match(manual, /<SimpleLiveDesk/);
   assert.match(manual, /className="bw-primary-grid"/);
   assert.doesNotMatch(manual, /<details className="desk-advanced"/);
-  assert.match(manual, /className="desk-chart-slot"/);
+  assert.match(manual, /className="bw-focus-chart"/);
   assert.match(appSource, /computeAreaSummary\(/);
   assert.match(appSource, /useApi<RefreshHealthReport>\(refreshHealthUrl, 5000\)/);
   assert.match(appSource, /if \(fixtureMode\) \{ setStreamStatus\("FIXTURE"\); return; \}/);

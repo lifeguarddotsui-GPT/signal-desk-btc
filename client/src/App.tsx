@@ -604,14 +604,15 @@ function LivePage() {
       >
       <div className="chart-market-layout">
         <section className="chart-panel">
-        <div className="section-head chart-head"><div><div className="eyebrow">PRICE OBSERVATIONS</div><h2>BTC / USD</h2><p>Observed prices only · missing intervals remain blank.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
+        <div className="section-head chart-head"><div><div className="eyebrow">PRICE OBSERVATIONS</div><h2>BTC / USD</h2><p>Coinbase spot comparison only · NOT the WaterX oracle or settlement price. Spot may show the opposite direction.</p></div><span className={`feed-pill ${streamStatus.toLowerCase()}`}><i />{streamStatus}</span></div>
           {!fixtureMode && chart.error && chart.errorUrl === chartUrl && !chartPayload && !merged.length ? <div className="chart-empty"><Activity size={22} /><strong>Archive unavailable</strong><span>The live comparison feed remains independent.</span></div> : !fixtureMode && chart.loading && !chartPayload && !merged.length ? <Skeleton height={330} /> :
-             <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
+             <PriceChart points={merged} interval={interval} anchor={waterxReferenceValid ? round?.referencePrice ?? null : null} referenceConfirmed={round?.anchorConfirmed === true} streamStatus={streamStatus} round={roundCurrent ? round : null} archiveWindow={chartPayload?.windowMinutes} coveragePartial={chartPayload?.coverage?.partial === true} windowMode={chartWindow} onWindowChange={setChartWindow} />
           }
          {chart.error && chart.errorUrl === chartUrl && <div className="reference-absent">Archive unavailable. Live comparison observations remain visible where available.</div>}
           {chartPayload?.coverage?.partial && (typeof chartWindow === "number" || chartWindow === "round") && <div className="gap-caption">Rolling archive coverage{chartPayload.coverage.percent != null ? ` · ${chartPayload.coverage.percent}% reported` : ""}{chartPayload.coverage.reason ? ` · ${chartPayload.coverage.reason}` : ""}. This does not describe complete coverage of the current round.</div>}
         {chartPayload && !archiveMatches && <div className="gap-caption">Archive source mismatch: historical points withheld; expected Coinbase comparison data.</div>}
-        <div className="legend-row"><span><i className="legend-price" /> Coinbase observations</span><span><i className="legend-anchor" /> WaterX price to beat</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
+        <div className="chart-cross-source-caution" role="note"><strong>NOT A WATERX UP/DOWN SIGNAL</strong> The chart is Coinbase spot; WaterX shows a separate Oracle preview and resolves using Chainlink BTC/USD TWAP. Green on WaterX can coincide with a lower Coinbase spot price. Trust WaterX for its live oracle preview; neither preview guarantees the final settlement.</div>
+        <div className="legend-row"><span><i className="legend-price" /> Coinbase spot (comparison only)</span><span><i className="legend-anchor" /> WaterX starting reference (different source)</span><span className="legend-stamp">Archive: {chartPayload?.source || "not reported"} · stream: Coinbase</span></div>
         <div className="chart-foot"><span>{merged.length.toLocaleString()} retained archive + live observations{typeof chartWindow === "number" ? ` · rolling archive coverage ${chartPayload?.coverage?.percent == null ? "not reported" : `${chartPayload.coverage.percent}%`}` : " · active-round window; archive coverage is separate"}</span></div>
       </section>
       </div>
@@ -619,7 +620,7 @@ function LivePage() {
   </div>;
 }
 
-function PriceChart({ points, interval, anchor, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void }) {
+function PriceChart({ points, interval, anchor, referenceConfirmed, streamStatus, round, archiveWindow, coveragePartial, windowMode, onWindowChange }: { points: Point[]; interval: Interval; anchor: number | null; referenceConfirmed:boolean; streamStatus: string; round: LivePayload["round"]; archiveWindow?: number; coveragePartial: boolean; windowMode: "observed" | "round" | 5 | 15; onWindowChange: (mode: "observed" | "round" | 5 | 15) => void }) {
   const measureRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(720);
@@ -668,7 +669,7 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
     else chunk.push(p);
   });
   if (chunk.length) chunks.push(chunk);
-  const tone = anchor == null || latest?.price == null ? "neutral" : latest.price >= anchor ? "positive" : "negative";
+  // Coinbase and WaterX/Chainlink are different price feeds. A cross-source\n  // comparison CANNOT identify WaterX UP or DOWN, so never render red/green.\n  const tone = "neutral";\n  const latestAt = latest ? Number(latest.at) : NaN;\n  const latestFresh = Number.isFinite(latestAt) && latestAt <= nowAt + 1000 && nowAt-latestAt <= 14000;
   const selectAt = (clientX: number) => {
     const bounds = svgRef.current?.getBoundingClientRect();
     if (!bounds || !samples.length) return;
@@ -694,13 +695,13 @@ function PriceChart({ points, interval, anchor, streamStatus, round, archiveWind
       {active && <button className="return-live" onClick={() => setSelectedKey(null)}>Return to live</button>}
     </div>
     <div className="chart-price-labels">
-      <span>Latest observed BTC <strong>{fmtUsd(latest?.price)}</strong></span>
-      {anchor!=null&&<span>WaterX price to beat <strong>{fmtUsd(anchor)}</strong></span>}
+      <span>Coinbase spot {latestFresh ? "· fresh" : "· historical/stale"} <strong>{fmtUsd(latest?.price)}</strong></span>
+      {anchor!=null&&<span>WaterX beginning reference {referenceConfirmed ? "· confirmed" : "· unconfirmed"} <strong>{fmtUsd(anchor)}</strong></span>}
     </div>
     {samples.length ? <><div className="chart-measure">
-       <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase BTC comparison observations over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
+       <svg ref={svgRef} className={`price-chart ${tone}`} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`Coinbase spot observations only, neutral color, not WaterX prediction or settlement, over ${activeWindowMode === "round" || activeWindowMode === "observed" ? "the active round through close" : `${activeWindowMode} minutes`}; gaps are not interpolated${anchor == null ? "" : "; dashed line is the current WaterX reported reference"}`}>
         <defs><linearGradient id="price-underlay" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" className="area-start" stopOpacity=".22" /><stop offset="100%" className="area-start" stopOpacity="0" /></linearGradient></defs>
-         {anchor != null && <><rect x={left} y={top} width={plotRight - left} height={Math.max(0, y(anchor) - top)} className="reference-zone-above" /><rect x={left} y={y(anchor)} width={plotRight - left} height={Math.max(0, H - bottom - y(anchor))} className="reference-zone-below" /></>}
+         {/* Do not shade above/below zones when plotting Coinbase against a different WaterX oracle. */}
          {[0, .5, 1].map((f, i) => { const py = top + f * (H - top - bottom); const price = hi - f * (hi - lo); const axisPrice = width < 500 ? new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(price) : fmtUsd(price); return <g key={i}><line x1={left} x2={plotRight} y1={py} y2={py} className="gridline" /><text x={left - 7} y={py + 4} textAnchor="end" className="axis-label">{axisPrice}</text></g>; })}
          {axisTicks.map(tick=><line key={tick.at} x1={x(tick.at)} x2={x(tick.at)} y1={top} y2={H-bottom} className="time-tick" />)}
           {nowInside && <><rect x={nowX} y={top} width={Math.max(0, plotRight - nowX)} height={H - top - bottom} className="future-shade" /><line x1={nowX} x2={nowX} y1={top} y2={H - bottom} className="now-line" /><text x={nowLabelX} y={top + 13} textAnchor={nowLabelRightAligned ? "end" : "start"} className="now-label">NOW</text></>}

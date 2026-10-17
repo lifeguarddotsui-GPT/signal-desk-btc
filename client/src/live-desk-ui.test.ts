@@ -59,7 +59,7 @@ test("development fixtures disable live polling, and research endpoints stay laz
   assert.match(manual, /className="desk-advanced"/);
   assert.match(appSource, /onAdvancedToggle=\{setAdvancedOpen\}/);
   assert.match(appSource, /useApi<RefreshHealthReport>\(refreshHealthUrl, 5000\)/);
-  assert.match(appSource, /if \(fixtureMode\) \{ setStreamStatus\("FIXTURE"\); return; \}/);
+  assert.match(appSource, /if \(fixtureMode \|\| !advancedOpen\) \{ setStreamStatus\(fixtureMode \? "FIXTURE" : "CONNECTING"\); return; \}/);
   assert.match(appSource, /"normal".*"loading".*"request-failure".*"rollover".*"locked"/);
   assert.match(appSource, /fixtureMode === "loading" \|\| fixtureMode === "request-failure"/);
 });

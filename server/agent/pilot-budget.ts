@@ -11,7 +11,6 @@ export type PilotBudgetPreview = {
   reserveCents: number;
   hypotheticalStakeCents: number;
   targetStakeCents: number;
-  allInFeeHeadroomCents: number;
   blockers: string[];
   orderAuthorized: false;
 };
@@ -40,6 +39,5 @@ export function previewPilotBudget(balanceAtomic: string, policy: AgentPolicy): 
   return {status:cents===0?"UNFUNDED":"PREFLIGHT_ONLY",
     availableCents:cents,reserveCents:p.reserveCents,hypotheticalStakeCents,
     targetStakeCents:p.sizingMode==="FIXED"?p.fixedCents:hypotheticalStakeCents,
-    allInFeeHeadroomCents:Math.max(0,p.roundCollateralCents-hypotheticalStakeCents),
     blockers,orderAuthorized:false};
 }

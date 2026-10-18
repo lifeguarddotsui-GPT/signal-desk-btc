@@ -19,11 +19,11 @@ export function previewPilotBudget(balanceAtomic: string, policy: AgentPolicy): 
   const p=agentPolicySchema.parse(policy);
   if(!/^(0|[1-9]\d*)$/.test(balanceAtomic))throw new Error("Exact nonnegative WaterX USD atomic credit required");
   const credit=BigInt(balanceAtomic);
-  if(credit>BigInt(Number.MAX_SAFE_INTEGER)*10000n)
+  if(credit>BigInt(Number.MAX_SAFE_INTEGER)*BigInt(10000))
     throw new Error("Credit exceeds safe preview range");
   // WaterX USD carries six decimals; exactly 10,000 atomic USD = 1 cent.
   // Fractional cents remain unspendable in a cent-based policy preview.
-  const cents=Number(credit/10000n);
+  const cents=Number(credit/BigInt(10000));
   const e:Equity={availableCents:cents,committedCents:0,startingCents:cents,
     dayStartingCents:cents,dayTurnoverCents:0,dayRealizedPnlCents:0,
     highWaterCents:cents,consecutiveLosses:0};

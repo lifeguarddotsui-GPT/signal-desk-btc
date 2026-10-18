@@ -74,7 +74,10 @@ export async function beginExecutionSubmission(id:string,owner:string,db:Pool=ag
     FROM bluewater_execution_sessions s,bluewater_agents a WHERE i.id=$1 AND i.owner=$2 AND i.status='PREPARED'
     AND s.id=i.session_id AND s.status='ARMED' AND s.expires_at_ms>$3 AND i.expiry_ms>$3
     AND a.owner=i.owner AND a.account_id=i.account_id AND a.policy_version=i.policy_version
-    AND a.status IN ('RUNNING','LIVE') RETURNING i.*`,
+    AND a.status IN ('RUNNING','LIVE')
+    AND EXISTS (SELECT 1 FROM bluewater_agent_execution_control gate
+      WHERE gate.singleton=true AND gate.disabled=false)
+    RETURNING i.*`,
     [id,owner,Date.now()]);
   return r.rows[0]??null;
 }

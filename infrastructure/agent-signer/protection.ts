@@ -24,7 +24,7 @@ export async function verifySignerPermit(message:Uint8Array,signature:string,now
   const p=signerPermitSchema.parse(JSON.parse(new TextDecoder().decode(message)));
   for(const a of [p.owner,p.accountId,p.delegateAddress])if(!isValidSuiAddress(a))throw new Error("Invalid permit address");
   if(p.policy.network!=="mainnet"||p.policy.signalSource!=="EXPERIMENTAL_QUALIFICATION_GATES"||
-    !p.experimentalConfirmed||p.policy.compound&&!p.compoundingConfirmed||
+    !p.experimentalConfirmed||!p.pilotOneOrder||p.policy.compound&&!p.compoundingConfirmed||
     p.issuedAtMs>now||p.expiresAtMs<=now||p.expiresAtMs-p.issuedAtMs>p.policy.sessionDurationMs||
     p.policy.sessionGasBudgetMist<1)throw new Error("Unapproved or expired mainnet session permit");
   const key=await verifyPersonalMessageSignature(message,signature);

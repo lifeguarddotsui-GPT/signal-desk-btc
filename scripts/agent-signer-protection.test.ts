@@ -36,6 +36,9 @@ test("wallet login is not a trading permit; session authority binds the owner, s
   const edited=new TextEncoder().encode(JSON.stringify({...permit,policyVersion:2}));
   await assert.rejects(verifySignerPermit(edited,signed.signature,now));
   await assert.rejects(verifySignerPermit(message,signed.signature,now+60001));
+  const noPilotMessage=new TextEncoder().encode(JSON.stringify({...permit,pilotOneOrder:false}));
+  const noPilotSigned=await owner.signPersonalMessage(noPilotMessage);
+  await assert.rejects(verifySignerPermit(noPilotMessage,noPilotSigned.signature,now));
   const login=new TextEncoder().encode("Bluewater Agent wallet verification");
   const loginSig=await owner.signPersonalMessage(login);
   await assert.rejects(verifySignerPermit(login,loginSig.signature,now));

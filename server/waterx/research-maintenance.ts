@@ -5,7 +5,9 @@ import {
 } from "./research-store";
 import { getResearchReport } from "./research-report";
 import { waterxLive } from "./service";
-import { RESEARCH_MAINTENANCE_PERIOD_MS } from "./maintenance-cadence";
+import {
+  RESEARCH_MAINTENANCE_PERIOD_MS, maintenanceDue, researchMaintenanceCadenceMs,
+} from "./maintenance-cadence";
 import { maintainLockEvidence } from "./lock-maintenance";
 import type { ResearchInterval } from "../../shared/waterx-research";
 import {
@@ -102,6 +104,7 @@ async function reconcileDisputedLifecycleResults(interval:ResearchInterval,now=D
 export function startResearchMaintenance() {
   let stopped=false,working=false,lastAlertCheck=0;
   const alertLogged=new Map<ResearchInterval,number>();
+  const lastCompletedPassAtMs=new Map<ResearchInterval,number>();
   async function run() {
     if(stopped||working||!process.env.DATABASE_URL) return;
     working=true;
@@ -110,6 +113,12 @@ export function startResearchMaintenance() {
         if(stopped) break;
         try {
           const now=Date.now(),live=waterxLive(interval);
+          // The deprecated 15m market still needs eventual retrospective catch-up,
+          // but must not repeatedly scan settled history while it is inactive.
+          // Live 5m research and any reactivated live 15m market retain 60s work.
+          const cadenceMs=researchMaintenanceCadenceMs(
+            interval,live.status==="LIVE"&&!!live.round);
+          if(!maintenanceDue(lastCompletedPassAtMs.get(interval),now,cadenceMs))continue;
           if(live.status!=="LIVE"||!live.round) await recordResearchIdentityFailure(interval,now);
           await reconcileMissedResearchChoices(interval,now);
           if(stopped)break;
@@ -128,6 +137,7 @@ export function startResearchMaintenance() {
               alertLogged.set(interval,now);
             }
           }
+          lastCompletedPassAtMs.set(interval,now);
         } catch(error) {
           if(!researchSchemaMissing(error)) console.warn(`[waterx-${interval}m] research maintenance failed:`,
             error instanceof Error ? error.message.slice(0,180) : "unknown failure");

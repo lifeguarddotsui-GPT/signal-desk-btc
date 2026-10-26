@@ -23,4 +23,4 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
       - name: EV and chart-feature regression tests
-        run: node --import tsx --test scripts/waterx-ev-evidence.test.ts scripts/waterx-price-path-features.test.ts
+        run: node --import tsx --test scripts/waterx-ev-evidence.test.ts scripts/waterx-price-path-features.test.ts scripts/bluewater-research.test.ts

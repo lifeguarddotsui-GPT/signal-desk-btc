@@ -39,5 +39,8 @@ WaterX example published rules: https://waterx.app/en/predict/market/crypto/cryp
 
 **Phase D — release gates.** No use of live agent execution before signed custody tests, mandatory user approval, cheap/verified execution source, cutoff/latency validation, positive conservative **fillable** EV, pause and revocation proof, and explicit publication approval. No promise of $1–$2 per trade; loss of the whole stake remains possible.
 
+## Existing dependency security signal
+A branch-only GitHub Actions \`npm ci\` run reported **18 dependency advisories (1 critical, 13 high, 2 moderate, 2 low)** from the current lockfile. Severity alone does not determine runtime exposure. Before any production release, inspect \`npm audit --json\`, distinguish runtime and development dependency paths, resolve applicable advisories with compatibility tests, and avoid unreviewed forced dependency upgrades. No dependency versions were changed by this audit.
+
 ## Verification / cost control
 From a local Git checkout: `npm ci`, `npx tsc --noEmit`, `npm test`, then inspect a development-only sample report and compare with a known WaterX settlement. These commands have **not** been executed by the connector in this task; tests are committed for the subsequent review. No new npm dependency or Replit Agent call is required for this branch. Do not merge/publish until all gates pass. This change does not turn on extra polling or require paid background infrastructure.

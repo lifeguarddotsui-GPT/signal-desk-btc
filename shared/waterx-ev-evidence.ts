@@ -195,6 +195,6 @@ export function auditWaterxValueCohort(rows: readonly ValueEvidenceRow[]): Value
     meanModelExpectedNetUsd: matched ? ev / matched : null,
     meanQuoteBreakEvenProbability: matched ? breakEvenSum / matched : null,
     hypotheticalTargetWinProfitCount: target,
-    reasons: [...reasons],
+    reasons: Array.from(reasons),
   };
 }

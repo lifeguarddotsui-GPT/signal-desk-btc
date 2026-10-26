@@ -28,8 +28,8 @@ test("60-second green/red durations use time, not number of ticks", () => {
 test("two crossings split each trapezoid at the exact reference-crossing time", () => {
   const r = measureWaterxPricePath({ decisionAtMs:at,anchorPrice:100,anchorConfirmed:true,
     ticks:samples([90,110,90,110,90,110,90]) });
-  assert.equal(r.features?.greenSeconds,30);
-  assert.equal(r.features?.redSeconds,30);
+  assert.ok(Math.abs(r.features!.greenSeconds - 30) < 1e-9);
+  assert.ok(Math.abs(r.features!.redSeconds - 30) < 1e-9);
   assert.ok(Math.abs(r.features!.signedAreaBpsSeconds) < 1e-9);
 });
 

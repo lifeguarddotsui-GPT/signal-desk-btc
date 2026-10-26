@@ -83,12 +83,13 @@ export function getBluewaterReport(interval:5|15,round:{id:string}|null=null,db:
 }
 async function readReport(interval:5|15,round:{id:string}|null,db:Db,now:number):Promise<BluewaterReport>{
   const empty:BluewaterReport={intervalMinutes:interval,asOf:new Date(now).toISOString(),schemaStatus:"unavailable",
-    reason:null,status:"INSUFFICIENT",developmentOnly:true,champion:null,challengers:[],qualifiedCalibration:false,
+    reason:null,status:"INSUFFICIENT",developmentOnly:true,champion:null,challengers:[],qualifiedCalibration:false,valueAudit:null,
     currentForecast:null,priorForecast:null,funnels:[],training:{canonical:0,rich:0,currentAudit:null,lastDailyRun:null},
     comparisons:[],mistakes:[],research:{lastRun:null,mode:"bounded-report-only-planner",hypotheses:[],experiments:[]},
     promotion:{automatic:false,eligible:false,reasons:["No qualified manually approved champion."],reports:[]},
     featureSchema:FEATURE_SCHEMA,featureNames:[...FEATURE_NAMES],limitations:[
       "No production release, wallet execution, live trading or verified net entry economics.",
+      "Value audit unavailable until independently verified executable quotes, fee proofs, settlement matches and accepted fills have been collected.",
       "WaterX baseline is a market control, not independent AI. Shadow probability is never qualified public Bluewater probability.",
       "Legacy unpinned choices retain original evidence and are excluded from new pinned on-time/late timing classifications.",
       "Bounded 14-day / 5000-choice reports; opportunistic collector cannot prove continuous coverage or recover sleeping intervals.",

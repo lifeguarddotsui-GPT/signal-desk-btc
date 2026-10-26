@@ -22,6 +22,8 @@ export type PathFeatures = Readonly<{
   signedAreaBpsSeconds: number;
   averageSignedDistanceBps: number;
   sampleCount: number;
+  windowEndAtMs: number;
+  sourceAgeMs: number;
 }>;
 export type PathResult = Readonly<{ features: PathFeatures | null; reason: string | null }>;
 
@@ -48,18 +50,25 @@ export function measureWaterxPricePath(input: {
       !finite(seconds) || seconds < 15 || seconds > 180 ||
       !Number.isInteger(maxGapMs) || maxGapMs <= 0 || maxGapMs > 15_000)
     return fail("Confirmed WaterX anchor, valid point-in-time clock and bounded lookback are required.");
-  const from = decisionAtMs - seconds * 1000;
   if (!Array.isArray(input.ticks) || input.ticks.length < 2)
     return fail("Insufficient price path samples.");
-  // Reject future-received data rather than quietly rewriting its provenance.
-  const sorted = input.ticks.filter(t => t.sourceAtMs >= from - maxGapMs && t.sourceAtMs <= decisionAtMs)
-    .sort((a,b) => a.sourceAtMs - b.sourceAtMs);
+  // End at the latest actually observed tick, never fill an unavailable final
+  // segment by extrapolating into the decision instant.
+  const candidates = input.ticks.filter(t =>
+    t.sourceAtMs >= decisionAtMs - seconds * 1000 - 2 * maxGapMs &&
+    t.sourceAtMs <= decisionAtMs).sort((a,b) => a.sourceAtMs - b.sourceAtMs);
+  const endAtMs = candidates.at(-1)?.sourceAtMs;
+  if (endAtMs === undefined || decisionAtMs - endAtMs > maxGapMs)
+    return fail("No sufficiently fresh comparison tick at decision time.");
+  const from = endAtMs - seconds * 1000;
+  // Reject future-received data rather than rewriting its provenance.
+  const sorted = candidates.filter(t => t.sourceAtMs >= from - maxGapMs);
   if (sorted.some(t => !finite(t.sourceAtMs) || !finite(t.receivedAtMs) ||
         !finite(t.price) || t.price <= 0 || t.sourceAtMs > t.receivedAtMs ||
         t.receivedAtMs > decisionAtMs)) return fail("An invalid or post-decision tick contaminates the feature path.");
   if (sorted.length < 2 || sorted[0].sourceAtMs > from ||
       sorted[0].sourceAtMs < from - maxGapMs ||
-      sorted.at(-1)!.sourceAtMs !== decisionAtMs ||
+      sorted.at(-1)!.sourceAtMs !== endAtMs ||
       sorted.some((tick,i) => i>0 &&
         (tick.sourceAtMs <= sorted[i-1].sourceAtMs ||
          tick.sourceAtMs - sorted[i-1].sourceAtMs > maxGapMs)))
@@ -96,6 +105,6 @@ export function measureWaterxPricePath(input: {
     greenSeconds,redSeconds,greenFraction:greenSeconds/seconds,redFraction:redSeconds/seconds,
     greenAreaBpsSeconds:greenArea,redAreaBpsSeconds:redArea,
     signedAreaBpsSeconds:area,averageSignedDistanceBps:area/seconds,
-    sampleCount:sorted.length,
+    sampleCount:sorted.length,windowEndAtMs:endAtMs,sourceAgeMs:decisionAtMs-endAtMs,
   }};
 }

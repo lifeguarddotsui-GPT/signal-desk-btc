@@ -1,5 +1,6 @@
 import * as React from "react";
 import type { BluewaterForecast, BluewaterReport } from "../../shared/bluewater-research";
+import { WaterxValueEvidencePanel } from "./WaterxValueEvidencePanel";
 import { captureRateLabel } from "../../shared/bluewater-display";
 
 type Interval = 5 | 15;
@@ -111,6 +112,7 @@ export function BluewaterResearchPanel({ report, interval, round = null, loading
 
   return <div className={`bluewater-report${compact ? " is-compact" : ""}`} aria-label={`${interval}-minute Bluewater research report`}>
     <StatusCard report={matchedReport} interval={interval} round={round} />
+    {!compact && <WaterxValueEvidencePanel audit={matchedReport.valueAudit ?? null} />}
     {error && <div className="bluewater-refresh-warning" role="status"><span>Refresh failed · showing the last interval-matched report. Current forecast remains withheld unless exact round identity is current.</span><button className="quiet-button" onClick={retry}>Retry</button></div>}
     {!compact && <section className="bluewater-learning panel">
       <div className="bluewater-status-head"><div><span className="eyebrow">AUDITABLE PROBABILITY EVIDENCE</span><h2>Learning record</h2></div><span className="bluewater-asof">As of {time(matchedReport.asOf)}</span></div>

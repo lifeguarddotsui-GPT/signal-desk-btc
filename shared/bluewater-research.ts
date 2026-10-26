@@ -27,6 +27,7 @@ export type BluewaterFunnel = {
 export type BluewaterComparison = {
   artifactId: string; modelFamily: BluewaterFamily; matchedN: number;
   candidate: BluewaterMetrics; baseline: BluewaterMetrics;
+  uncertaintyDayBlocks?: number;
   pairedBrierDifference: { mean: number; lower95: number; upper95: number } | null;
 };
 export type BluewaterReport = {

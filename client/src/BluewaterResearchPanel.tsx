@@ -99,7 +99,7 @@ function Comparison({ row }: { row: BluewaterReport["comparisons"][number] }) {
     <div><b>{row.artifactId}</b><small>{row.modelFamily} · matched n {count(row.matchedN)}</small></div>
     <span>Bluewater candidate <b>Brier {score(row.candidate.brier)} · log loss {score(row.candidate.logLoss)}</b></span>
     <span>WaterX Market Baseline <b>Brier {score(row.baseline.brier)} · log loss {score(row.baseline.logLoss)}</b></span>
-    <span>Paired Brier difference <b>{row.pairedBrierDifference ? `${score(row.pairedBrierDifference.mean)} · 95% ${score(row.pairedBrierDifference.lower95)} to ${score(row.pairedBrierDifference.upper95)}` : "Not reported"}</b></span>
+    <span>Day-blocked Brier difference · {row.uncertaintyDayBlocks ?? "?"} UTC blocks <b>{row.pairedBrierDifference ? `${score(row.pairedBrierDifference.mean)} · 95% ${score(row.pairedBrierDifference.lower95)} to ${score(row.pairedBrierDifference.upper95)}` : "Not reported"}</b></span>
   </article>;
 }
 

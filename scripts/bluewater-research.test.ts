@@ -121,10 +121,11 @@ test("promotion remains manual and refuses tiny, short, uncalibrated or disputed
 });
 test("qualified descriptive promotion report still has no automatic activation",()=>{
   const input:MatchedPoint[]=Array.from({length:100},(_,i)=>({key:String(i),artifactId:"a",modelFamily:"rich_logistic",
-    probability:i%2?.9:.1,baseline:.5,outcome:i%2?"UP":"DOWN",decisionAtMs:now-i*3600000}));
-  const gate=promotionGate({interval:5,comparison:paired(input,"a"),spanMs:99*3600000,
+    probability:i%2?.9:.1,baseline:.5,outcome:i%2?"UP":"DOWN",decisionAtMs:now-i*2*3600000}));
+  const gate=promotionGate({interval:5,comparison:paired(input,"a"),spanMs:99*2*3600000,
     chronologicalEligible:true,calibrated:true,integrityIssues:[],hasChampion:false});
   assert.equal(gate.eligible,true);assert.equal(gate.automatic,false);
+  assert.ok(gate.comparison.uncertaintyDayBlocks!>=7);
 });
 test("future risk and paper interfaces do not implement signing or live execution",()=>{
   const source=readFileSync("shared/bluewater-paper-boundary.ts","utf8");

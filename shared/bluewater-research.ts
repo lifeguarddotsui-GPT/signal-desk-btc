@@ -1,3 +1,5 @@
+import type { ValueAudit } from "./waterx-ev-evidence";
+
 export type BluewaterFamily = "platt_waterx" | "rich_logistic" | "rich_logistic_no_market";
 export type BluewaterMetrics = {
   n: number; brier: number | null; logLoss: number | null; accuracy: number | null;
@@ -43,6 +45,7 @@ export type BluewaterReport = {
     hypotheses: { hypothesis: string; reason: string; experiment: Record<string, unknown> }[];
     experiments: { id: string; kind: string; status: string; createdAt: string; result: unknown }[] };
   promotion: { automatic: false; eligible: boolean; reasons: string[]; reports: unknown[] };
+  valueAudit?: ValueAudit | null;
   featureSchema: string; featureNames: string[]; limitations: string[];
   baselineMetrics?:BluewaterMetrics;
   mistakeAggregates?:Record<string,Record<string,number>>;

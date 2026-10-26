@@ -34,7 +34,7 @@ export function paired(rows:MatchedPoint[],artifactId:string):BluewaterCompariso
     const day=Math.floor(row.decisionAtMs/86_400_000);
     const b=days.get(day)??{sum:0,n:0};b.sum+=delta;b.n++;days.set(day,b);
   }
-  const blockMeans=[...days.values()].map(x=>x.sum/x.n);
+  const blockMeans=Array.from(days.values()).map(x=>x.sum/x.n);
   const mean=blockMeans.length?blockMeans.reduce((a,b)=>a+b,0)/blockMeans.length:0;
   const variance=blockMeans.length>1?blockMeans.reduce((a,b)=>a+(b-mean)**2,0)/(blockMeans.length-1):0;
   // t critical at df=6, conservative for >=7 days (higher df -> smaller).
